@@ -91,7 +91,7 @@ def _unpack_train_batch(batch, device):
 
 def _weighted_smooth_l1(pred_loc, target, sample_weight, beta=0.001):
     if sample_weight is None:
-        return F.smooth_l1_loss(pred_loc, target, beta)
+        return F.smooth_l1_loss(pred_loc, target, beta=beta)
     loss = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(dim=(1, 2))
     return (loss * sample_weight).mean()
 
@@ -143,6 +143,7 @@ def main():
         args.local_rank = 0
     torch.cuda.set_device(args.local_rank)
     dist.init_process_group("nccl", rank=args.local_rank, init_method="env://")
+    device = torch.device("cuda", args.local_rank)
 
     backend_map = {
         SDPBackend.MATH: {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
@@ -233,10 +234,10 @@ def main():
             train_sampler.set_epoch(epoch)
             for batch_idx, batch in enumerate(train_dataloader):
                 optimizer.zero_grad()
-                data, target, heatmap, sample_weight = _unpack_train_batch(batch, args.local_rank)
+                data, target, heatmap, sample_weight = _unpack_train_batch(batch, device)
                 loss = 0
-                loss_loc = torch.tensor(0.0, device=args.local_rank)
-                loss_heatmap = torch.tensor(0.0, device=args.local_rank)
+                loss_loc = torch.tensor(0.0, device=device)
+                loss_heatmap = torch.tensor(0.0, device=device)
                 # if True:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     pred_info = net(data)
@@ -284,8 +285,8 @@ def main():
                     IONs = None
                     for batch_idx, batch in enumerate(tqdm(test_dataloader)):
                         data, target = _unpack_eval_batch(batch)
-                        data = data.to(args.local_rank)
-                        keypoints = target.to(args.local_rank)
+                        data = data.to(device)
+                        keypoints = target.to(device)
                         pred_keypoints, heatmap = net(data)[-1]
                         sum_ion, ion_list = calc_nme(pred_keypoints, keypoints, data_name=args.data_name)
                         SME += sum_ion
@@ -310,8 +311,8 @@ def main():
                     IONs = None
                     for batch_idx, batch in enumerate(tqdm(test_dataloader)):
                         data, target = _unpack_eval_batch(batch)
-                        data = data.to(args.local_rank)
-                        keypoints = target.to(args.local_rank)
+                        data = data.to(device)
+                        keypoints = target.to(device)
                         pred_keypoints, heatmap = ema(data)[-1]
                         sum_ion, ion_list = calc_nme(pred_keypoints, keypoints, data_name=args.data_name)
                         SME += sum_ion
