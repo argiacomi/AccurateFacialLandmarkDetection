@@ -122,8 +122,6 @@ The output includes:
 
 ```text
 data/landmarks/production_validated/manifest.json
-data/landmarks/production_validated/resolver_metadata.jsonl
-data/landmarks/production_validated/audit.json
 data/landmarks/production_validated/landmarks/*.npy
 ```
 
@@ -140,7 +138,7 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
   --heatmap-size 32
 ```
 
-Production runtime buckets such as `frontal`, `intermediate`, `large_yaw_left`, `profile_right`, `large_roll`, `extreme_roll`, and rolled profile/yaw buckets are recognized during hard-negative classification. Review `runs/.../datasets/production_validated/audit.json`, `runs/.../hard_negative_mix/hard_negative_mix.json`, and `dataset_audit.json` to confirm how many production samples land in each bucket.
+Production runtime buckets such as `frontal`, `intermediate`, `large_yaw_left`, `profile_right`, `large_roll`, `extreme_roll`, and rolled profile/yaw buckets are recognized during hard-negative classification. Review `runs/.../hard_negative_mix/hard_negative_mix.json` and `dataset_audit.json` to confirm how many production samples land in each bucket.
 
 Because `.fsa` files are compressed pickle files, only use `--prod-dir` with trusted local production directories.
 
