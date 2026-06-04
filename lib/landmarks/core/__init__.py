@@ -1,0 +1,1 @@
+"""Core landmark schema helpers."""
