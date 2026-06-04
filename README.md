@@ -116,10 +116,6 @@ After running the setup script, launch the pipeline using the generated source a
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
   --dataset wflw,cofw,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
   $(tr "\n" " " < runs/landmarks/quality_datasets/dataset_source_args.txt) \
-  --max-profile-occlusion 50000 \
-  --max-profile 50000 \
-  --max-occlusion 50000 \
-  --max-anchors 50000 \
   --nproc-per-node 2 \
   --batch-size 16 \
   --epoch 500 \
@@ -129,9 +125,33 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
 Pipeline stages:
 
 1. `build_dataset_manifests`: calls local `tools/landmarks/build_quality_dataset.py` once per dataset.
-2. `build_hard_negative_manifest`: calls local `tools/landmarks/build_hard_negative_manifest.py` to create the biased hard-negative mix.
+2. `build_hard_negative_manifest`: calls local `tools/landmarks/build_hard_negative_manifest.py` to create a ratio-based hard-negative mix.
 3. `validate_cdvit_manifest`: verifies that the final manifest has readable `(68, 2)` landmark `.npy` files.
 4. `train_cdvit`: launches `TrainHeatmapStageFP16.py --data_name FS68Manifest` with the mined manifest.
+
+### Hard-negative mix defaults
+
+`build_hard_negative_manifest.py` now samples by ratio/percentage rather than by fixed bucket caps. The default target is 200,000 samples with this hard-negative-heavy ratio:
+
+```text
+profile_occlusion = 3
+profile           = 2
+occlusion         = 2
+anchor            = 1
+```
+
+That corresponds to target percentages of 37.5%, 25%, 25%, and 12.5%. If one bucket has too few samples, the remaining capacity is redistributed to the other buckets with available samples. The resulting `hard_negative_mix.json` reports available counts, target counts, actual percentages, and any optional ceilings.
+
+Override the defaults by passing hard-negative builder args through the pipeline:
+
+```bash
+python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
+  --hard-negative-arg "--total-samples 100000" \
+  --hard-negative-arg "--bucket-percentages profile_occlusion=30,profile=30,occlusion=25,anchor=15" \
+  ...
+```
+
+The old `--max-profile-occlusion`, `--max-profile`, `--max-occlusion`, and `--max-anchors` flags still exist as optional hard ceilings, but they are no longer the primary way to define the mix.
 
 Useful controls:
 
