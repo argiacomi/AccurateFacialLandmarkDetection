@@ -27,6 +27,8 @@ import random
 # from torch.cuda.amp import autocast as autocast
 
 
+FS68_DATASET_NAME = "FS68Manifest"
+
 
 def setup_seed(seed=0):
     torch.manual_seed(seed)
@@ -36,7 +38,73 @@ def setup_seed(seed=0):
     torch.backends.cudnn.deterministic = True
 
 
+def _landmark_count_for_dataset(args):
+    if args.data_name == "WFLW":
+        return 98
+    if args.data_name == "COFW":
+        return 29
+    if args.data_name == "300W":
+        return 68
+    if args.data_name == FS68_DATASET_NAME:
+        return int(args.lmk_num)
+    raise ValueError(f"unknown data_name: {args.data_name}")
 
+
+def _manifest_for_split(args, split):
+    if split == "train":
+        return args.train_manifest or args.manifest or args.root_folder
+    if split == "test":
+        return args.test_manifest or args.manifest or args.root_folder
+    return args.manifest or args.root_folder
+
+
+def _build_dataset(args, split, aug, heatmap_size=0):
+    manifest_path = _manifest_for_split(args, split) if args.data_name == FS68_DATASET_NAME else ""
+    return GetDataset(
+        args.data_name,
+        args.root_folder,
+        split,
+        preload=args.preload != 0,
+        aug=aug,
+        heatmap_size=heatmap_size,
+        manifest_path=manifest_path,
+    )
+
+
+def _unpack_train_batch(batch, device):
+    if len(batch) == 4:
+        data, target, heatmap, sample_weight = batch
+    elif len(batch) == 3:
+        data, target, heatmap = batch
+        sample_weight = None
+    else:
+        raise ValueError(f"expected train batch with 3 or 4 items, got {len(batch)}")
+
+    data = data.to(device)
+    target = target.to(device).float()
+    heatmap = heatmap.to(device)
+    if sample_weight is not None:
+        sample_weight = sample_weight.to(device).float()
+        sample_weight = sample_weight / sample_weight.mean().clamp_min(1e-6)
+    return data, target, heatmap, sample_weight
+
+
+def _weighted_smooth_l1(pred_loc, target, sample_weight, beta=0.001):
+    if sample_weight is None:
+        return F.smooth_l1_loss(pred_loc, target, beta)
+    loss = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(dim=(1, 2))
+    return (loss * sample_weight).mean()
+
+
+def _heatmap_batch_weight(sample_weight, pred_heatmap):
+    if sample_weight is None:
+        return None
+    dims = [sample_weight.shape[0]] + [1] * (pred_heatmap.ndim - 1)
+    return sample_weight.reshape(*dims)
+
+
+def _unpack_eval_batch(batch):
+    return batch[0], batch[1]
 
 
 def main():
@@ -59,19 +127,15 @@ def main():
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--max_depth", type=int, default="256")
     parser.add_argument("--mul", type=float, default="1.2")
-    # parser.add_argument("--lmk_num", type=int, default="98", help="WFLW-98,COFW-29")
+    parser.add_argument("--lmk_num", type=int, default="68", help="landmark count for FS68Manifest")
+    parser.add_argument("--manifest", type=str, default="", help="faceswap-compatible manifest for FS68Manifest train/test")
+    parser.add_argument("--train_manifest", type=str, default="", help="faceswap-compatible train manifest for FS68Manifest")
+    parser.add_argument("--test_manifest", type=str, default="", help="faceswap-compatible test manifest for FS68Manifest")
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
     args = parser.parse_args()
     setup_seed(args.seed)
-    if args.data_name == "WFLW":
-        lmk_num = 98
-    elif args.data_name == "COFW":
-        lmk_num = 29
-    elif args.data_name == "300W":
-        lmk_num = 68
-    else:
-        assert 0 == 1
+    lmk_num = _landmark_count_for_dataset(args)
     if "LOCAL_RANK" in os.environ and os.environ["LOCAL_RANK"] is not None:
         print(os.environ["LOCAL_RANK"])
         args.local_rank = int(os.environ["LOCAL_RANK"])
@@ -88,11 +152,9 @@ def main():
     with sdp_kernel(**backend_map[SDPBackend.FLASH_ATTENTION]):
         # if True:
 
-        train_dataset = GetDataset(
-            args.data_name, args.root_folder, "train", preload=args.preload != 0, heatmap_size=args.heatmap_size
-        )
+        train_dataset = _build_dataset(args, "train", aug=True, heatmap_size=args.heatmap_size)
         print('----------------------len(train_dataset)', len(train_dataset))
-        test_dataset = GetDataset(args.data_name, args.root_folder, "test", aug=False)
+        test_dataset = _build_dataset(args, "test", aug=False, heatmap_size=0)
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8)
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         train_dataloader = torch.utils.data.DataLoader(
@@ -169,12 +231,12 @@ def main():
             if dist.get_rank() == 0:
                 epoch_start_time = time.time()
             train_sampler.set_epoch(epoch)
-            for batch_idx, (data, target, heatmap) in enumerate(train_dataloader):
+            for batch_idx, batch in enumerate(train_dataloader):
                 optimizer.zero_grad()
-                data = data.to(args.local_rank)
-                target = target.to(args.local_rank).float()
-                heatmap = heatmap.to(args.local_rank)
+                data, target, heatmap, sample_weight = _unpack_train_batch(batch, args.local_rank)
                 loss = 0
+                loss_loc = torch.tensor(0.0, device=args.local_rank)
+                loss_heatmap = torch.tensor(0.0, device=args.local_rank)
                 # if True:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     pred_info = net(data)
@@ -182,8 +244,13 @@ def main():
                         pred_loc, pred_heatmap = pred_info[i]
                         B, C, H, W = pred_heatmap.shape
                         # loss_loc = vertex_loss_func(pred_heatmap, target)
-                        loss_loc = F.smooth_l1_loss(pred_loc, target, 0.001) * args.locw
-                        loss_heatmap = heatmap_loss_func( F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W)), heatmap) * args.hw  # for awing loss
+                        loss_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, beta=0.001) * args.locw
+                        pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W))
+                        loss_heatmap = heatmap_loss_func(
+                            pred_prob,
+                            heatmap,
+                            batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap),
+                        ) * args.hw  # for awing loss
                         # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
                         loss = loss + (loss_loc + loss_heatmap) * weights[i]
                 scaler.scale(loss).backward()
@@ -215,7 +282,8 @@ def main():
                     net.eval()
                     SME = 0.0
                     IONs = None
-                    for batch_idx, (data, target) in enumerate(tqdm(test_dataloader)):
+                    for batch_idx, batch in enumerate(tqdm(test_dataloader)):
+                        data, target = _unpack_eval_batch(batch)
                         data = data.to(args.local_rank)
                         keypoints = target.to(args.local_rank)
                         pred_keypoints, heatmap = net(data)[-1]
@@ -240,7 +308,8 @@ def main():
                     ema.eval()
                     SME = 0.0
                     IONs = None
-                    for batch_idx, (data, target) in enumerate(tqdm(test_dataloader)):
+                    for batch_idx, batch in enumerate(tqdm(test_dataloader)):
+                        data, target = _unpack_eval_batch(batch)
                         data = data.to(args.local_rank)
                         keypoints = target.to(args.local_rank)
                         pred_keypoints, heatmap = ema(data)[-1]
