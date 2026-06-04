@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """Download landmark dataset source archives used by the local manifest builders.
 
-The source table mirrors the URL/file-id constants currently stored in
-``argiacomi/faceswap/lib/landmarks/datasets/sources.py``. Some datasets do not
-have public direct-download URLs in faceswap because their images require manual
-access, separate licensing, or conversion. For those, this script writes a
-``MANUAL_STEPS.md`` file under the dataset directory instead of guessing.
+The source table mirrors the dataset URL/file-id constants from faceswap's
+landmark dataset source helpers. Direct URLs are downloaded with urllib. Google
+Drive assets require ``--include-google-drive`` and the optional ``gdown`` CLI.
 
 Examples:
 
     python tools/landmarks/download_landmark_datasets.py --output-root data/landmarks
-    python tools/landmarks/download_landmark_datasets.py --dataset wflw,aflw2000-3d --extract
-    python tools/landmarks/download_landmark_datasets.py --include-google-drive
+    python tools/landmarks/download_landmark_datasets.py --dataset wflw,300w --extract
+    python tools/landmarks/download_landmark_datasets.py --include-google-drive --extract
+    python tools/landmarks/download_landmark_datasets.py --dataset 300w --include-alternates
 
-Google Drive downloads require the optional ``gdown`` package:
+Google Drive downloads require:
 
     pip install gdown
 """
@@ -42,6 +41,7 @@ ALL_DATASETS = (
     "wflw",
     "cofw",
     "300w",
+    "aflw",
     "aflw2000-3d",
     "merl-rav",
     "menpo2d",
@@ -58,9 +58,12 @@ class SourceAsset:
     filename: str
     url: str | None = None
     google_drive_file_id: str | None = None
+    google_drive_view_url: str | None = None
     sha256: str | None = None
+    sha1: str | None = None
     required_for_builder: bool = True
     extract: bool = True
+    alternate: bool = False
     note: str = ""
     manual_steps: tuple[str, ...] = field(default_factory=tuple)
 
@@ -69,12 +72,6 @@ class SourceAsset:
         return self.url is None and self.google_drive_file_id is None
 
 
-# Mirrors argiacomi/faceswap/lib/landmarks/datasets/sources.py:
-# - WFLW_ANNOTATIONS_URL
-# - WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID
-# - COFW_COLOR_URL
-# - MERL_RAV_LABELS_URL
-# - AFLW2000_3D_URL / AFLW2000_3D_SHA256
 SOURCES: tuple[SourceAsset, ...] = (
     SourceAsset(
         dataset="wflw",
@@ -94,12 +91,74 @@ SOURCES: tuple[SourceAsset, ...] = (
         dataset="cofw",
         name="COFW color images",
         filename="COFW_color.zip",
-        url="http://www.vision.caltech.edu/xpburgos/ICCV13/Data/COFW_color.zip",
+        url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
         required_for_builder=False,
+        note="COFW color image archive. Pair with COFW68 annotations/JSON for manifest building.",
+    ),
+    SourceAsset(
+        dataset="cofw",
+        name="COFW68 benchmark annotations",
+        filename="cofw68-benchmark-master.zip",
+        url="https://github.com/golnazghiasi/cofw68-benchmark/archive/master.zip",
+        note="COFW68 benchmark annotation repository. Convert/organize with COFW images before building.",
+    ),
+    SourceAsset(
+        dataset="300w",
+        name="300W Oxford DVE tarball",
+        filename="300w.tar.gz",
+        url="http://www.robots.ox.ac.uk/~vgg/research/DVE/data/datasets/300w.tar.gz",
+        sha1="885b09159c61fa29998437747d589c65cfc4ccd3",
+        note="Default 300W source stored in faceswap, from Oxford VGG DVE / ICCV 2019.",
+    ),
+    SourceAsset(
+        dataset="300w",
+        name="300W official split part 001",
+        filename="300w.zip.001",
+        url="https://ibug.doc.ic.ac.uk/download/annotations/300w.zip.001",
+        required_for_builder=False,
+        extract=False,
+        alternate=True,
+        note="Alternate original iBUG split archive part. Combine all four parts into 300w.zip before extracting.",
+    ),
+    SourceAsset(
+        dataset="300w",
+        name="300W official split part 002",
+        filename="300w.zip.002",
+        url="https://ibug.doc.ic.ac.uk/download/annotations/300w.zip.002",
+        required_for_builder=False,
+        extract=False,
+        alternate=True,
+        note="Alternate original iBUG split archive part. Combine all four parts into 300w.zip before extracting.",
+    ),
+    SourceAsset(
+        dataset="300w",
+        name="300W official split part 003",
+        filename="300w.zip.003",
+        url="https://ibug.doc.ic.ac.uk/download/annotations/300w.zip.003",
+        required_for_builder=False,
+        extract=False,
+        alternate=True,
+        note="Alternate original iBUG split archive part. Combine all four parts into 300w.zip before extracting.",
+    ),
+    SourceAsset(
+        dataset="300w",
+        name="300W official split part 004",
+        filename="300w.zip.004",
+        url="https://ibug.doc.ic.ac.uk/download/annotations/300w.zip.004",
+        required_for_builder=False,
+        extract=False,
+        alternate=True,
+        note="Alternate original iBUG split archive part. Combine all four parts into 300w.zip before extracting.",
+    ),
+    SourceAsset(
+        dataset="aflw",
+        name="AFLW native images/package",
+        filename="AFLW.zip",
+        google_drive_file_id="1uSx5hTxkxm48a3No0xm26DeJKpIooqrx",
+        google_drive_view_url="https://drive.google.com/file/d/1uSx5hTxkxm48a3No0xm26DeJKpIooqrx/view",
         note=(
-            "Faceswap stores the COFW image URL but the local builder expects a COFW JSON "
-            "export or image+landmark pairs. Use this image archive together with converted "
-            "68-point labels."
+            "Native AFLW package used by MERL-RAV native mode. Requires --include-google-drive. "
+            "Faceswap also stores a drive.usercontent direct URL, but gdown is more reliable."
         ),
     ),
     SourceAsset(
@@ -107,10 +166,9 @@ SOURCES: tuple[SourceAsset, ...] = (
         name="MERL-RAV labels",
         filename="MERL-RAV_dataset-master.zip",
         url="https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip",
-        required_for_builder=False,
         note=(
-            "Faceswap stores the MERL-RAV label URL, but AFLW images must be obtained "
-            "separately. Combine labels and images before building the manifest."
+            "MERL-RAV annotations. Pair with AFLW images by imageNNNNN, or use AFLW release-2 "
+            "translation if you have that older cropped release."
         ),
     ),
     SourceAsset(
@@ -119,46 +177,23 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="AFLW2000-3D.zip",
         url="http://www.cbsr.ia.ac.cn/users/xiangyuzhu/projects/3DDFA/Database/AFLW2000-3D.zip",
         sha256="252bc35274d65ff27b6e573aa96c2f4c116ad88452cc984fb882258c0ed6e2d8",
-        note="Direct URL and checksum are stored in faceswap.",
-    ),
-    SourceAsset(
-        dataset="300w",
-        name="300W manual source",
-        filename="MANUAL_STEPS.md",
-        required_for_builder=False,
-        extract=False,
-        note="No direct 300W URL is stored in faceswap.",
-        manual_steps=(
-            "Download 300W/iBUG images and .pts annotations from the official source you are licensed to use.",
-            "Arrange them under this directory so .pts files and images share stems, or pass --image-root.",
-            "Then run: python tools/landmarks/build_quality_dataset.py --dataset 300w --source-dir <this_dir> --output-dir runs/landmarks/build_300w",
-        ),
+        note="AFLW2000-3D archive with image+.mat pairs.",
     ),
     SourceAsset(
         dataset="menpo2d",
-        name="Menpo2D manual source",
-        filename="MANUAL_STEPS.md",
-        required_for_builder=False,
-        extract=False,
-        note="No direct Menpo2D URL is stored in faceswap.",
-        manual_steps=(
-            "Download Menpo2D from the official source you are licensed to use.",
-            "Arrange 68-point .pts/.mat/.npy labels and images under this directory.",
-            "Then run: python tools/landmarks/build_quality_dataset.py --dataset menpo2d --source-dir <this_dir> --output-dir runs/landmarks/build_menpo2d",
-        ),
+        name="Menpo2D",
+        filename="Menpo2D.zip",
+        google_drive_file_id="1CUqs0n135lye6J6RM5FQXT_DIT45dKvP",
+        google_drive_view_url="https://drive.google.com/file/d/1CUqs0n135lye6J6RM5FQXT_DIT45dKvP/view",
+        note="MenpoBenchmark Menpo2D package. Requires --include-google-drive and gdown.",
     ),
     SourceAsset(
         dataset="multipie",
-        name="MultiPIE manual source",
-        filename="MANUAL_STEPS.md",
-        required_for_builder=False,
-        extract=False,
-        note="No direct MultiPIE URL is stored in faceswap.",
-        manual_steps=(
-            "Obtain MultiPIE from your licensed source.",
-            "Arrange 68-point .pts/.mat/.npy labels and images under this directory.",
-            "Then run: python tools/landmarks/build_quality_dataset.py --dataset multipie --source-dir <this_dir> --output-dir runs/landmarks/build_multipie",
-        ),
+        name="MultiPIE",
+        filename="MultiPIE.zip",
+        google_drive_file_id="18JFjBTAZqthpORmEf2LuT14IuMYNyD_h",
+        google_drive_view_url="https://drive.google.com/file/d/18JFjBTAZqthpORmEf2LuT14IuMYNyD_h/view",
+        note="MenpoBenchmark MultiPIE package. Requires --include-google-drive and gdown.",
     ),
 )
 
@@ -166,6 +201,7 @@ SOURCES: tuple[SourceAsset, ...] = (
 def _dataset_key(value: str) -> str:
     key = value.strip().lower().replace("_", "-")
     aliases = {
+        "aflw": "aflw",
         "aflw2000": "aflw2000-3d",
         "aflw2000-3d": "aflw2000-3d",
         "merlrav": "merl-rav",
@@ -184,31 +220,44 @@ def _dataset_key(value: str) -> str:
     return aliases.get(key, key)
 
 
-def _selected_sources(dataset_arg: str) -> list[SourceAsset]:
+def _selected_sources(dataset_arg: str, *, include_alternates: bool) -> list[SourceAsset]:
     requested = tuple(_dataset_key(item) for item in dataset_arg.split(",") if item.strip())
     selected = set(ALL_DATASETS if not requested or requested == ("all",) else requested)
     unknown = sorted(selected - set(ALL_DATASETS))
     if unknown:
         raise ValueError(f"unknown dataset(s): {', '.join(unknown)}")
-    return [source for source in SOURCES if source.dataset in selected]
+    return [
+        source
+        for source in SOURCES
+        if source.dataset in selected and (include_alternates or not source.alternate)
+    ]
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
+def _hash_file(path: Path, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _verify(path: Path, expected_sha256: str | None) -> None:
-    if expected_sha256 is None:
-        return
-    actual = _sha256_file(path)
-    if actual.lower() != expected_sha256.lower():
-        raise ValueError(
-            f"checksum mismatch for {path}: expected {expected_sha256}, got {actual}"
-        )
+def _sha256_file(path: Path) -> str:
+    return _hash_file(path, "sha256")
+
+
+def _sha1_file(path: Path) -> str:
+    return _hash_file(path, "sha1")
+
+
+def _verify(path: Path, *, sha256: str | None, sha1: str | None) -> None:
+    if sha256 is not None:
+        actual = _sha256_file(path)
+        if actual.lower() != sha256.lower():
+            raise ValueError(f"sha256 mismatch for {path}: expected {sha256}, got {actual}")
+    if sha1 is not None:
+        actual = _sha1_file(path)
+        if actual.lower() != sha1.lower():
+            raise ValueError(f"sha1 mismatch for {path}: expected {sha1}, got {actual}")
 
 
 def _download_url(url: str, destination: Path, *, force: bool) -> Path:
@@ -224,7 +273,8 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
     tmp_path = Path(tmp_name)
     try:
         print(f"Downloading {url} -> {destination}")
-        with urllib.request.urlopen(url) as response, tmp_path.open("wb") as out:
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request) as response, tmp_path.open("wb") as out:
             total_header = response.headers.get("Content-Length")
             total = int(total_header) if total_header and total_header.isdigit() else None
             downloaded = 0
@@ -236,7 +286,10 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
                 downloaded += len(chunk)
                 if total:
                     pct = downloaded * 100.0 / total
-                    print(f"  {downloaded / 1_000_000:.1f} MB / {total / 1_000_000:.1f} MB ({pct:.1f}%)", end="\r")
+                    print(
+                        f"  {downloaded / 1_000_000:.1f} MB / {total / 1_000_000:.1f} MB ({pct:.1f}%)",
+                        end="\r",
+                    )
             if total:
                 print()
         if tmp_path.stat().st_size == 0:
@@ -329,15 +382,17 @@ def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
 def _write_manual_steps(asset: SourceAsset, dataset_dir: Path) -> Path:
     dataset_dir.mkdir(parents=True, exist_ok=True)
     path = dataset_dir / asset.filename
-    lines = [
-        f"# {asset.name}",
-        "",
-        asset.note or "Manual setup required.",
-        "",
-        "## Steps",
-        "",
-    ]
-    lines.extend(f"{idx}. {step}" for idx, step in enumerate(asset.manual_steps, 1))
+    steps = asset.manual_steps
+    if not steps:
+        steps = (
+            f"Install gdown and rerun with --include-google-drive, or manually download Google Drive file id {asset.google_drive_file_id}.",
+            f"Save it as {dataset_dir / 'archives' / asset.filename}.",
+        )
+    lines = [f"# {asset.name}", "", asset.note or "Manual setup required.", ""]
+    if asset.google_drive_view_url:
+        lines.extend([f"Google Drive view URL: {asset.google_drive_view_url}", ""])
+    lines.extend(["## Steps", ""])
+    lines.extend(f"{idx}. {step}" for idx, step in enumerate(steps, 1))
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote manual instructions: {path}")
@@ -354,6 +409,7 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
         "filename": asset.filename,
         "status": "pending",
         "required_for_builder": asset.required_for_builder,
+        "alternate": asset.alternate,
         "note": asset.note,
     }
 
@@ -363,18 +419,13 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
         return result
 
     if asset.google_drive_file_id and not args.include_google_drive:
-        manual = SourceAsset(
-            dataset=asset.dataset,
-            name=asset.name,
-            filename=f"{asset.name.replace(' ', '_')}_MANUAL_STEPS.md",
-            note=asset.note,
-            manual_steps=(
-                f"Install gdown and rerun with --include-google-drive, or manually download Google Drive file id {asset.google_drive_file_id}.",
-                f"Save it as {archive_dir / asset.filename}.",
-            ),
+        path = _write_manual_steps(asset, dataset_dir)
+        result.update(
+            status="manual_google_drive",
+            path=str(path),
+            google_drive_file_id=asset.google_drive_file_id,
+            google_drive_view_url=asset.google_drive_view_url,
         )
-        path = _write_manual_steps(manual, dataset_dir)
-        result.update(status="manual_google_drive", path=str(path), google_drive_file_id=asset.google_drive_file_id)
         return result
 
     destination = archive_dir / asset.filename
@@ -384,8 +435,14 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
         else:
             assert asset.url is not None
             path = _download_url(asset.url, destination, force=args.force)
-        _verify(path, None if args.skip_checksum else asset.sha256)
-        result.update(status="downloaded", archive=str(path), sha256=_sha256_file(path))
+        if not args.skip_checksum:
+            _verify(path, sha256=asset.sha256, sha1=asset.sha1)
+        result.update(
+            status="downloaded",
+            archive=str(path),
+            sha256=_sha256_file(path),
+            sha1=_sha1_file(path),
+        )
         if args.extract and asset.extract:
             extracted = _extract_archive(path, extract_dir, force=args.force)
             result["extracted"] = str(extracted)
@@ -407,12 +464,34 @@ def _write_summary(results: list[dict[str, T.Any]], output_root: Path) -> Path:
 
 def _print_build_hints(output_root: Path) -> None:
     print("\nBuild hints:")
-    print(f"  WFLW: python tools/landmarks/build_quality_dataset.py --dataset wflw --source-dir {output_root / 'wflw' / 'extracted'} --output-dir runs/landmarks/build_wflw")
-    print(f"  COFW: python tools/landmarks/build_quality_dataset.py --dataset cofw --source-dir <cofw_json_or_pairs_dir> --output-dir runs/landmarks/build_cofw")
-    print(f"  300W: python tools/landmarks/build_quality_dataset.py --dataset 300w --source-dir <300w_pts_and_images_dir> --output-dir runs/landmarks/build_300w")
-    print(f"  AFLW2000-3D: python tools/landmarks/build_quality_dataset.py --dataset aflw2000-3d --source-dir {output_root / 'aflw2000-3d' / 'extracted'} --output-dir runs/landmarks/build_aflw2000_3d")
-    print(f"  MERL-RAV: python tools/landmarks/build_quality_dataset.py --dataset merl-rav --source-dir <merl_rav_labels_plus_aflw_images_dir> --output-dir runs/landmarks/build_merl_rav")
-    print(f"  Menpo2D/MultiPIE: see MANUAL_STEPS.md under each dataset dir.")
+    print(
+        "  WFLW: "
+        f"python tools/landmarks/build_quality_dataset.py --dataset wflw --source-dir {output_root / 'wflw' / 'extracted'} --output-dir runs/landmarks/build_wflw"
+    )
+    print(
+        "  COFW: "
+        f"python tools/landmarks/build_quality_dataset.py --dataset cofw --source-dir {output_root / 'cofw' / 'extracted'} --output-dir runs/landmarks/build_cofw"
+    )
+    print(
+        "  300W: "
+        f"python tools/landmarks/build_quality_dataset.py --dataset 300w --source-dir {output_root / '300w' / 'extracted'} --output-dir runs/landmarks/build_300w"
+    )
+    print(
+        "  MERL-RAV native: "
+        f"combine {output_root / 'merl-rav' / 'extracted'} labels with {output_root / 'aflw' / 'extracted'} images, then build --dataset merl-rav"
+    )
+    print(
+        "  AFLW2000-3D: "
+        f"python tools/landmarks/build_quality_dataset.py --dataset aflw2000-3d --source-dir {output_root / 'aflw2000-3d' / 'extracted'} --output-dir runs/landmarks/build_aflw2000_3d"
+    )
+    print(
+        "  Menpo2D: "
+        f"python tools/landmarks/build_quality_dataset.py --dataset menpo2d --source-dir {output_root / 'menpo2d' / 'extracted'} --output-dir runs/landmarks/build_menpo2d"
+    )
+    print(
+        "  MultiPIE: "
+        f"python tools/landmarks/build_quality_dataset.py --dataset multipie --source-dir {output_root / 'multipie' / 'extracted'} --output-dir runs/landmarks/build_multipie"
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -422,7 +501,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--extract", action="store_true", help="Extract downloaded archives after download.")
     parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
     parser.add_argument("--include-google-drive", action="store_true", help="Download Google Drive assets with gdown when available.")
-    parser.add_argument("--skip-checksum", action="store_true", help="Skip stored SHA256 verification.")
+    parser.add_argument("--include-alternates", action="store_true", help="Include alternate source URLs, currently the official 300W split archive parts.")
+    parser.add_argument("--skip-checksum", action="store_true", help="Skip stored SHA256/SHA1 verification.")
     parser.add_argument("--keep-going", action="store_true", help="Continue after a failed download.")
     parser.add_argument("--list", action="store_true", help="List configured sources and exit.")
     return parser
@@ -430,12 +510,22 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    sources = _selected_sources(args.dataset)
+    sources = _selected_sources(args.dataset, include_alternates=args.include_alternates)
 
     if args.list:
         for asset in sources:
-            location = asset.url or (f"gdrive:{asset.google_drive_file_id}" if asset.google_drive_file_id else "manual")
-            print(f"{asset.dataset:12s} {asset.name:24s} {location}")
+            location = asset.url or (
+                f"gdrive:{asset.google_drive_file_id}" if asset.google_drive_file_id else "manual"
+            )
+            flags = []
+            if asset.alternate:
+                flags.append("alternate")
+            if asset.sha256:
+                flags.append("sha256")
+            if asset.sha1:
+                flags.append("sha1")
+            flag_text = f" [{' '.join(flags)}]" if flags else ""
+            print(f"{asset.dataset:12s} {asset.name:32s} {location}{flag_text}")
         return 0
 
     results = [_process_asset(asset, args) for asset in sources]
