@@ -14,6 +14,8 @@ PROFILE_LABELS: frozenset[str] = frozenset(
         "profile_right",
         "large_yaw_left",
         "large_yaw_right",
+        "large_roll",
+        "extreme_roll",
         "rolled_profile_left",
         "rolled_profile_right",
         "rolled_large_yaw_left",
@@ -92,6 +94,26 @@ def _marks_occlusion(key: str, value: T.Any) -> bool:
     return bool(value)
 
 
+def _add_runtime_bucket_labels(labels: set[str], payload: T.Mapping[str, T.Any]) -> None:
+    """Add faceswap production resolver bucket labels from nested metadata."""
+    for key in (
+        "runtime_bucket",
+        "bucket",
+        "landmark_ensemble_runtime_bucket",
+        "landmark_ensemble_bucket",
+    ):
+        labels.add(normalize_label(payload.get(key)))
+
+    landmark_ensemble = payload.get("landmark_ensemble")
+    if isinstance(landmark_ensemble, T.Mapping):
+        labels.add(normalize_label(landmark_ensemble.get("runtime_bucket")))
+        labels.add(normalize_label(landmark_ensemble.get("bucket")))
+        resolver = landmark_ensemble.get("resolver")
+        if isinstance(resolver, T.Mapping):
+            labels.add(normalize_label(resolver.get("runtime_bucket")))
+            labels.add(normalize_label(resolver.get("bucket")))
+
+
 def sample_labels(sample: T.Mapping[str, T.Any]) -> set[str]:
     """Return the normalized label set derived from one manifest sample."""
     labels: set[str] = set()
@@ -103,6 +125,7 @@ def sample_labels(sample: T.Mapping[str, T.Any]) -> set[str]:
     labels.add(normalize_label(sample.get("condition")))
     labels.add(normalize_label(sample.get("hard_slice")))
     labels.add(normalize_label(sample.get("yaw_slice")))
+    _add_runtime_bucket_labels(labels, sample)
 
     raw_metadata = sample.get("metadata")
     metadata: dict[str, T.Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
@@ -111,6 +134,12 @@ def sample_labels(sample: T.Mapping[str, T.Any]) -> set[str]:
     for key, value in attrs.items():
         if value:
             labels.add(normalize_label(key))
+
+    _add_runtime_bucket_labels(labels, metadata)
+
+    issue_type = normalize_label(metadata.get("issue_type"))
+    if issue_type in OCCLUSION_LABELS or issue_type == "occlusion":
+        labels.add("occlusion")
 
     for key in ("occlusion", "occlusions", "occluded", "visibility", "visible"):
         value = metadata.get(key, sample.get(key))
