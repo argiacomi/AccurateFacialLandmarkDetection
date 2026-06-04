@@ -41,7 +41,6 @@ DEFAULT_BUCKET_RATIOS: dict[str, float] = {
     "occlusion": 2.0,
     "anchor": 1.0,
 }
-# Default to the full feasible pool. Pass --total-samples N to create a bounded subset.
 DEFAULT_TOTAL_SAMPLES = 0
 
 MANIFEST_ARGS: tuple[tuple[str, str], ...] = (
@@ -52,6 +51,7 @@ MANIFEST_ARGS: tuple[tuple[str, str], ...] = (
     ("menpo2d_manifest", "menpo2d"),
     ("multipie_manifest", "multipie"),
     ("w300_manifest", "300w"),
+    ("production_validated_manifest", "production_validated"),
 )
 
 
@@ -88,7 +88,6 @@ def _empty_bucket_map(value: float = 0.0) -> dict[str, float]:
 
 
 def _parse_bucket_values(value: str | None, *, normalize_percentages: bool = False) -> dict[str, float]:
-    """Parse ``bucket=value`` comma-separated specs for ratios or percentages."""
     if not value:
         return dict(DEFAULT_BUCKET_RATIOS)
 
@@ -112,7 +111,6 @@ def _parse_bucket_values(value: str | None, *, normalize_percentages: bool = Fal
         total = sum(parsed.values())
         if total <= 0:
             raise ValueError("bucket percentages must sum to a positive value")
-        # Accept either fractions, e.g. 0.375, or human percentages, e.g. 37.5.
         if total > 1.5:
             parsed = {bucket: amount / 100.0 for bucket, amount in parsed.items()}
         percent_total = sum(parsed.values())
@@ -125,11 +123,7 @@ def _parse_bucket_values(value: str | None, *, normalize_percentages: bool = Fal
     return parsed
 
 
-def _ratio_targets(
-    *,
-    bucket_ratios: str | None,
-    bucket_percentages: str | None,
-) -> dict[str, float]:
+def _ratio_targets(*, bucket_ratios: str | None, bucket_percentages: str | None) -> dict[str, float]:
     if bucket_ratios and bucket_percentages:
         raise ValueError("pass only one of --bucket-ratios or --bucket-percentages")
     if bucket_percentages:
@@ -164,8 +158,6 @@ def _integerize_targets(
 ) -> dict[str, int]:
     counts = {bucket: min(int(math.floor(float_targets.get(bucket, 0.0))), capacities[bucket]) for bucket in BUCKET_ORDER}
     remaining = max(target_total - sum(counts.values()), 0)
-
-    # Highest fractional remainder gets the next sample. Ties are stable by BUCKET_ORDER.
     while remaining > 0:
         candidates = [bucket for bucket in BUCKET_ORDER if counts[bucket] < capacities[bucket]]
         if not candidates:
@@ -194,11 +186,6 @@ def _allocate_ratio_counts(
     total_samples: int | None,
     ceilings: T.Mapping[str, int | None],
 ) -> tuple[dict[str, int], dict[str, int], int]:
-    """Allocate integer per-bucket counts from ratios, availability, and optional ceilings.
-
-    If a bucket cannot fill its target, its shortfall is redistributed to remaining
-    buckets with positive ratios and available capacity.
-    """
     capacities: dict[str, int] = {}
     for bucket in BUCKET_ORDER:
         capacity = max(int(available.get(bucket, 0)), 0)
@@ -218,7 +205,6 @@ def _allocate_ratio_counts(
     active = set(target_pool)
     remaining_total = float(target_total)
     float_targets = _empty_bucket_map()
-
     while active and remaining_total > 0:
         ratio_sum = sum(float(ratios[bucket]) for bucket in active)
         if ratio_sum <= 0:
@@ -373,6 +359,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--menpo2d-manifest", type=Path)
     parser.add_argument("--multipie-manifest", type=Path)
     parser.add_argument("--w300-manifest", type=Path)
+    parser.add_argument("--production-validated-manifest", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--total-samples",
@@ -386,18 +373,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bucket-ratios",
         default=None,
-        help=(
-            "Comma-separated bucket=value ratios. Default: "
-            "profile_occlusion=3,profile=2,occlusion=2,anchor=1"
-        ),
+        help="Comma-separated bucket=value ratios. Default: profile_occlusion=3,profile=2,occlusion=2,anchor=1",
     )
     parser.add_argument(
         "--bucket-percentages",
         default=None,
         help=(
             "Comma-separated bucket=value percentages/fractions, e.g. "
-            "profile_occlusion=37.5,profile=25,occlusion=25,anchor=12.5. "
-            "Overrides --bucket-ratios."
+            "profile_occlusion=37.5,profile=25,occlusion=25,anchor=12.5. Overrides --bucket-ratios."
         ),
     )
     parser.add_argument("--max-profile-occlusion", type=int, default=None, help="Optional hard ceiling for this bucket.")
