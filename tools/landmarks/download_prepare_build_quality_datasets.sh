@@ -11,7 +11,6 @@
 #   PYTHON=python3
 #   DATA_ROOT=data/landmarks
 #   QUALITY_ROOT=runs/landmarks/quality_datasets
-#   DOWNLOAD_LOG_LEVEL=INFO
 #   INCLUDE_GOOGLE_DRIVE=1          # default: 1, needed for WFLW images/AFLW/Menpo/MultiPIE
 #   INCLUDE_300W_ALTERNATES=0       # default: 0, set 1 to also fetch official iBUG split parts
 #   CONTINUE_ON_ERROR=0             # default: 0, set 1 for partial bring-up
@@ -42,7 +41,6 @@ MERL_RAV_SKIP_IMAGE_VALIDATION="${MERL_RAV_SKIP_IMAGE_VALIDATION:-0}"
 MANIFEST_MODE="${MANIFEST_MODE:-replace}"
 ALLOW_OVERLAP="${ALLOW_OVERLAP:-0}"
 SAMPLES_PER_SCENARIO="${SAMPLES_PER_SCENARIO:-}"
-DOWNLOAD_LOG_LEVEL="${DOWNLOAD_LOG_LEVEL:-INFO}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
@@ -79,21 +77,6 @@ need_file() {
   [[ -f "$1" ]] || fail "Missing required file: $1"
 }
 
-need_dir() {
-  [[ -d "$1" ]] || fail "Missing required directory: $1"
-}
-
-first_existing_dir() {
-  local candidate
-  for candidate in "$@"; do
-    if [[ -d "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
-  return 1
-}
-
 maybe_args=()
 if [[ -n "${SAMPLES_PER_SCENARIO}" ]]; then
   maybe_args+=(--samples-per-scenario "${SAMPLES_PER_SCENARIO}")
@@ -128,7 +111,7 @@ fi
 
 run_step "Download landmark datasets into ${DATA_ROOT}" "${PYTHON}" "${download_args[@]}"
 
-# 2. Prepare MERL-RAV + native AFLW into an organized manifest source.
+# 2. Prepare MERL-RAV + native AFLW into an organized source directory.
 MERL_RAV_ROOT="${MERL_RAV_ROOT:-${DATA_ROOT}/merl-rav/extracted/MERL-RAV_dataset-master.zip}"
 AFLW_ROOT="${AFLW_ROOT:-${DATA_ROOT}/aflw/extracted/AFLW.zip}"
 MERL_RAV_ORGANIZED="${MERL_RAV_ORGANIZED:-${DATA_ROOT}/merl-rav/organized}"
@@ -147,8 +130,9 @@ fi
 
 run_step "Prepare MERL-RAV annotations against AFLW images" "${PYTHON}" "${prepare_merl_args[@]}"
 
-# 3. Build all per-dataset quality manifests. These manifests are the dataset
-#    sources that can be passed to downstream training/pipeline steps.
+# 3. Build all per-dataset quality manifests as a fast validation/preflight of
+#    each prepared source directory. The downstream training pipeline can also
+#    rebuild per-run manifests from the source directories written below.
 build_dataset() {
   local dataset="$1"
   local source_dir="$2"
@@ -188,17 +172,18 @@ build_dataset merl-rav "${MERL_RAV_ORGANIZED}" "${QUALITY_ROOT}/merl-rav"
 build_dataset menpo2d "${MENPO2D_SOURCE}" "${QUALITY_ROOT}/menpo2d"
 build_dataset multipie "${MULTIPIE_SOURCE}" "${QUALITY_ROOT}/multipie"
 
-# Write dataset-source arguments for run_cdvit_manifest_training_pipeline.py or
-# equivalent downstream orchestration. This keeps the next command copy/pasteable.
+# Write source-directory arguments for run_cdvit_manifest_training_pipeline.py.
+# The pipeline expects source roots, not manifest.json files, because it creates
+# per-run manifests before mining the hard-negative mix.
 DATASET_SOURCE_ARGS="${QUALITY_ROOT}/dataset_source_args.txt"
 cat > "${DATASET_SOURCE_ARGS}" <<EOF
---dataset-source wflw=${QUALITY_ROOT}/wflw/manifest.json
---dataset-source cofw=${QUALITY_ROOT}/cofw/manifest.json
---dataset-source 300w=${QUALITY_ROOT}/300w/manifest.json
---dataset-source aflw2000-3d=${QUALITY_ROOT}/aflw2000-3d/manifest.json
---dataset-source merl-rav=${QUALITY_ROOT}/merl-rav/manifest.json
---dataset-source menpo2d=${QUALITY_ROOT}/menpo2d/manifest.json
---dataset-source multipie=${QUALITY_ROOT}/multipie/manifest.json
+--dataset-source wflw=${WFLW_SOURCE}
+--dataset-source cofw=${COFW_SOURCE}
+--dataset-source 300w=${W300_SOURCE}
+--dataset-source aflw2000-3d=${AFLW2000_SOURCE}
+--dataset-source merl-rav=${MERL_RAV_ORGANIZED}
+--dataset-source menpo2d=${MENPO2D_SOURCE}
+--dataset-source multipie=${MULTIPIE_SOURCE}
 EOF
 
 log "Finished quality dataset setup"
