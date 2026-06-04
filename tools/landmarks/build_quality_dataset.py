@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Build CD-ViT/faceswap-compatible landmark manifests.
 
-This is a compact local port of the faceswap manifest builder. It supports:
+This local builder covers the faceswap landmark dataset names while emitting a
+CD-ViT-friendly contract: every manifest entry points to a materialized
+canonical ``(68, 2)`` ``.npy`` file.
 
-* directory trees of image + matching .npy landmark pairs
-* JSON exports/manifests with a samples list
-* WFLW 98-point annotation text files
+Supported raw inputs by dataset:
 
-Every emitted landmark file is materialized as canonical 68-point .npy so it can
-be consumed directly by DatasetFS68Manifest and TrainHeatmapStageFP16.py.
+* WFLW: official 98-point annotation text plus images, or generic sources.
+* COFW: faceswap-style 68-point JSON export, or generic 68/98 landmark files.
+* 300W: iBUG ``.pts`` files plus same-stem images, JSON, ``.npy``, or ``.mat``.
+* AFLW2000-3D: same-stem ``.mat`` files with 68 2D/3D landmarks plus images.
+* MERL-RAV, Menpo2D, MultiPIE: JSON, ``.npy``, ``.pts``, ``.mat`` sources.
+
+Non-68/non-98 samples are skipped because ``DatasetFS68Manifest`` trains a
+68-point model.
 """
 
 from __future__ import annotations
@@ -17,9 +23,8 @@ import argparse
 import contextlib
 import json
 import logging
-import shutil
+import re
 import sys
-import tempfile
 import typing as T
 from pathlib import Path
 
@@ -33,7 +38,9 @@ from lib.landmarks.core.schema import normalize_landmarks
 from lib.landmarks.datasets.sources import extract_archive_to_temp
 
 logger = logging.getLogger(__name__)
-IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
+LANDMARK_EXTS = (".npy", ".pts", ".mat", ".txt")
 SUPPORTED_DATASETS = (
     "wflw",
     "cofw",
@@ -126,18 +133,165 @@ def _resolve_path(value: T.Any, *, base_dir: Path) -> Path:
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 
-def _load_points(value: T.Any, *, base_dir: Path, source_schema: str | None = None) -> np.ndarray:
-    if isinstance(value, (list, tuple, np.ndarray)):
-        raw = np.asarray(value, dtype=np.float32)
-    else:
-        path = _resolve_path(value, base_dir=base_dir)
-        if path.suffix.lower() == ".npy":
-            raw = np.load(path).astype(np.float32)
-        elif path.suffix.lower() == ".json":
-            raw = np.asarray(_read_json(path), dtype=np.float32)
+def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[np.ndarray, str]:
+    """Return canonical 68x2 points and the source schema label."""
+    arr = np.asarray(raw, dtype=np.float32)
+
+    while arr.ndim > 2 and 1 in arr.shape:
+        arr = np.squeeze(arr)
+
+    if arr.ndim == 1:
+        if arr.size == 68 * 3:
+            arr = arr.reshape(68, 3)
+        elif arr.size == 98 * 2:
+            arr = arr.reshape(98, 2)
+        elif arr.size == 68 * 2:
+            arr = arr.reshape(68, 2)
         else:
-            raise ValueError(f"unsupported landmark input: {value!r}")
-    return normalize_landmarks(raw, source_schema=source_schema)
+            raise ValueError(f"flat landmark array has unsupported size {arr.size}")
+
+    if arr.ndim != 2:
+        raise ValueError(f"landmarks must be 2D, got shape {arr.shape}")
+
+    if arr.shape[0] in (2, 3) and arr.shape[1] in (68, 98):
+        arr = arr.T
+
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("landmarks contain NaN or infinite values")
+
+    if arr.shape == (68, 3):
+        return np.ascontiguousarray(arr[:, :2], dtype=np.float32), "3d_68"
+    if arr.shape[0] == 68 and arr.shape[1] >= 2:
+        return normalize_landmarks(arr[:, :2], source_schema="2d_68"), source_schema or "2d_68"
+    if arr.shape[0] == 98 and arr.shape[1] >= 2:
+        return normalize_landmarks(arr[:, :2], source_schema="2d_98"), source_schema or "2d_98"
+
+    raise ValueError(f"unsupported landmark shape {arr.shape}; expected 68 or 98 points")
+
+
+def _parse_pts(path: Path) -> np.ndarray:
+    rows: list[list[float]] = []
+    in_block = False
+    saw_brace = False
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "{":
+            in_block = True
+            saw_brace = True
+            continue
+        if line == "}":
+            break
+        if saw_brace and not in_block:
+            continue
+        if ":" in line and not re.match(r"^[+-]?\d", line):
+            continue
+        parts = line.replace(",", " ").split()
+        if len(parts) < 2:
+            continue
+        try:
+            rows.append([float(parts[0]), float(parts[1])])
+        except ValueError:
+            continue
+    if not rows:
+        raise ValueError(f"no point rows found in {path}")
+    return np.asarray(rows, dtype=np.float32)
+
+
+def _parse_numeric_text(path: Path) -> np.ndarray:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    values = [float(item) for item in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", text)]
+    for count, dims in ((68, 2), (68, 3), (98, 2)):
+        total = count * dims
+        if len(values) == total:
+            return np.asarray(values, dtype=np.float32).reshape(count, dims)
+    rows: list[list[float]] = []
+    for line in text.splitlines():
+        parts = line.replace(",", " ").split()
+        if len(parts) < 2:
+            continue
+        try:
+            rows.append([float(parts[0]), float(parts[1])])
+        except ValueError:
+            continue
+    if rows:
+        return np.asarray(rows, dtype=np.float32)
+    raise ValueError(f"could not parse numeric landmarks from {path}")
+
+
+def _parse_mat(path: Path) -> np.ndarray:
+    try:
+        import scipy.io as sio
+    except ImportError as err:
+        raise RuntimeError("scipy is required to read .mat landmark files") from err
+
+    payload = sio.loadmat(path)
+    preferred = (
+        "pt2d",
+        "pts_2d",
+        "points_2d",
+        "landmarks",
+        "landmark",
+        "pts",
+        "points",
+        "shape",
+        "lms",
+        "lm",
+        "keypoints",
+    )
+
+    def candidates() -> T.Iterator[tuple[str, T.Any]]:
+        for key in preferred:
+            if key in payload:
+                yield key, payload[key]
+        for key, value in payload.items():
+            if not key.startswith("__") and key not in preferred:
+                yield key, value
+
+    errors: list[str] = []
+    for key, value in candidates():
+        try:
+            arr = np.asarray(value, dtype=np.float32)
+        except Exception:
+            continue
+        if arr.size < 68 * 2:
+            continue
+        try:
+            _canonical_points(arr)
+            return arr
+        except Exception as err:  # noqa: BLE001
+            errors.append(f"{key}: {err}")
+            continue
+    raise ValueError(f"no 68/98-point landmark array found in {path}; tried {errors[:5]}")
+
+
+def _load_landmark_file(path: Path) -> tuple[np.ndarray, str]:
+    suffix = path.suffix.lower()
+    if suffix == ".npy":
+        return _canonical_points(np.load(path), source_schema=None)
+    if suffix == ".pts":
+        raw = _parse_pts(path)
+        return _canonical_points(raw, source_schema=f"2d_{raw.shape[0]}")
+    if suffix == ".mat":
+        raw = _parse_mat(path)
+        return _canonical_points(raw, source_schema=None)
+    if suffix == ".txt":
+        raw = _parse_numeric_text(path)
+        return _canonical_points(raw, source_schema=f"2d_{raw.shape[0]}")
+    raise ValueError(f"unsupported landmark file: {path}")
+
+
+def _load_points(value: T.Any, *, base_dir: Path, source_schema: str | None = None) -> tuple[np.ndarray, str]:
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return _canonical_points(value, source_schema=source_schema)
+    path = _resolve_path(value, base_dir=base_dir)
+    if path.suffix.lower() in LANDMARK_EXTS:
+        points, detected_schema = _load_landmark_file(path)
+        return points, source_schema or detected_schema
+    if path.suffix.lower() == ".json":
+        return _canonical_points(_read_json(path), source_schema=source_schema)
+    raise ValueError(f"unsupported landmark input: {value!r}")
 
 
 def _normalizer(points68: np.ndarray, sample_id: str) -> float:
@@ -147,7 +301,15 @@ def _normalizer(points68: np.ndarray, sample_id: str) -> float:
     return value
 
 
-def _matching_image(landmarks: Path) -> Path | None:
+def _build_image_index(root: Path) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    for ext in IMAGE_EXTS:
+        for path in root.rglob(f"*{ext}"):
+            index.setdefault(path.stem.lower(), []).append(path)
+    return index
+
+
+def _matching_image(landmarks: Path, *, root: Path | None = None, image_index: dict[str, list[Path]] | None = None) -> Path | None:
     for ext in IMAGE_EXTS:
         candidate = landmarks.with_suffix(ext)
         if candidate.is_file():
@@ -156,6 +318,15 @@ def _matching_image(landmarks: Path) -> Path | None:
         candidate = landmarks.parent / "images" / f"{landmarks.stem}{ext}"
         if candidate.is_file():
             return candidate
+    if image_index is not None:
+        matches = image_index.get(landmarks.stem.lower(), [])
+        if matches:
+            return sorted(matches, key=lambda item: len(item.parts))[0]
+    if root is not None:
+        for ext in IMAGE_EXTS:
+            matches = sorted(root.rglob(f"{landmarks.stem}{ext}"), key=lambda item: len(item.parts))
+            if matches:
+                return matches[0]
     return None
 
 
@@ -226,7 +397,7 @@ def _sample(
 def _filter(samples: list[dict[str, T.Any]], scenarios: tuple[str, ...] | None, limit: int | None) -> list[dict[str, T.Any]]:
     if scenarios:
         allowed = set(scenarios)
-        samples = [sample for sample in samples if allowed.intersection(sample.get("conditions", ())) ]
+        samples = [sample for sample in samples if allowed.intersection(sample.get("conditions", ()))]
     if not limit:
         return samples
     counts: dict[str, int] = {}
@@ -240,7 +411,17 @@ def _filter(samples: list[dict[str, T.Any]], scenarios: tuple[str, ...] | None, 
     return out
 
 
-def _write_manifest(output_dir: Path, dataset: str, scenario: str, samples: list[dict[str, T.Any]], *, mode: str, allow_overlap: bool, scenarios: tuple[str, ...] | None) -> Path:
+def _write_manifest(
+    output_dir: Path,
+    dataset: str,
+    scenario: str,
+    samples: list[dict[str, T.Any]],
+    *,
+    mode: str,
+    allow_overlap: bool,
+    scenarios: tuple[str, ...] | None,
+    skipped: list[dict[str, str]] | None = None,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.json"
     merged: list[dict[str, T.Any]] = []
@@ -254,6 +435,7 @@ def _write_manifest(output_dir: Path, dataset: str, scenario: str, samples: list
             continue
         seen.add(image)
         merged.append(sample)
+
     payload = {
         "version": 1,
         "landmark_schema": "2d_68",
@@ -263,163 +445,329 @@ def _write_manifest(output_dir: Path, dataset: str, scenario: str, samples: list
             "scenario": _label(scenario),
             "scenarios": list(scenarios or []),
             "sample_count": len(merged),
+            "skipped_count": len(skipped or []),
         },
         "samples": merged,
     }
     _write_json(manifest_path, payload)
+
     condition_counts: dict[str, int] = {}
     dataset_counts: dict[str, int] = {}
     for sample in merged:
-        condition_counts[str(sample.get("condition", "default"))] = condition_counts.get(str(sample.get("condition", "default")), 0) + 1
-        dataset_counts[str(sample.get("dataset", dataset))] = dataset_counts.get(str(sample.get("dataset", dataset)), 0) + 1
-    _write_json(output_dir / "dataset_audit.json", {
-        "manifest": str(manifest_path),
-        "sample_count": len(merged),
-        "datasets": dataset_counts,
-        "conditions": condition_counts,
-        "landmark_schema": "2d_68",
-    })
+        condition = str(sample.get("condition", "default"))
+        condition_counts[condition] = condition_counts.get(condition, 0) + 1
+        sample_dataset = str(sample.get("dataset", dataset))
+        dataset_counts[sample_dataset] = dataset_counts.get(sample_dataset, 0) + 1
+    _write_json(
+        output_dir / "dataset_audit.json",
+        {
+            "manifest": str(manifest_path),
+            "sample_count": len(merged),
+            "skipped_count": len(skipped or []),
+            "skipped_examples": (skipped or [])[:50],
+            "datasets": dataset_counts,
+            "conditions": condition_counts,
+            "landmark_schema": "2d_68",
+        },
+    )
     return manifest_path
 
 
 def _json_source(root: Path) -> Path | None:
     candidates = [root] if root.is_file() else sorted(root.rglob("*.json"))
     for path in candidates:
-        if not path.is_file():
+        if not path.is_file() or path.name == "dataset_audit.json":
             continue
         try:
             payload = _read_json(path)
         except Exception:
             continue
-        if isinstance(payload, list) or (isinstance(payload, dict) and "samples" in payload):
+        if isinstance(payload, list) or (
+            isinstance(payload, dict) and any(key in payload for key in ("samples", "entries"))
+        ):
             return path
     return None
 
 
-def _build_json(path: Path, output_dir: Path, *, dataset: str, scenario: str, scenarios: tuple[str, ...] | None, limit: int | None, mode: str, allow_overlap: bool, image_root: str | None) -> Path:
+def _build_json(
+    path: Path,
+    output_dir: Path,
+    *,
+    dataset: str,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
     payload = _read_json(path)
-    entries = payload.get("samples", payload) if isinstance(payload, dict) else payload
+    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
     if not isinstance(entries, list):
-        raise ValueError(f"JSON source must contain list or samples list: {path}")
+        raise ValueError(f"JSON source must contain list, entries, or samples list: {path}")
     image_base = Path(image_root) if image_root else path.parent
-    samples = []
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
     for idx, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
         image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
-        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth")
+        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
         if image_value is None or landmark_value is None:
+            skipped.append({"sample_id": str(idx), "reason": "missing image or landmarks"})
             continue
         sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or idx)
         metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
         source_schema = str(entry.get("source_schema") or metadata.get("source_schema") or "") or None
-        points68 = _load_points(landmark_value, base_dir=path.parent, source_schema=source_schema)
+        try:
+            points68, detected_schema = _load_points(landmark_value, base_dir=path.parent, source_schema=source_schema)
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": sample_id, "reason": str(err)})
+            continue
         conds = _conditions(entry, scenario)
-        samples.append(_sample(
-            output_dir=output_dir,
-            dataset=_dataset(str(entry.get("dataset") or dataset)),
-            sample_id=sample_id,
-            image=_resolve_path(image_value, base_dir=image_base),
-            points68=points68,
-            condition=str(entry.get("condition") or conds[0]),
-            conditions=conds,
-            source_schema=source_schema or "inferred",
-            source_id=str(entry.get("source_id") or sample_id),
-            metadata=metadata,
-            visibility=entry.get("visibility", metadata.get("visibility")),
-        ))
-    return _write_manifest(output_dir, dataset, scenario, _filter(samples, scenarios, limit), mode=mode, allow_overlap=allow_overlap, scenarios=scenarios)
+        samples.append(
+            _sample(
+                output_dir=output_dir,
+                dataset=_dataset(str(entry.get("dataset") or dataset)),
+                sample_id=sample_id,
+                image=_resolve_path(image_value, base_dir=image_base),
+                points68=points68,
+                condition=str(entry.get("condition") or conds[0]),
+                conditions=conds,
+                source_schema=source_schema or detected_schema,
+                source_id=str(entry.get("source_id") or sample_id),
+                metadata=metadata,
+                visibility=entry.get("visibility", metadata.get("visibility")),
+            )
+        )
+    return _write_manifest(
+        output_dir,
+        dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
 
 
-def _build_directory(root: Path, output_dir: Path, *, dataset: str, scenario: str, scenarios: tuple[str, ...] | None, limit: int | None, mode: str, allow_overlap: bool, image_root: str | None) -> Path:
+def _condition_for_landmark_file(dataset: str, path: Path, scenario: str) -> tuple[str, tuple[str, ...]]:
+    parts = {_label(part) for part in path.parts}
+    labels: list[str] = []
+    if dataset == "cofw":
+        labels.append("occlusion")
+    if dataset in {"300w", "w300"}:
+        labels.append("anchor")
+    for token in ("profile", "pose", "occlusion", "occluded", "frontal", "normal", "clean", "challenging"):
+        if token in parts or any(token in part for part in parts):
+            labels.append(token)
+    if not labels:
+        labels.append(_label(scenario))
+    labels = list(dict.fromkeys(_label(item) for item in labels))
+    return labels[0], tuple(labels)
+
+
+def _build_directory(
+    root: Path,
+    output_dir: Path,
+    *,
+    dataset: str,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
     json_path = _json_source(root)
     if json_path is not None:
-        return _build_json(json_path, output_dir, dataset=dataset, scenario=scenario, scenarios=scenarios, limit=limit, mode=mode, allow_overlap=allow_overlap, image_root=image_root)
-    samples = []
-    cond = _label(scenario)
-    for landmarks in sorted(root.rglob("*.npy")):
-        image = _matching_image(landmarks)
-        if image is None:
-            continue
-        sample_id = landmarks.relative_to(root).with_suffix("").as_posix()
-        points68 = _load_points(landmarks, base_dir=root)
-        samples.append(_sample(
-            output_dir=output_dir,
+        return _build_json(
+            json_path,
+            output_dir,
             dataset=dataset,
-            sample_id=sample_id,
-            image=image,
-            points68=points68,
-            condition=cond,
-            conditions=(cond,),
-            source_schema="inferred",
-            source_id=sample_id,
-            metadata={"source_landmarks": str(landmarks.resolve())},
-        ))
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    image_base = Path(image_root) if image_root else root
+    image_index = _build_image_index(image_base)
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    landmark_paths = [
+        path
+        for suffix in LANDMARK_EXTS
+        for path in sorted(root.rglob(f"*{suffix}"))
+        if path.name != "manifest.json" and not path.name.startswith(".")
+    ]
+    for landmark_path in landmark_paths:
+        if landmark_path.suffix.lower() == ".txt" and "98pt" in landmark_path.name.lower():
+            continue
+        try:
+            points68, source_schema = _load_landmark_file(landmark_path)
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+            continue
+        image = _matching_image(landmark_path, root=image_base, image_index=image_index)
+        if image is None:
+            skipped.append({"sample_id": landmark_path.as_posix(), "reason": "matching image not found"})
+            continue
+        sample_id = landmark_path.relative_to(root).with_suffix("").as_posix()
+        condition, conds = _condition_for_landmark_file(dataset, landmark_path.relative_to(root), scenario)
+        samples.append(
+            _sample(
+                output_dir=output_dir,
+                dataset=dataset,
+                sample_id=sample_id,
+                image=image,
+                points68=points68,
+                condition=condition,
+                conditions=conds,
+                source_schema=source_schema,
+                source_id=sample_id,
+                metadata={"source_landmarks": str(landmark_path.resolve())},
+            )
+        )
     if not samples:
-        raise ValueError(f"no image/.npy landmark pairs found under {root}")
-    return _write_manifest(output_dir, dataset, scenario, _filter(samples, scenarios, limit), mode=mode, allow_overlap=allow_overlap, scenarios=scenarios)
+        raise ValueError(f"no usable 68/98-point landmark samples found under {root}; skipped={skipped[:5]}")
+    return _write_manifest(
+        output_dir,
+        dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
 
 
 def _parse_wflw_line(line: str, line_no: int) -> tuple[np.ndarray, list[float], dict[str, int], str]:
     parts = line.split()
-    if len(parts) < 207:
-        raise ValueError(f"WFLW line {line_no} expected at least 207 fields, got {len(parts)}")
+    if len(parts) < 197:
+        raise ValueError(f"WFLW line {line_no} has too few fields")
     points = np.asarray([float(value) for value in parts[:196]], dtype=np.float32).reshape(98, 2)
-    bbox = [float(value) for value in parts[196:200]]
-    attrs = {name: int(float(parts[200 + idx])) for idx, name in enumerate(WFLW_ATTRIBUTE_NAMES)}
-    return points, bbox, attrs, parts[206]
+    bbox: list[float] = []
+    if len(parts) >= 201:
+        bbox = [float(value) for value in parts[196:200]]
+    attrs = dict.fromkeys(WFLW_ATTRIBUTE_NAMES, 0)
+    if len(parts) >= 207:
+        values = [int(float(value)) for value in parts[200:206]]
+        attrs = dict(zip(WFLW_ATTRIBUTE_NAMES, values, strict=True))
+        image_rel = " ".join(parts[206:])
+    else:
+        image_rel = parts[-1]
+    return points, bbox, attrs, image_rel
 
 
 def _find_wflw_annotations(root: Path) -> Path | None:
-    for pattern in ("list_98pt_rect_attr_train_test.txt", "list_98pt_rect_attr_train.txt", "list_98pt_rect_attr_test.txt", "*98pt*rect*attr*.txt"):
-        matches = sorted(root.rglob(pattern))
+    for pattern in (
+        "list_98pt_rect_attr_train_test.txt",
+        "list_98pt_rect_attr_train.txt",
+        "list_98pt_rect_attr_test.txt",
+        "*98pt*rect*attr*.txt",
+    ):
+        matches = sorted(root.rglob(pattern), key=lambda item: len(item.parts))
         if matches:
             return matches[0]
     return None
 
 
 def _find_wflw_images(root: Path) -> Path:
-    for name in ("WFLW_images", "images", "WFLW"):
+    for name in ("WFLW_images", "images", "Images", "WFLW"):
         matches = [path for path in root.rglob(name) if path.is_dir()]
         if matches:
-            return matches[0]
+            return sorted(matches, key=lambda item: len(item.parts))[0]
     return root
 
 
-def _build_wflw(root: Path | None, output_dir: Path, *, annotation_file: str | None, image_root: str | None, scenario: str, scenarios: tuple[str, ...] | None, limit: int | None, mode: str, allow_overlap: bool) -> Path:
-    annotations = Path(annotation_file) if annotation_file else (_find_wflw_annotations(root or Path(".")))
+def _build_wflw(
+    root: Path | None,
+    output_dir: Path,
+    *,
+    annotation_file: str | None,
+    image_root: str | None,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+) -> Path:
+    if annotation_file:
+        annotations = Path(annotation_file)
+        root_for_images = annotations.parent
+    else:
+        root_for_images = root or Path(".")
+        annotations = _find_wflw_annotations(root_for_images)
     if annotations is None or not annotations.is_file():
-        raise FileNotFoundError("WFLW annotation file not found")
-    image_base = Path(image_root) if image_root else _find_wflw_images(root or annotations.parent)
+        if root is None:
+            raise FileNotFoundError("WFLW annotation file not found; pass --wflw-annotations or --source-dir")
+        logger.info("WFLW annotations not found; falling back to generic directory parsing")
+        return _build_directory(
+            root,
+            output_dir,
+            dataset="wflw",
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    image_base = Path(image_root) if image_root else _find_wflw_images(root_for_images)
     rows = []
     counts: dict[str, int] = {}
-    for line_no, line in enumerate(annotations.read_text(encoding="utf-8").splitlines(), 1):
+    for line_no, line in enumerate(annotations.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
         if not line.strip():
             continue
         row = _parse_wflw_line(line, line_no)
         rows.append(row)
         counts[row[3]] = counts.get(row[3], 0) + 1
+
     seen: dict[str, int] = {}
-    samples = []
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
     for points98, bbox, attrs, image_rel in rows:
         seen[image_rel] = seen.get(image_rel, 0) + 1
         base_id = Path(image_rel).with_suffix("").as_posix()
         sample_id = base_id if counts[image_rel] <= 1 else f"{base_id}#face-{seen[image_rel]:02d}"
         conds = tuple(name for name in WFLW_ATTRIBUTE_NAMES if attrs.get(name)) or (_label(scenario),)
+        image_path = (image_base / image_rel).resolve()
+        if not image_path.is_file():
+            skipped.append({"sample_id": sample_id, "reason": f"image not found: {image_path}"})
+            continue
         points68 = normalize_landmarks(points98, source_schema="2d_98")
-        samples.append(_sample(
-            output_dir=output_dir,
-            dataset="wflw",
-            sample_id=sample_id,
-            image=(image_base / image_rel).resolve(),
-            points68=points68,
-            condition=conds[0],
-            conditions=tuple(_label(item) for item in conds),
-            source_schema="2d_98",
-            source_id=sample_id,
-            metadata={"bbox": bbox, "attributes": attrs, "image_id": image_rel},
-        ))
-    return _write_manifest(output_dir, "wflw", scenario, _filter(samples, scenarios, limit), mode=mode, allow_overlap=allow_overlap, scenarios=scenarios)
+        samples.append(
+            _sample(
+                output_dir=output_dir,
+                dataset="wflw",
+                sample_id=sample_id,
+                image=image_path,
+                points68=points68,
+                condition=conds[0],
+                conditions=tuple(_label(item) for item in conds),
+                source_schema="2d_98",
+                source_id=sample_id,
+                metadata={"bbox": bbox, "attributes": attrs, "image_id": image_rel},
+            )
+        )
+    if not samples:
+        raise ValueError(f"no WFLW samples built; skipped={skipped[:5]}")
+    return _write_manifest(
+        output_dir,
+        "wflw",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
 
 
 @contextlib.contextmanager
@@ -445,14 +793,45 @@ def build(args: argparse.Namespace) -> Path:
     output_dir = Path(args.output_dir)
     scenarios = _parse_csv(args.scenarios)
     limit = None if not args.samples_per_scenario else int(args.samples_per_scenario)
+
     with _source_context(args.source_dir, args.source_zip) as root:
         if dataset == "wflw":
-            return _build_wflw(root, output_dir, annotation_file=args.wflw_annotations, image_root=args.image_root, scenario=args.scenario, scenarios=scenarios, limit=limit, mode=args.manifest_mode, allow_overlap=args.allow_overlap)
+            return _build_wflw(
+                root,
+                output_dir,
+                annotation_file=args.wflw_annotations,
+                image_root=args.image_root,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+            )
         if args.cofw_json:
-            return _build_json(Path(args.cofw_json), output_dir, dataset=dataset, scenario=args.scenario, scenarios=scenarios, limit=limit, mode=args.manifest_mode, allow_overlap=args.allow_overlap, image_root=args.image_root)
+            return _build_json(
+                Path(args.cofw_json),
+                output_dir,
+                dataset=dataset,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
         if root is None:
             raise ValueError("--source-dir, --source-zip, --wflw-annotations, or --cofw-json is required")
-        return _build_directory(root, output_dir, dataset=dataset, scenario=args.scenario, scenarios=scenarios, limit=limit, mode=args.manifest_mode, allow_overlap=args.allow_overlap, image_root=args.image_root)
+        return _build_directory(
+            root,
+            output_dir,
+            dataset=dataset,
+            scenario=args.scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=args.manifest_mode,
+            allow_overlap=args.allow_overlap,
+            image_root=args.image_root,
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -471,8 +850,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wflw-annotations", default=None)
     parser.add_argument("--cofw-json", default=None)
     parser.add_argument("--write-overlays", action="store_true", help="Accepted for compatibility; overlays are not generated.")
-    parser.add_argument("--no-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are not emitted.")
-    parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are not emitted.")
+    parser.add_argument("--no-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
+    parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
     parser.add_argument("--cache-dir", default=None, help="Accepted for compatibility; explicit sources are preferred.")
     parser.add_argument("--download-url", default=None, help="Accepted for compatibility; explicit sources are preferred.")
     parser.add_argument("--force-download", action="store_true")
