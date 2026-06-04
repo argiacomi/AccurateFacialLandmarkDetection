@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from scipy.integrate import simps
 
+
 def compute_fr_and_auc(nmes, thres=0.10, step=0.0001):
     num_data = len(nmes)
     xs = np.arange(0, thres + step, step)
@@ -12,11 +13,13 @@ def compute_fr_and_auc(nmes, thres=0.10, step=0.0001):
 
     return nme, fr, auc
 
+
 def GetNormCOFW(landmarks_gt):
     left = np.mean(landmarks_gt[[8, 12, 13, 10]], axis=0)
     right = np.mean(landmarks_gt[[9, 11, 14, 15]], axis=0)
     norm = np.linalg.norm(left - right)
     return norm
+
 
 def GetNorm300W(landmarks_gt):
     # left = np.mean(landmarks_gt[36:42], axis=0)
@@ -25,6 +28,8 @@ def GetNorm300W(landmarks_gt):
     right = landmarks_gt[45]
     norm = np.linalg.norm(left - right)
     return norm
+
+
 def calc_nme(landmarks_pred, landmarks_gt, data_name="WFLW"):
     ION_list = []  # inner occular norm
     if data_name == "WFLW":
@@ -42,8 +47,10 @@ def calc_nme(landmarks_pred, landmarks_gt, data_name="WFLW"):
             norm = np.linalg.norm(target[norm_indices[0]] - target[norm_indices[1]])
         elif data_name == "COFW":
             norm = GetNormCOFW(target)
-        elif data_name == "300W":
+        elif data_name in ("300W", "FS68Manifest"):
             norm = GetNorm300W(target)
+        else:
+            raise ValueError(f"unknown dataset for NME: {data_name}")
         c_ION = np.sum(np.linalg.norm(diff, axis=1)) / (diff.shape[0] * norm)
         ION_list.append(c_ION)
 
@@ -52,15 +59,17 @@ def calc_nme(landmarks_pred, landmarks_gt, data_name="WFLW"):
 
     return Sum_ION, ION_list
 
+
 def video_NME_NMJ(model_kpts, gt_kpts):
     """
-    Compute NME and NMJ over all frames in video.
+    Compute NME over all frames in video.
     model_kpts.shape = gt_kpts.shape = (n_frames, n_kpts, 2)
     """
     NME = video_NME(model_kpts, gt_kpts)
     NMJ = video_NMJ(model_kpts, gt_kpts)
 
     return NME, NMJ
+
 
 def video_NME(model_kpts, gt_kpts):
     """
@@ -73,6 +82,7 @@ def video_NME(model_kpts, gt_kpts):
     NME = np.mean(np.mean(NMEs, axis=1), axis=0)
 
     return NME
+
 
 def video_NMJ(model_kpts, gt_kpts):
     """
@@ -89,6 +99,7 @@ def video_NMJ(model_kpts, gt_kpts):
     NMJ = rms(rms(NMJs, axis=1), axis=0)
 
     return NMJ
+
 
 def rms(x, axis=0):
     return np.sqrt(np.mean(x**2, axis=axis))
