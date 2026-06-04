@@ -2,7 +2,7 @@
 
 Code for the WACV 2025 paper **"Cascaded Dual Vision Transformer for Accurate Facial Landmark Detection"**.
 
-This fork also includes a local 68-point landmark manifest workflow for training CD-ViT from WFLW, COFW, 300W, AFLW2000-3D, MERL-RAV, Menpo2D, and MultiPIE-style sources.
+This fork also includes a local 68-point landmark manifest workflow for training CD-ViT from WFLW, COFW, 300W, AFLW2000-3D, MERL-RAV, Menpo2D, MultiPIE-style sources, and Faceswap production-validated manifests.
 
 ## Setup
 
@@ -107,6 +107,34 @@ python tools/landmarks/build_quality_dataset.py \
 ```
 
 All emitted landmark files are materialized as canonical `(68, 2)` `.npy` files. Non-68/non-98 labels are skipped and reported in the dataset audit.
+
+### Faceswap production-validated manifests
+
+Faceswap's `tools/landmarks/build_faceswap_validated_manifest.py` exports reviewed production alignments as a manifest named `production_validated`. That manifest already matches the training contract: each sample has `source_schema=2d_68`, an image path, a manifest-relative landmark `.npy`, face bbox/normalizer, review metadata, and optional `metadata.landmark_ensemble` runtime resolver diagnostics.
+
+You can feed it directly into hard-negative mining:
+
+```bash
+python tools/landmarks/build_hard_negative_manifest.py \
+  --production-validated-manifest /path/to/production_validated/manifest.json \
+  --output-dir runs/landmarks/production_validated_mix \
+  --write-audit
+```
+
+Or include it in a CD-ViT pipeline run with the existing hard-negative argument pass-through:
+
+```bash
+python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
+  --dataset wflw,cofw,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
+  $(tr "\n" " " < runs/landmarks/quality_datasets/dataset_source_args.txt) \
+  --hard-negative-arg "--production-validated-manifest /path/to/production_validated/manifest.json" \
+  --nproc-per-node 2 \
+  --batch-size 16 \
+  --epoch 500 \
+  --heatmap-size 32
+```
+
+Production runtime buckets such as `frontal`, `intermediate`, `large_yaw_left`, `profile_right`, `large_roll`, `extreme_roll`, and rolled profile/yaw buckets are recognized during hard-negative classification. Review `runs/.../hard_negative_mix/hard_negative_mix.json` and `dataset_audit.json` to confirm how many production samples land in each bucket.
 
 ### Run the CD-ViT hard-negative pipeline
 
