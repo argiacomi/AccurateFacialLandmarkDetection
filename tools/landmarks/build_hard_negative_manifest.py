@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge dataset manifests into a prioritized profile/occlusion hard-negative manifest."""
+"""Merge dataset manifests into a ratio-based profile/occlusion hard-negative mix."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import sys
 import typing as T
 from pathlib import Path
@@ -34,6 +35,13 @@ DATASET_DEFAULT_BUCKET: dict[str, str] = {
 }
 
 BUCKET_ORDER: tuple[str, ...] = ("profile_occlusion", "profile", "occlusion", "anchor")
+DEFAULT_BUCKET_RATIOS: dict[str, float] = {
+    "profile_occlusion": 3.0,
+    "profile": 2.0,
+    "occlusion": 2.0,
+    "anchor": 1.0,
+}
+DEFAULT_TOTAL_SAMPLES = 200_000
 
 MANIFEST_ARGS: tuple[tuple[str, str], ...] = (
     ("wflw_manifest", "wflw"),
@@ -74,10 +82,167 @@ def _stable_order(samples: T.Sequence[dict[str, T.Any]], *, seed: int) -> list[d
     return sorted(samples, key=_hash)
 
 
+def _empty_bucket_map(value: float = 0.0) -> dict[str, float]:
+    return {bucket: float(value) for bucket in BUCKET_ORDER}
+
+
+def _parse_bucket_values(value: str | None, *, normalize_percentages: bool = False) -> dict[str, float]:
+    """Parse ``bucket=value`` comma-separated specs for ratios or percentages."""
+    if not value:
+        return dict(DEFAULT_BUCKET_RATIOS)
+
+    parsed = _empty_bucket_map()
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"bucket spec must use bucket=value format, got {item!r}")
+        bucket, raw_amount = item.split("=", 1)
+        bucket = bucket.strip().lower().replace("-", "_")
+        if bucket not in BUCKET_ORDER:
+            raise ValueError(f"unknown bucket {bucket!r}; choose one of {', '.join(BUCKET_ORDER)}")
+        amount = float(raw_amount)
+        if amount < 0:
+            raise ValueError(f"bucket amount must be non-negative for {bucket}: {amount}")
+        parsed[bucket] = amount
+
+    if normalize_percentages:
+        total = sum(parsed.values())
+        if total <= 0:
+            raise ValueError("bucket percentages must sum to a positive value")
+        # Accept either fractions, e.g. 0.375, or human percentages, e.g. 37.5.
+        if total > 1.5:
+            parsed = {bucket: amount / 100.0 for bucket, amount in parsed.items()}
+        percent_total = sum(parsed.values())
+        if percent_total <= 0:
+            raise ValueError("bucket percentages must sum to a positive value")
+        parsed = {bucket: amount / percent_total for bucket, amount in parsed.items()}
+
+    if sum(parsed.values()) <= 0:
+        raise ValueError("at least one bucket ratio/percentage must be positive")
+    return parsed
+
+
+def _ratio_targets(
+    *,
+    bucket_ratios: str | None,
+    bucket_percentages: str | None,
+) -> dict[str, float]:
+    if bucket_ratios and bucket_percentages:
+        raise ValueError("pass only one of --bucket-ratios or --bucket-percentages")
+    if bucket_percentages:
+        return _parse_bucket_values(bucket_percentages, normalize_percentages=True)
+    return _parse_bucket_values(bucket_ratios, normalize_percentages=False)
+
+
+def _normalize_ratios(ratios: T.Mapping[str, float]) -> dict[str, float]:
+    total = sum(max(float(ratios.get(bucket, 0.0)), 0.0) for bucket in BUCKET_ORDER)
+    if total <= 0:
+        raise ValueError("bucket ratios must sum to a positive value")
+    return {bucket: max(float(ratios.get(bucket, 0.0)), 0.0) / total for bucket in BUCKET_ORDER}
+
+
+def _quota_ceilings(
+    *,
+    max_profile_occlusion: int | None,
+    max_profile: int | None,
+    max_occlusion: int | None,
+    max_anchors: int | None,
+) -> dict[str, int | None]:
+    return {
+        "profile_occlusion": max_profile_occlusion,
+        "profile": max_profile,
+        "occlusion": max_occlusion,
+        "anchor": max_anchors,
+    }
+
+
+def _integerize_targets(
+    float_targets: T.Mapping[str, float], capacities: T.Mapping[str, int], target_total: int
+) -> dict[str, int]:
+    counts = {bucket: min(int(math.floor(float_targets.get(bucket, 0.0))), capacities[bucket]) for bucket in BUCKET_ORDER}
+    remaining = max(target_total - sum(counts.values()), 0)
+
+    # Highest fractional remainder gets the next sample. Ties are stable by BUCKET_ORDER.
+    while remaining > 0:
+        candidates = [bucket for bucket in BUCKET_ORDER if counts[bucket] < capacities[bucket]]
+        if not candidates:
+            break
+        candidates.sort(
+            key=lambda bucket: (float_targets.get(bucket, 0.0) - math.floor(float_targets.get(bucket, 0.0))),
+            reverse=True,
+        )
+        progressed = False
+        for bucket in candidates:
+            if remaining <= 0:
+                break
+            if counts[bucket] < capacities[bucket]:
+                counts[bucket] += 1
+                remaining -= 1
+                progressed = True
+        if not progressed:
+            break
+    return counts
+
+
+def _allocate_ratio_counts(
+    *,
+    available: T.Mapping[str, int],
+    ratios: T.Mapping[str, float],
+    total_samples: int | None,
+    ceilings: T.Mapping[str, int | None],
+) -> tuple[dict[str, int], dict[str, int], int]:
+    """Allocate integer per-bucket counts from ratios, availability, and optional ceilings.
+
+    If a bucket cannot fill its target, its shortfall is redistributed to remaining
+    buckets with positive ratios and available capacity.
+    """
+    capacities: dict[str, int] = {}
+    for bucket in BUCKET_ORDER:
+        capacity = max(int(available.get(bucket, 0)), 0)
+        ceiling = ceilings.get(bucket)
+        if ceiling is not None:
+            capacity = min(capacity, max(int(ceiling), 0))
+        capacities[bucket] = capacity
+
+    target_pool = [bucket for bucket in BUCKET_ORDER if ratios.get(bucket, 0.0) > 0 and capacities[bucket] > 0]
+    feasible_total = sum(capacities[bucket] for bucket in target_pool)
+    if feasible_total <= 0:
+        return {bucket: 0 for bucket in BUCKET_ORDER}, capacities, 0
+
+    requested_total = feasible_total if total_samples is None or total_samples <= 0 else int(total_samples)
+    target_total = min(max(requested_total, 0), feasible_total)
+
+    active = set(target_pool)
+    remaining_total = float(target_total)
+    float_targets = _empty_bucket_map()
+
+    while active and remaining_total > 0:
+        ratio_sum = sum(float(ratios[bucket]) for bucket in active)
+        if ratio_sum <= 0:
+            break
+        proposed = {bucket: remaining_total * float(ratios[bucket]) / ratio_sum for bucket in active}
+        saturated = [bucket for bucket, amount in proposed.items() if amount >= capacities[bucket]]
+        if not saturated:
+            float_targets.update(proposed)
+            break
+        for bucket in saturated:
+            float_targets[bucket] = float(capacities[bucket])
+            remaining_total -= float(capacities[bucket])
+            active.remove(bucket)
+
+    counts = _integerize_targets(float_targets, capacities, target_total)
+    return counts, capacities, target_total
+
+
 def build_hard_negative_manifest(
     *,
     manifests: T.Mapping[str, Path],
     output_dir: Path,
+    total_samples: int | None = DEFAULT_TOTAL_SAMPLES,
+    bucket_ratios: str | None = None,
+    bucket_percentages: str | None = None,
     max_profile_occlusion: int | None = None,
     max_profile: int | None = None,
     max_occlusion: int | None = None,
@@ -86,12 +251,14 @@ def build_hard_negative_manifest(
     seed: int = 1337,
     write_audit: bool = False,
 ) -> dict[str, T.Any]:
-    quotas: dict[str, int | None] = {
-        "profile_occlusion": max_profile_occlusion,
-        "profile": max_profile,
-        "occlusion": max_occlusion,
-        "anchor": max_anchors,
-    }
+    ratios = _ratio_targets(bucket_ratios=bucket_ratios, bucket_percentages=bucket_percentages)
+    target_percentages = _normalize_ratios(ratios)
+    ceilings = _quota_ceilings(
+        max_profile_occlusion=max_profile_occlusion,
+        max_profile=max_profile,
+        max_occlusion=max_occlusion,
+        max_anchors=max_anchors,
+    )
 
     classified: dict[str, list[dict[str, T.Any]]] = {bucket: [] for bucket in BUCKET_ORDER}
     audit: dict[str, dict[str, int]] = {}
@@ -125,20 +292,31 @@ def build_hard_negative_manifest(
             dataset_counts[classification_source] += 1
         audit[dataset_label] = dataset_counts
 
+    available_counts = {bucket: len(classified[bucket]) for bucket in BUCKET_ORDER}
+    target_counts, effective_capacities, target_total = _allocate_ratio_counts(
+        available=available_counts,
+        ratios=ratios,
+        total_samples=total_samples,
+        ceilings=ceilings,
+    )
+
     selected: list[dict[str, T.Any]] = []
     counts: dict[str, int] = {}
     by_dataset: dict[str, dict[str, int]] = {}
     for bucket in BUCKET_ORDER:
         ordered = _stable_order(classified[bucket], seed=seed)
-        limit = quotas[bucket]
-        if limit is not None:
-            ordered = ordered[: max(limit, 0)]
+        ordered = ordered[: target_counts[bucket]]
         counts[bucket] = len(ordered)
         for sample in ordered:
             dataset_label = str(sample.get("dataset", "")).strip().lower() or "unknown"
             by_dataset.setdefault(dataset_label, {})
             by_dataset[dataset_label][bucket] = by_dataset[dataset_label].get(bucket, 0) + 1
         selected.extend(ordered)
+
+    total_selected = len(selected)
+    actual_percentages = {
+        bucket: (counts[bucket] / float(total_selected)) if total_selected else 0.0 for bucket in BUCKET_ORDER
+    }
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "manifest.json").write_text(
@@ -147,15 +325,23 @@ def build_hard_negative_manifest(
 
     mix_report = {
         "counts": counts,
+        "available_counts": available_counts,
+        "target_counts": target_counts,
+        "effective_capacities": effective_capacities,
+        "target_total": target_total,
+        "requested_total": total_samples,
+        "target_ratios": {bucket: float(ratios.get(bucket, 0.0)) for bucket in BUCKET_ORDER},
+        "target_percentages": target_percentages,
+        "actual_percentages": actual_percentages,
+        "ceilings": ceilings,
         "by_dataset": by_dataset,
         "weights": dict(BUCKET_WEIGHT),
         "dataset_default_buckets": dict(DATASET_DEFAULT_BUCKET),
-        "quota_fill_rates": {
-            bucket: 1.0 if (quota := quotas[bucket]) is None else counts[bucket] / max(float(quota), 1.0)
-            for bucket in BUCKET_ORDER
+        "bucket_fill_rates": {
+            bucket: counts[bucket] / max(float(target_counts[bucket]), 1.0) for bucket in BUCKET_ORDER
         },
         "anchor_count": counts.get("anchor", 0),
-        "total": len(selected),
+        "total": total_selected,
         "seed": seed,
         "allow_overlap": allow_overlap,
     }
@@ -170,7 +356,7 @@ def build_hard_negative_manifest(
 
     logger.info(
         "Wrote %d hard-negative samples to %s (%s)",
-        len(selected),
+        total_selected,
         output_dir / "manifest.json",
         ", ".join(f"{bucket}={counts[bucket]}" for bucket in BUCKET_ORDER),
     )
@@ -187,10 +373,33 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--multipie-manifest", type=Path)
     parser.add_argument("--w300-manifest", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--max-profile-occlusion", type=int, default=None)
-    parser.add_argument("--max-profile", type=int, default=None)
-    parser.add_argument("--max-occlusion", type=int, default=None)
-    parser.add_argument("--max-anchors", type=int, default=None)
+    parser.add_argument(
+        "--total-samples",
+        type=int,
+        default=DEFAULT_TOTAL_SAMPLES,
+        help="Target final sample count. Use 0 to use all feasible samples under the bucket ratios.",
+    )
+    parser.add_argument(
+        "--bucket-ratios",
+        default=None,
+        help=(
+            "Comma-separated bucket=value ratios. Default: "
+            "profile_occlusion=3,profile=2,occlusion=2,anchor=1"
+        ),
+    )
+    parser.add_argument(
+        "--bucket-percentages",
+        default=None,
+        help=(
+            "Comma-separated bucket=value percentages/fractions, e.g. "
+            "profile_occlusion=37.5,profile=25,occlusion=25,anchor=12.5. "
+            "Overrides --bucket-ratios."
+        ),
+    )
+    parser.add_argument("--max-profile-occlusion", type=int, default=None, help="Optional hard ceiling for this bucket.")
+    parser.add_argument("--max-profile", type=int, default=None, help="Optional hard ceiling for this bucket.")
+    parser.add_argument("--max-occlusion", type=int, default=None, help="Optional hard ceiling for this bucket.")
+    parser.add_argument("--max-anchors", type=int, default=None, help="Optional hard ceiling for this bucket.")
     parser.add_argument("--allow-overlap", action="store_true")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--write-audit", action="store_true")
@@ -213,6 +422,9 @@ def main(argv: T.Sequence[str] | None = None) -> int:
     build_hard_negative_manifest(
         manifests=manifests,
         output_dir=args.output_dir,
+        total_samples=args.total_samples,
+        bucket_ratios=args.bucket_ratios,
+        bucket_percentages=args.bucket_percentages,
         max_profile_occlusion=args.max_profile_occlusion,
         max_profile=args.max_profile,
         max_occlusion=args.max_occlusion,
