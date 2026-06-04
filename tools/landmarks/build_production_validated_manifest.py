@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Build a CD-ViT production_validated manifest from a Faceswap production directory.
+"""Build a CD-ViT production_validated manifest from a Faceswap production source.
 
-The production directory is expected to contain source images and exactly one
-Faceswap ``.fsa`` alignments file. The ``.fsa`` file is Faceswap's compressed
-pickle alignment format, so only run this helper on trusted local files.
+The production source can be either a directory or a ``.zip`` archive containing
+source images and exactly one Faceswap ``.fsa`` alignments file. The ``.fsa``
+file is Faceswap's compressed pickle alignment format, so only run this helper
+on trusted local files.
 
 Example:
     python tools/landmarks/build_production_validated_manifest.py \
-      --prod-dir /path/to/production_dir \
+      --prod-dir /path/to/production_dir_or_zip \
       --output-dir data/landmarks/production_validated
 """
 
@@ -18,10 +19,12 @@ import json
 import logging
 import pickle
 import re
+import shutil
 import sys
 import typing as T
+import zipfile
 import zlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
@@ -34,7 +37,7 @@ from lib.landmarks.core.schema import normalize_landmarks
 logger = logging.getLogger(__name__)
 
 DEFAULT_DATASET = "production_validated"
-DEFAULT_SOURCE = "faceswap_fsa_production_dir"
+DEFAULT_SOURCE = "faceswap_fsa_production_source"
 DEFAULT_LABEL_QUALITY = "human_validated"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
 PRODUCTION_RUNTIME_BUCKET_KEYS = (
@@ -43,6 +46,7 @@ PRODUCTION_RUNTIME_BUCKET_KEYS = (
     "landmark_ensemble_runtime_bucket",
     "landmark_ensemble_bucket",
 )
+EXTRACTED_SOURCE_DIRNAME = "extracted_source"
 
 
 def _jsonable(value: T.Any) -> T.Any:
@@ -68,6 +72,47 @@ def _safe_sample_id(frame_name: str, face_index: int) -> str:
     stem = Path(frame_name).stem
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("_")
     return f"{safe_stem or 'frame'}_face{face_index}"
+
+
+def _zip_member_target(root: Path, member_name: str) -> Path:
+    member_path = PurePosixPath(member_name)
+    if member_path.is_absolute():
+        raise ValueError(f"zip archive contains absolute path: {member_name!r}")
+    if any(part in {"..", ""} for part in member_path.parts):
+        raise ValueError(f"zip archive contains unsafe path: {member_name!r}")
+    target = (root / Path(*member_path.parts)).resolve()
+    root_resolved = root.resolve()
+    if target != root_resolved and root_resolved not in target.parents:
+        raise ValueError(f"zip archive member escapes extraction root: {member_name!r}")
+    return target
+
+
+def _extract_zip_source(zip_path: Path, output_dir: Path) -> Path:
+    if not zipfile.is_zipfile(zip_path):
+        raise ValueError(f"production source is not a valid .zip archive: {zip_path}")
+    extract_dir = output_dir / EXTRACTED_SOURCE_DIRNAME
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            target = _zip_member_target(extract_dir, member.filename)
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member, "r") as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+    return extract_dir.resolve()
+
+
+def _resolve_prod_source(prod_source: Path, output_dir: Path) -> tuple[Path, Path | None]:
+    prod_source = prod_source.resolve()
+    if prod_source.is_dir():
+        return prod_source, None
+    if prod_source.is_file() and prod_source.suffix.lower() == ".zip":
+        return _extract_zip_source(prod_source, output_dir), prod_source
+    raise FileNotFoundError(f"production source must be a directory or .zip file: {prod_source}")
 
 
 def _find_fsa(prod_dir: Path) -> Path:
@@ -243,14 +288,13 @@ def _write_landmarks(output_dir: Path, sample_id: str, points: np.ndarray) -> st
 
 
 def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFAULT_DATASET) -> dict[str, T.Any]:
-    prod_dir = prod_dir.resolve()
-    if not prod_dir.is_dir():
-        raise FileNotFoundError(f"production directory not found: {prod_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prod_source = prod_dir.resolve()
+    prod_dir, zip_source = _resolve_prod_source(prod_source, output_dir)
     fsa_path = _find_fsa(prod_dir)
     alignments = _load_fsa(fsa_path)
     image_index = _build_image_index(prod_dir, fsa_path)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     samples: list[dict[str, T.Any]] = []
     used_ids: dict[str, int] = {}
     skipped_missing_image = 0
@@ -293,27 +337,39 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
                 continue
             samples.append(sample)
 
+    metadata = {
+        "source": DEFAULT_SOURCE,
+        "prod_source": str(prod_source),
+        "prod_dir": str(prod_dir),
+        "alignments": str(fsa_path.resolve()),
+        "label_quality": DEFAULT_LABEL_QUALITY,
+        "review_status": "accepted",
+        "sample_count": len(samples),
+        "skipped_missing_image": skipped_missing_image,
+        "skipped_invalid_face": skipped_invalid_face,
+    }
+    if zip_source is not None:
+        metadata["zip_source"] = str(zip_source)
+        metadata["extracted_source"] = str(prod_dir)
     payload = {
         "dataset": dataset_name,
-        "metadata": {
-            "source": DEFAULT_SOURCE,
-            "prod_dir": str(prod_dir),
-            "alignments": str(fsa_path.resolve()),
-            "label_quality": DEFAULT_LABEL_QUALITY,
-            "review_status": "accepted",
-            "sample_count": len(samples),
-            "skipped_missing_image": skipped_missing_image,
-            "skipped_invalid_face": skipped_invalid_face,
-        },
+        "metadata": metadata,
         "samples": sorted(samples, key=lambda item: str(item["sample_id"])),
     }
     _write_json(output_dir / "manifest.json", payload)
-    return payload["metadata"]
+    return metadata
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prod-dir", "--production-dir", dest="prod_dir", type=Path, required=True)
+    parser.add_argument(
+        "--prod-dir",
+        "--production-dir",
+        dest="prod_dir",
+        type=Path,
+        required=True,
+        help="Production source directory or .zip archive containing images and exactly one .fsa file.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-name", default=DEFAULT_DATASET)
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
