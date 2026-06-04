@@ -1,33 +1,121 @@
-# the code for our WACV2025 paper "Cascaded Dual Vision Transformer for Accurate Facial Landmark Detection"
+# Cascaded Dual Vision Transformer for Accurate Facial Landmark Detection
 
+Code for the WACV 2025 paper **"Cascaded Dual Vision Transformer for Accurate Facial Landmark Detection"**.
 
-# train
-Download the pre-cropped WFLW images from https://github.com/starhiking/HeatmapInHeatmap?tab=readme-ov-file, unzip the WFLW.zip under root folder and run the following commands:
+This fork also includes a local 68-point landmark manifest workflow for training CD-ViT from WFLW, COFW, 300W, AFLW2000-3D, MERL-RAV, Menpo2D, and MultiPIE-style sources.
 
-        torchrun --nproc_per_node=2 TrainHeatmapStageFP16.py
+## Setup
 
+Create and activate a Python environment, then install dependencies:
 
-# faceswap 68-point hard-negative training pipeline
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
 
-This fork also supports training CD-ViT on faceswap-compatible 68-point manifests with hard-negative weighting for profile, occlusion, and profile+occlusion samples.
+Install PyTorch with the CUDA or CPU wheel appropriate for your machine if the default `pip install -r requirements.txt` does not select the right build. See the PyTorch install selector for the correct command for your CUDA version.
 
-The CD-ViT repository consumes the final manifest. The dataset normalization and manifest mining are still delegated to `argiacomi/faceswap` via `tools/landmarks/run_cdvit_manifest_training_pipeline.py`.
+Google Drive-backed dataset downloads require `gdown`, which is included in `requirements.txt`.
 
-Example full pipeline:
+## Original WFLW training path
+
+Download the pre-cropped WFLW images from the HeatmapInHeatmap release, unzip `WFLW.zip` under the repository root, and run:
+
+```bash
+torchrun --nproc_per_node=2 TrainHeatmapStageFP16.py
+```
+
+## Local 68-point landmark workflow
+
+The local workflow has three phases:
+
+1. Download and extract dataset sources into `data/landmarks`.
+2. Prepare any dataset-specific bridges, especially MERL-RAV labels matched to native AFLW images.
+3. Build canonical 68-point manifest sources and then run the CD-ViT hard-negative training pipeline.
+
+The convenience script performs the first three prep steps and writes copy/pasteable dataset-source arguments for the pipeline:
+
+```bash
+bash tools/landmarks/download_prepare_build_quality_datasets.sh
+```
+
+For a small smoke run that keeps going when a dataset is unavailable:
+
+```bash
+SAMPLES_PER_SCENARIO=50 CONTINUE_ON_ERROR=1 \
+  bash tools/landmarks/download_prepare_build_quality_datasets.sh
+```
+
+The script writes:
+
+```text
+data/landmarks/<dataset>/archives/*
+data/landmarks/<dataset>/extracted/*
+data/landmarks/merl-rav/organized/manifest.json
+runs/landmarks/quality_datasets/<dataset>/manifest.json
+runs/landmarks/quality_datasets/dataset_source_args.txt
+```
+
+### Download datasets only
+
+```bash
+python tools/landmarks/download_landmark_datasets.py \
+  --output-root data/landmarks \
+  --dataset all \
+  --extract \
+  --include-google-drive \
+  --keep-going
+```
+
+List the configured source URLs and Google Drive ids:
+
+```bash
+python tools/landmarks/download_landmark_datasets.py --list
+```
+
+Optional 300W iBUG split archive parts can be downloaded with:
+
+```bash
+python tools/landmarks/download_landmark_datasets.py \
+  --dataset 300w \
+  --include-alternates \
+  --output-root data/landmarks
+```
+
+### Prepare MERL-RAV + AFLW
+
+MERL-RAV labels are annotations over AFLW images. After downloading/extracting both sources, organize them with:
+
+```bash
+python tools/landmarks/prepare_merl_rav_aflw.py \
+  --merl-rav-root data/landmarks/merl-rav/extracted/MERL-RAV_dataset-master.zip \
+  --aflw-root data/landmarks/aflw/extracted/AFLW.zip \
+  --output-dir data/landmarks/merl-rav/organized
+```
+
+The helper matches labels to AFLW `flickr/` images by `imageNNNNN`, preserves occlusion/visibility metadata, and writes a manifest consumable by `build_quality_dataset.py`.
+
+### Build one dataset manifest manually
+
+```bash
+python tools/landmarks/build_quality_dataset.py \
+  --dataset 300w \
+  --source-dir data/landmarks/300w/extracted \
+  --output-dir runs/landmarks/quality_datasets/300w
+```
+
+All emitted landmark files are materialized as canonical `(68, 2)` `.npy` files. Non-68/non-98 labels are skipped and reported in the dataset audit.
+
+### Run the CD-ViT hard-negative pipeline
+
+After running the setup script, launch the pipeline using the generated source arguments:
 
 ```bash
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
-  --faceswap-root /path/to/faceswap \
-  --output-root runs/landmarks \
-  --run-name cdvit_fs68_hard \
-  --dataset wflw,cofw,merl-rav,aflw2000-3d,300w,menpo2d,multipie \
-  --dataset-source wflw=/data/raw/wflw \
-  --dataset-source cofw=/data/raw/cofw \
-  --dataset-source merl-rav=/data/raw/merl-rav \
-  --dataset-source aflw2000-3d=/data/raw/aflw2000-3d \
-  --dataset-source 300w=/data/raw/300w \
-  --dataset-source menpo2d=/data/raw/menpo2d \
-  --dataset-source multipie=/data/raw/multipie \
+  --dataset wflw,cofw,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
+  $(tr "\n" " " < runs/landmarks/quality_datasets/dataset_source_args.txt) \
   --max-profile-occlusion 50000 \
   --max-profile 50000 \
   --max-occlusion 50000 \
@@ -38,10 +126,10 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
   --heatmap-size 32
 ```
 
-The script runs these stages:
+Pipeline stages:
 
-1. `build_dataset_manifests`: calls faceswap `build_quality_dataset.py` once per dataset.
-2. `build_hard_negative_manifest`: calls faceswap `build_hard_negative_manifest.py` to create the biased hard-negative mix.
+1. `build_dataset_manifests`: calls local `tools/landmarks/build_quality_dataset.py` once per dataset.
+2. `build_hard_negative_manifest`: calls local `tools/landmarks/build_hard_negative_manifest.py` to create the biased hard-negative mix.
 3. `validate_cdvit_manifest`: verifies that the final manifest has readable `(68, 2)` landmark `.npy` files.
 4. `train_cdvit`: launches `TrainHeatmapStageFP16.py --data_name FS68Manifest` with the mined manifest.
 
@@ -52,7 +140,8 @@ Useful controls:
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py --dry-run ...
 
 # Only build manifests and stop before training.
-python tools/landmarks/run_cdvit_manifest_training_pipeline.py --stop-after validate_cdvit_manifest ...
+python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
+  --stop-after validate_cdvit_manifest ...
 
 # Resume from an already-built hard-negative manifest.
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
@@ -60,4 +149,4 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
   --start-at validate_cdvit_manifest
 ```
 
-By default, Menpo2D and MultiPIE 39-point profile samples are excluded because CD-ViT currently trains on exactly 68 landmarks. Pass `--include-39pt-profile --allow-non68` only if you intentionally want mixed manifests and are comfortable with `DatasetFS68Manifest` skipping non-68 samples.
+By default, Menpo2D and MultiPIE non-68 profile samples are excluded because CD-ViT currently trains on exactly 68 landmarks. Use `--allow-non68` only if you intentionally want mixed manifests and are comfortable with `DatasetFS68Manifest` training on the exact-68 subset.
