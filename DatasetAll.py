@@ -1,9 +1,19 @@
 from DatasetCOFW import LandmarkDataset as DCOFW
 from Dataset300W import LandmarkDataset as D300W
 from Dataset import LandmarkDataset as DWFLW
+from DatasetFS68Manifest import LandmarkDataset as DFS68Manifest
 
 
-def GetDataset(name, data_root, split, preload=True, aug=True, perturbation=False, heatmap_size=0):
+def GetDataset(
+    name,
+    data_root,
+    split,
+    preload=True,
+    aug=True,
+    perturbation=False,
+    heatmap_size=0,
+    manifest_path="",
+):
     if name == "WFLW":
         return DWFLW(
             data_root=data_root,
@@ -31,3 +41,13 @@ def GetDataset(name, data_root, split, preload=True, aug=True, perturbation=Fals
             perturbation=perturbation,
             heatmap_size=heatmap_size,
         )
+    if name == "FS68Manifest":
+        return DFS68Manifest(
+            manifest_path=manifest_path or data_root,
+            split=split,
+            preload=preload,
+            aug=aug,
+            perturbation=perturbation,
+            heatmap_size=heatmap_size,
+        )
+    raise ValueError(f"unknown dataset name: {name}")
