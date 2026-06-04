@@ -108,15 +108,17 @@ python tools/landmarks/build_quality_dataset.py \
 
 All emitted landmark files are materialized as canonical `(68, 2)` `.npy` files. Non-68/non-98 labels are skipped and reported in the dataset audit.
 
-### Faceswap production alignment directories
+### Faceswap production alignment directories or zip archives
 
-Use `--prod-dir` when you have a directory containing production images and exactly one Faceswap `.fsa` alignments file. The local helper reads the `.fsa`, writes one canonical `(68, 2)` `.npy` landmark file per face, and emits a `production_validated` manifest.
+Use `--prod-dir` when you have either a directory or a `.zip` archive containing production images and exactly one Faceswap `.fsa` alignments file. The local helper reads the `.fsa`, writes one canonical `(68, 2)` `.npy` landmark file per face, and emits a `production_validated` manifest.
 
 ```bash
 python tools/landmarks/build_production_validated_manifest.py \
-  --prod-dir /path/to/production_dir \
+  --prod-dir /path/to/production_dir_or_zip \
   --output-dir data/landmarks/production_validated
 ```
+
+When `--prod-dir` points at a `.zip`, the archive is safely extracted under the output directory and manifest image paths point at that stable extracted copy.
 
 The output includes:
 
@@ -131,7 +133,7 @@ You can also let the CD-ViT pipeline build and include it automatically:
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
   --dataset wflw,cofw,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
   $(tr "\n" " " < runs/landmarks/quality_datasets/dataset_source_args.txt) \
-  --prod-dir /path/to/production_dir \
+  --prod-dir /path/to/production_dir_or_zip \
   --nproc-per-node 2 \
   --batch-size 16 \
   --epoch 500 \
@@ -140,7 +142,7 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
 
 Production runtime buckets such as `frontal`, `intermediate`, `large_yaw_left`, `profile_right`, `large_roll`, `extreme_roll`, and rolled profile/yaw buckets are recognized during hard-negative classification. Review `runs/.../hard_negative_mix/hard_negative_mix.json` and `dataset_audit.json` to confirm how many production samples land in each bucket.
 
-Because `.fsa` files are compressed pickle files, only use `--prod-dir` with trusted local production directories.
+Because `.fsa` files are compressed pickle files, only use `--prod-dir` with trusted local production sources.
 
 ### Run the CD-ViT hard-negative pipeline
 
@@ -158,7 +160,7 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
 
 Pipeline stages:
 
-1. `build_dataset_manifests`: calls local `tools/landmarks/build_quality_dataset.py` once per dataset and, when `--prod-dir` is supplied, builds `production_validated` from the production directory.
+1. `build_dataset_manifests`: calls local `tools/landmarks/build_quality_dataset.py` once per dataset and, when `--prod-dir` is supplied, builds `production_validated` from the production source.
 2. `build_hard_negative_manifest`: calls local `tools/landmarks/build_hard_negative_manifest.py` to create a ratio-aware hard-negative mix.
 3. `validate_cdvit_manifest`: verifies that the final manifest has readable `(68, 2)` landmark `.npy` files.
 4. `train_cdvit`: launches `TrainHeatmapStageFP16.py --data_name FS68Manifest` with the mined manifest.
