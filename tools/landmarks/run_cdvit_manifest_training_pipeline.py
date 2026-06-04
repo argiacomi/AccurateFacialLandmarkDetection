@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-"""Build faceswap landmark manifests and train CD-ViT on a hard-negative 68-point mix.
+"""Build local landmark manifests and train CD-ViT on a hard-negative 68-point mix.
 
-This runner intentionally mirrors the staged shape of faceswap's
-``run_landmark_resolver_pipeline.py`` while keeping the CD-ViT pipeline small:
+Pipeline stages:
 
-1. build per-dataset faceswap manifests with ``build_quality_dataset.py``
-2. merge them with ``build_hard_negative_manifest.py``
+1. build per-dataset manifests with local ``build_quality_dataset.py``
+2. merge them with local ``build_hard_negative_manifest.py``
 3. validate that the final manifest contains CD-ViT-compatible 68-point samples
 4. launch ``TrainHeatmapStageFP16.py --data_name FS68Manifest``
-
-The faceswap repository remains the source of truth for dataset normalization,
-condition tagging, and hard-negative weighting. This script only orchestrates
-those tools and passes the resulting manifest into this repository's trainer.
 """
 
 from __future__ import annotations
@@ -19,7 +14,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -30,6 +24,7 @@ from pathlib import Path
 
 
 CDVIT_ROOT = Path(__file__).resolve().parents[2]
+TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
 DEFAULT_DATASETS = "wflw,cofw,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
 MINED_MANIFEST_NAME = "manifest.json"
 PROGRESS_LOG_NAME = "pipeline_progress.jsonl"
@@ -201,8 +196,8 @@ def _append_progress(paths: PipelinePaths, result: StageResult) -> None:
         handle.write(json.dumps(result.to_json(), sort_keys=True) + "\n")
 
 
-def _script(faceswap_root: Path, relative_path: str) -> str:
-    return str(faceswap_root / "tools" / "landmarks" / relative_path)
+def _script(relative_path: str) -> str:
+    return str(TOOLS_ROOT / relative_path)
 
 
 def _append_extra(argv: list[str], extras: T.Sequence[str]) -> list[str]:
@@ -222,13 +217,12 @@ def _dataset_build_commands(args: argparse.Namespace, paths: PipelinePaths) -> l
     if overlap:
         raise ValueError("datasets cannot have both source dir and source zip: " + ", ".join(overlap))
 
-    faceswap_root = Path(args.faceswap_root).resolve()
     commands: list[list[str]] = []
     for dataset in _datasets(args):
         output_dir = paths.dataset_root / dataset
         argv = [
             args.python_executable,
-            _script(faceswap_root, "build_quality_dataset.py"),
+            _script("build_quality_dataset.py"),
             "--dataset",
             dataset,
             "--output-dir",
@@ -248,10 +242,9 @@ def _dataset_build_commands(args: argparse.Namespace, paths: PipelinePaths) -> l
 
 
 def _hard_negative_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
-    faceswap_root = Path(args.faceswap_root).resolve()
     argv = [
         args.python_executable,
-        _script(faceswap_root, "build_hard_negative_manifest.py"),
+        _script("build_hard_negative_manifest.py"),
         "--output-dir",
         str(paths.hard_negative_dir),
     ]
@@ -313,19 +306,13 @@ def _stage_slice(start_at: str | None, stop_after: str | None) -> tuple[str, ...
     return STAGES[start : stop + 1]
 
 
-def _require_faceswap(args: argparse.Namespace) -> None:
+def _require_local_tools(args: argparse.Namespace) -> None:
     if args.manifest:
         return
-    faceswap_root = Path(args.faceswap_root).resolve()
-    required = [
-        faceswap_root / "tools" / "landmarks" / "build_quality_dataset.py",
-        faceswap_root / "tools" / "landmarks" / "build_hard_negative_manifest.py",
-    ]
+    required = [TOOLS_ROOT / "build_quality_dataset.py", TOOLS_ROOT / "build_hard_negative_manifest.py"]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
-        raise FileNotFoundError(
-            "faceswap_root must point at argiacomi/faceswap. Missing: " + ", ".join(missing)
-        )
+        raise FileNotFoundError("missing local manifest tool(s): " + ", ".join(missing))
 
 
 def _run_command(argv: list[str], *, cwd: Path, dry_run: bool) -> None:
@@ -353,7 +340,7 @@ def _resolve_manifest_path(manifest_path: Path, raw_value: T.Any) -> Path:
 def _validate_cdvit_manifest(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
     try:
         import numpy as np
-    except ImportError as err:  # pragma: no cover: trainer environment always has numpy
+    except ImportError as err:
         raise RuntimeError("numpy is required to validate CD-ViT landmark manifests") from err
 
     manifest_path = paths.hard_negative_manifest
@@ -425,9 +412,7 @@ def _validate_cdvit_manifest(args: argparse.Namespace, paths: PipelinePaths) -> 
             "or fix/remap those source manifests."
         )
     if report["missing_landmarks"] or report["invalid_landmarks"]:
-        raise ValueError(
-            "manifest contains missing or invalid landmark files. See " f"{paths.validation_report}"
-        )
+        raise ValueError("manifest contains missing or invalid landmark files. See " f"{paths.validation_report}")
     return report
 
 
@@ -497,23 +482,7 @@ def _run_stage(stage: str, args: argparse.Namespace, paths: PipelinePaths) -> St
         status = "planned" if args.dry_run else "ok"
         return StageResult(stage, status, time.time() - started, command=command, outputs=outputs, notes=notes)
     except Exception as err:  # noqa: BLE001
-        return StageResult(
-            stage,
-            "error",
-            time.time() - started,
-            command=command,
-            outputs=outputs,
-            notes=notes,
-            error=str(err),
-        )
-
-
-def _default_faceswap_root() -> str:
-    env_value = os.environ.get("FACESWAP_ROOT")
-    if env_value:
-        return env_value
-    sibling = CDVIT_ROOT.parent / "faceswap"
-    return str(sibling)
+        return StageResult(stage, "error", time.time() - started, command=command, outputs=outputs, notes=notes, error=str(err))
 
 
 def _default_run_name() -> str:
@@ -522,7 +491,6 @@ def _default_run_name() -> str:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--faceswap-root", default=_default_faceswap_root())
     parser.add_argument("--output-root", type=Path, default=Path("runs/landmarks"))
     parser.add_argument("--run-name", default=_default_run_name())
     parser.add_argument("--manifest", type=Path, default=None, help="Use an existing hard-negative manifest and skip manifest build stages.")
@@ -533,7 +501,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-zip", type=Path, default=None, help="Source zip for a single selected dataset.")
     parser.add_argument("--dataset-build-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_quality_dataset.py; repeatable.")
     parser.add_argument("--hard-negative-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_hard_negative_manifest.py; repeatable.")
-    parser.add_argument("--include-39pt-profile", action="store_true", help="Keep Menpo/MultiPIE 39-point profile samples in source manifests.")
+    parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; local builder emits canonical 68 only.")
     parser.add_argument("--allow-non68", action="store_true", help="Allow mixed landmark counts and train on the exact-68 subset.")
     parser.add_argument("--max-profile-occlusion", type=int, default=None)
     parser.add_argument("--max-profile", type=int, default=None)
@@ -566,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
         explicit_manifest=Path(args.manifest).resolve() if args.manifest else None,
     )
     paths.run_root.mkdir(parents=True, exist_ok=True)
-    _require_faceswap(args)
+    _require_local_tools(args)
 
     selected_stages = _stage_slice(args.start_at, args.stop_after)
     print(f"CD-ViT pipeline run root: {paths.run_root}")
