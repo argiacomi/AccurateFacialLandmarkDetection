@@ -125,13 +125,13 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
 Pipeline stages:
 
 1. `build_dataset_manifests`: calls local `tools/landmarks/build_quality_dataset.py` once per dataset.
-2. `build_hard_negative_manifest`: calls local `tools/landmarks/build_hard_negative_manifest.py` to create a ratio-based hard-negative mix.
+2. `build_hard_negative_manifest`: calls local `tools/landmarks/build_hard_negative_manifest.py` to create a ratio-aware hard-negative mix.
 3. `validate_cdvit_manifest`: verifies that the final manifest has readable `(68, 2)` landmark `.npy` files.
 4. `train_cdvit`: launches `TrainHeatmapStageFP16.py --data_name FS68Manifest` with the mined manifest.
 
 ### Hard-negative mix defaults
 
-`build_hard_negative_manifest.py` now samples by ratio/percentage rather than by fixed bucket caps. The default target is 200,000 samples with this hard-negative-heavy ratio:
+`build_hard_negative_manifest.py` samples by ratio/percentage rather than by fixed bucket caps. By default, `--total-samples 0` uses every feasible classified sample after deduping, while preserving this hard-negative-heavy ordering/target ratio as much as the available buckets allow:
 
 ```text
 profile_occlusion = 3
@@ -142,11 +142,11 @@ anchor            = 1
 
 That corresponds to target percentages of 37.5%, 25%, 25%, and 12.5%. If one bucket has too few samples, the remaining capacity is redistributed to the other buckets with available samples. The resulting `hard_negative_mix.json` reports available counts, target counts, actual percentages, and any optional ceilings.
 
-Override the defaults by passing hard-negative builder args through the pipeline:
+For a bounded experiment, pass an explicit total sample target through the pipeline:
 
 ```bash
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
-  --hard-negative-arg "--total-samples 100000" \
+  --hard-negative-arg "--total-samples 10000" \
   --hard-negative-arg "--bucket-percentages profile_occlusion=30,profile=30,occlusion=25,anchor=15" \
   ...
 ```
