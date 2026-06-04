@@ -21,7 +21,6 @@ import re
 import sys
 import typing as T
 import zlib
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -155,13 +154,15 @@ def _face_value(face: T.Mapping[str, T.Any], key: str, default: T.Any = None) ->
     return face.get(key, default)
 
 
+def _first_present(mapping: T.Mapping[str, T.Any], keys: T.Sequence[str]) -> T.Any:
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
 def _landmarks(face: T.Mapping[str, T.Any]) -> np.ndarray:
-    raw = (
-        face.get("landmarks_xy")
-        or face.get("landmarks")
-        or face.get("landmarksXY")
-        or face.get("landmark")
-    )
+    raw = _first_present(face, ("landmarks_xy", "landmarks", "landmarksXY", "landmark"))
     if raw is None:
         raise ValueError("face has no landmarks_xy")
     points = normalize_landmarks(np.asarray(raw, dtype=np.float32), source_schema="2d_68")
@@ -251,11 +252,9 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
 
     output_dir.mkdir(parents=True, exist_ok=True)
     samples: list[dict[str, T.Any]] = []
-    resolver_rows: list[dict[str, T.Any]] = []
-    skipped: Counter[str] = Counter()
-    skipped_examples: list[dict[str, str]] = []
-    condition_counts: Counter[str] = Counter()
-    used_ids: Counter[str] = Counter()
+    used_ids: dict[str, int] = {}
+    skipped_missing_image = 0
+    skipped_invalid_face = 0
 
     for frame_name, entry in sorted(alignments.items()):
         if str(frame_name).startswith("__"):
@@ -263,13 +262,11 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
         image_path = _resolve_image(prod_dir, str(frame_name), image_index)
         faces = _faces_from_entry(entry)
         if image_path is None:
-            skipped["missing_image"] += len(faces) or 1
-            if len(skipped_examples) < 50:
-                skipped_examples.append({"frame": str(frame_name), "reason": "missing_image"})
+            skipped_missing_image += len(faces) or 1
             continue
         for face_index, face in enumerate(faces):
             sample_id = _safe_sample_id(str(frame_name), face_index)
-            used_ids[sample_id] += 1
+            used_ids[sample_id] = used_ids.get(sample_id, 0) + 1
             if used_ids[sample_id] > 1:
                 sample_id = f"{sample_id}_{used_ids[sample_id]}"
             try:
@@ -291,22 +288,10 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
                     "metadata": metadata,
                 }
             except Exception as err:  # noqa: BLE001
-                skipped["invalid_face"] += 1
-                if len(skipped_examples) < 50:
-                    skipped_examples.append({"frame": str(frame_name), "face_index": str(face_index), "reason": str(err)})
+                skipped_invalid_face += 1
+                logger.debug("Skipping invalid production face %s[%d]: %s", frame_name, face_index, err)
                 continue
             samples.append(sample)
-            condition_counts[condition] += 1
-            resolver_rows.append(
-                {
-                    "sample_id": sample_id,
-                    "image_path": str(image_path),
-                    "face_index": face_index,
-                    "review_status": metadata.get("review_status", "accepted"),
-                    "condition": condition,
-                    "landmark_ensemble": metadata.get("landmark_ensemble", {}),
-                }
-            )
 
     payload = {
         "dataset": dataset_name,
@@ -317,27 +302,13 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
             "label_quality": DEFAULT_LABEL_QUALITY,
             "review_status": "accepted",
             "sample_count": len(samples),
+            "skipped_missing_image": skipped_missing_image,
+            "skipped_invalid_face": skipped_invalid_face,
         },
         "samples": sorted(samples, key=lambda item: str(item["sample_id"])),
     }
     _write_json(output_dir / "manifest.json", payload)
-
-    with (output_dir / "resolver_metadata.jsonl").open("w", encoding="utf-8") as handle:
-        for row in sorted(resolver_rows, key=lambda item: str(item["sample_id"])):
-            handle.write(json.dumps(_jsonable(row), sort_keys=True) + "\n")
-
-    audit = {
-        "dataset": dataset_name,
-        "prod_dir": str(prod_dir),
-        "alignments": str(fsa_path.resolve()),
-        "frames_total": len(alignments),
-        "samples_written": len(samples),
-        "skipped": dict(sorted(skipped.items())),
-        "skipped_examples": skipped_examples,
-        "condition_counts": dict(sorted(condition_counts.items())),
-    }
-    _write_json(output_dir / "audit.json", audit)
-    return audit
+    return payload["metadata"]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -353,11 +324,11 @@ def main(argv: T.Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s:%(name)s:%(message)s")
     try:
-        audit = build_manifest(args.prod_dir, args.output_dir, dataset_name=args.dataset_name)
+        metadata = build_manifest(args.prod_dir, args.output_dir, dataset_name=args.dataset_name)
     except Exception as err:  # noqa: BLE001
         logger.error("production manifest build failed: %s", err)
         return 1
-    logger.info("Wrote %d production_validated samples to %s", audit["samples_written"], args.output_dir / "manifest.json")
+    logger.info("Wrote %d production_validated samples to %s", metadata["sample_count"], args.output_dir / "manifest.json")
     print(f"Wrote production_validated manifest: {args.output_dir / 'manifest.json'}")
     return 0
 
