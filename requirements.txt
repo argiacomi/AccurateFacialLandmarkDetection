@@ -1,0 +1,23 @@
+# Core CD-ViT training dependencies
+#
+# Install PyTorch with the wheel/index URL that matches your CUDA or CPU setup.
+# The generic torch/torchvision pins below are intentionally loose because CUDA
+# wheels differ by platform. See: https://pytorch.org/get-started/locally/
+
+torch>=2.0
+torchvision>=0.15
+
+# Data loading, augmentation, and image IO
+numpy>=1.23
+opencv-python>=4.7
+Pillow>=9.5
+albumentations>=1.3
+scipy>=1.10
+
+# Dataset download/prep utilities
+gdown>=5.0
+tqdm>=4.65
+
+# Logging/visualization helpers commonly used during training
+matplotlib>=3.7
+tensorboard>=2.12
