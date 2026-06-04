@@ -4,9 +4,10 @@
 Pipeline stages:
 
 1. build per-dataset manifests with local ``build_quality_dataset.py``
-2. merge them with local ``build_hard_negative_manifest.py``
-3. validate that the final manifest contains CD-ViT-compatible 68-point samples
-4. launch ``TrainHeatmapStageFP16.py --data_name FS68Manifest``
+2. optionally build a ``production_validated`` manifest from ``--prod-dir``
+3. merge them with local ``build_hard_negative_manifest.py``
+4. validate that the final manifest contains CD-ViT-compatible 68-point samples
+5. launch ``TrainHeatmapStageFP16.py --data_name FS68Manifest``
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ MINED_MANIFEST_NAME = "manifest.json"
 PROGRESS_LOG_NAME = "pipeline_progress.jsonl"
 TRAIN_COMMAND_NAME = "train_command.json"
 VALIDATION_REPORT_NAME = "cdvit_manifest_validation.json"
+PRODUCTION_DATASET = "production_validated"
 
 STAGES: tuple[str, ...] = (
     "build_dataset_manifests",
@@ -46,6 +48,7 @@ HARD_NEGATIVE_MANIFEST_FLAGS: dict[str, str] = {
     "menpo2d": "--menpo2d-manifest",
     "multipie": "--multipie-manifest",
     "300w": "--w300-manifest",
+    PRODUCTION_DATASET: "--production-validated-manifest",
 }
 
 DATASET_ALIASES = {
@@ -64,6 +67,11 @@ DATASET_ALIASES = {
     "300-w": "300w",
     "wflw": "wflw",
     "cofw": "cofw",
+    "production": PRODUCTION_DATASET,
+    "prod": PRODUCTION_DATASET,
+    "prod-dir": PRODUCTION_DATASET,
+    "production-validated": PRODUCTION_DATASET,
+    "production_validated": PRODUCTION_DATASET,
 }
 
 
@@ -134,6 +142,8 @@ def _datasets(args: argparse.Namespace) -> tuple[str, ...]:
     normalized: list[str] = []
     for item in requested:
         dataset = _normalize_dataset_name(item)
+        if dataset == PRODUCTION_DATASET:
+            raise ValueError("Use --prod-dir for production_validated data instead of adding it to --dataset")
         if dataset not in HARD_NEGATIVE_MANIFEST_FLAGS:
             raise ValueError(f"unsupported dataset for CD-ViT hard-negative mix: {item!r}")
         if dataset not in normalized:
@@ -149,6 +159,8 @@ def _parse_dataset_mapping(values: T.Sequence[str] | None, option: str) -> dict[
         dataset, raw_path = spec.split("=", 1)
         dataset = _normalize_dataset_name(dataset)
         raw_path = raw_path.strip()
+        if dataset == PRODUCTION_DATASET:
+            raise ValueError(f"{option} does not accept production_validated; use --prod-dir")
         if dataset not in HARD_NEGATIVE_MANIFEST_FLAGS:
             raise ValueError(f"{option} received unsupported dataset {dataset!r}")
         if not raw_path:
@@ -210,6 +222,30 @@ def _dataset_manifest_path(paths: PipelinePaths, dataset: str) -> Path:
     return paths.dataset_root / dataset / "manifest.json"
 
 
+def _production_manifest_path(paths: PipelinePaths) -> Path:
+    return _dataset_manifest_path(paths, PRODUCTION_DATASET)
+
+
+def _has_prod_dir(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "prod_dir", None))
+
+
+def _production_build_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str] | None:
+    if not _has_prod_dir(args):
+        return None
+    return _append_extra(
+        [
+            args.python_executable,
+            _script("build_production_validated_manifest.py"),
+            "--prod-dir",
+            str(args.prod_dir),
+            "--output-dir",
+            str(paths.dataset_root / PRODUCTION_DATASET),
+        ],
+        args.production_build_arg or [],
+    )
+
+
 def _dataset_build_commands(args: argparse.Namespace, paths: PipelinePaths) -> list[list[str]]:
     source_map = _dataset_source_map(args)
     source_zip_map = _dataset_source_zip_map(args)
@@ -238,6 +274,10 @@ def _dataset_build_commands(args: argparse.Namespace, paths: PipelinePaths) -> l
         if dataset in {"menpo2d", "multipie"} and not args.include_39pt_profile:
             extras.insert(0, "--no-39pt-profile")
         commands.append(_append_extra(argv, extras))
+
+    production_command = _production_build_command(args, paths)
+    if production_command is not None:
+        commands.append(production_command)
     return commands
 
 
@@ -252,6 +292,10 @@ def _hard_negative_command(args: argparse.Namespace, paths: PipelinePaths) -> li
         manifest = _dataset_manifest_path(paths, dataset)
         if manifest.is_file() or args.dry_run:
             argv.extend([HARD_NEGATIVE_MANIFEST_FLAGS[dataset], str(manifest)])
+
+    production_manifest = _production_manifest_path(paths)
+    if _has_prod_dir(args) and (production_manifest.is_file() or args.dry_run):
+        argv.extend([HARD_NEGATIVE_MANIFEST_FLAGS[PRODUCTION_DATASET], str(production_manifest)])
 
     if "--write-audit" not in " ".join(args.hard_negative_arg or []):
         argv.append("--write-audit")
@@ -310,6 +354,8 @@ def _require_local_tools(args: argparse.Namespace) -> None:
     if args.manifest:
         return
     required = [TOOLS_ROOT / "build_quality_dataset.py", TOOLS_ROOT / "build_hard_negative_manifest.py"]
+    if _has_prod_dir(args):
+        required.append(TOOLS_ROOT / "build_production_validated_manifest.py")
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError("missing local manifest tool(s): " + ", ".join(missing))
@@ -361,7 +407,9 @@ def _validate_cdvit_manifest(args: argparse.Namespace, paths: PipelinePaths) -> 
     }
 
     for sample in samples:
-        dataset = str(sample.get("dataset") or sample.get("source", {}).get("dataset") or "unknown")
+        raw_source = sample.get("source")
+        source = raw_source if isinstance(raw_source, dict) else {}
+        dataset = str(sample.get("dataset") or source.get("dataset") or "unknown")
         dataset_stats = report["datasets"].setdefault(
             dataset,
             {"total": 0, "exact_68": 0, "non_68": 0, "missing": 0, "invalid": 0},
@@ -416,11 +464,18 @@ def _validate_cdvit_manifest(args: argparse.Namespace, paths: PipelinePaths) -> 
     return report
 
 
+def _build_manifest_outputs(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
+    outputs = [str(_dataset_manifest_path(paths, dataset)) for dataset in _datasets(args)]
+    if _has_prod_dir(args):
+        outputs.append(str(_production_manifest_path(paths)))
+    return outputs
+
+
 def _stage_complete(stage: str, args: argparse.Namespace, paths: PipelinePaths) -> bool:
     if args.manifest and stage in {"build_dataset_manifests", "build_hard_negative_manifest"}:
         return True
     if stage == "build_dataset_manifests":
-        return all(_dataset_manifest_path(paths, dataset).is_file() for dataset in _datasets(args))
+        return all(Path(path).is_file() for path in _build_manifest_outputs(args, paths))
     if stage == "build_hard_negative_manifest":
         return paths.hard_negative_manifest.is_file()
     if stage == "validate_cdvit_manifest":
@@ -443,7 +498,7 @@ def _run_stage(stage: str, args: argparse.Namespace, paths: PipelinePaths) -> St
         if stage == "build_dataset_manifests":
             for command in _dataset_build_commands(args, paths):
                 _run_command(command, cwd=CDVIT_ROOT, dry_run=args.dry_run)
-            outputs = [str(_dataset_manifest_path(paths, dataset)) for dataset in _datasets(args)]
+            outputs = _build_manifest_outputs(args, paths)
 
         elif stage == "build_hard_negative_manifest":
             if args.manifest:
@@ -494,12 +549,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=Path("runs/landmarks"))
     parser.add_argument("--run-name", default=_default_run_name())
     parser.add_argument("--manifest", type=Path, default=None, help="Use an existing hard-negative manifest and skip manifest build stages.")
-    parser.add_argument("--dataset", default=DEFAULT_DATASETS, help="Comma-separated dataset list.")
+    parser.add_argument("--dataset", default=DEFAULT_DATASETS, help="Comma-separated non-production dataset list.")
     parser.add_argument("--dataset-source", action="append", default=[], help="dataset=source_dir, repeatable.")
     parser.add_argument("--dataset-source-zip", action="append", default=[], help="dataset=source_zip, repeatable.")
     parser.add_argument("--source-dir", type=Path, default=None, help="Source dir for a single selected dataset.")
     parser.add_argument("--source-zip", type=Path, default=None, help="Source zip for a single selected dataset.")
+    parser.add_argument("--prod-dir", "--production-dir", dest="prod_dir", type=Path, default=None, help="Directory containing production images and exactly one Faceswap .fsa file.")
     parser.add_argument("--dataset-build-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_quality_dataset.py; repeatable.")
+    parser.add_argument("--production-build-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_production_validated_manifest.py; repeatable.")
     parser.add_argument("--hard-negative-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_hard_negative_manifest.py; repeatable.")
     parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; local builder emits canonical 68 only.")
     parser.add_argument("--allow-non68", action="store_true", help="Allow mixed landmark counts and train on the exact-68 subset.")
