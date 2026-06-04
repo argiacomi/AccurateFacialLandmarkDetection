@@ -41,7 +41,8 @@ DEFAULT_BUCKET_RATIOS: dict[str, float] = {
     "occlusion": 2.0,
     "anchor": 1.0,
 }
-DEFAULT_TOTAL_SAMPLES = 200_000
+# Default to the full feasible pool. Pass --total-samples N to create a bounded subset.
+DEFAULT_TOTAL_SAMPLES = 0
 
 MANIFEST_ARGS: tuple[tuple[str, str], ...] = (
     ("wflw_manifest", "wflw"),
@@ -377,7 +378,10 @@ def _parser() -> argparse.ArgumentParser:
         "--total-samples",
         type=int,
         default=DEFAULT_TOTAL_SAMPLES,
-        help="Target final sample count. Use 0 to use all feasible samples under the bucket ratios.",
+        help=(
+            "Target final sample count. Default 0 uses all feasible samples while preserving "
+            "the bucket ratios as much as possible. Pass N to build a bounded balanced subset."
+        ),
     )
     parser.add_argument(
         "--bucket-ratios",
