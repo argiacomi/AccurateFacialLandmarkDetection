@@ -972,7 +972,7 @@ def _build_cofw(
             )
 
             entry_for_crop = {"visibility": visibility}
-            visible_mask = _cofw_visibility_mask_for_crop(entry_for_crop, metadata)
+            visible_mask, visible_mask_source = _cofw_visibility_mask_and_source(entry_for_crop, metadata)
             bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(
                 entry_for_crop,
                 metadata,
@@ -998,6 +998,8 @@ def _build_cofw(
         metadata["face_bbox"] = [float(v) for v in bbox_ltrb]
         metadata["face_bbox_format"] = "ltrb"
         metadata["face_bbox_source"] = bbox_source
+        metadata["crop_visibility_mask_source"] = visible_mask_source
+        metadata["crop_visible_landmark_count"] = int(np.asarray(visible_mask, dtype=bool).sum())
         metadata["visibility"] = visibility
 
         samples.append(
@@ -1480,23 +1482,27 @@ def main(argv: list[str] | None = None) -> int:
 # visible/valid landmarks. Fall back to visible-landmark bbox when the benchmark
 # bbox is inconsistent.
 # ---------------------------------------------------------------------------
-def _cofw_visibility_mask_for_crop(entry, metadata):
+def _cofw_visibility_mask_and_source(entry, metadata):
     raw = entry.get("visibility", metadata.get("visibility"))
     if isinstance(raw, (list, tuple)) and len(raw) == 68:
-        return np.asarray([bool(v) for v in raw], dtype=bool)
+        return np.asarray([bool(v) for v in raw], dtype=bool), "visibility"
 
     raw = metadata.get("landmark_score_visibility_mask")
     if isinstance(raw, (list, tuple)) and len(raw) == 68:
-        return np.asarray([bool(v) for v in raw], dtype=bool)
+        return np.asarray([bool(v) for v in raw], dtype=bool), "landmark_score_visibility_mask"
 
     # COFW Occ is occluded=True. If present, invert it.
     occ = metadata.get("occlusion", entry.get("occlusion"))
     if not isinstance(occ, (list, tuple)):
         occ = metadata.get("occlusion_mask")
     if isinstance(occ, (list, tuple)) and len(occ) == 68:
-        return np.asarray([not bool(v) for v in occ], dtype=bool)
+        return np.asarray([not bool(v) for v in occ], dtype=bool), "occlusion_mask"
 
-    return np.ones((68,), dtype=bool)
+    return np.ones((68,), dtype=bool), "all_landmarks_fallback"
+
+
+def _cofw_visibility_mask_for_crop(entry, metadata):
+    return _cofw_visibility_mask_and_source(entry, metadata)[0]
 
 
 def _cofw_bbox_candidates(entry, metadata):
@@ -1606,7 +1612,10 @@ def _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
         raise FileNotFoundError(f"could not read COFW image: {image_path}")
     image_hw = image_bgr.shape[:2]
 
-    required = int(max(1, np.asarray(visible_mask, dtype=bool).sum()))
+    visible_mask = np.asarray(visible_mask, dtype=bool)
+    if not visible_mask.any():
+        visible_mask = np.ones((68,), dtype=bool)
+    required = int(visible_mask.sum())
     best = None
 
     for label, bbox in _cofw_bbox_candidates(entry, metadata):
@@ -1621,10 +1630,7 @@ def _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
     # landmarks to derive the crop. This is safer for CD-ViT than training on
     # exploded coordinates.
     pts = np.asarray(points68, dtype=np.float32)
-    mask = np.asarray(visible_mask, dtype=bool)
-    if not mask.any():
-        mask = np.ones((68,), dtype=bool)
-    return _bbox_from_points_xyxy(pts[mask]), "cofw_bbox_v2:visible_landmark_bbox_fallback"
+    return _bbox_from_points_xyxy(pts[visible_mask]), "cofw_bbox_v2:visible_landmark_bbox_fallback"
 
 
 def _cofw_bbox4(value: T.Any) -> list[float] | None:
@@ -1637,6 +1643,17 @@ def _cofw_bbox4(value: T.Any) -> list[float] | None:
     if len(values) != 4 or not all(np.isfinite(values)):
         return None
     return values
+
+
+def _cofw_entry_is_materialized_crop(entry: T.Mapping[str, T.Any], metadata: T.Mapping[str, T.Any]) -> bool:
+    crop_bbox = entry.get("crop_bbox_xyxy") or metadata.get("crop_bbox_xyxy")
+    crop_output_size = entry.get("crop_output_size") or metadata.get("crop_output_size")
+    original_image = entry.get("original_image") or metadata.get("original_image")
+    try:
+        output_size = int(crop_output_size)
+    except (TypeError, ValueError):
+        output_size = None
+    return crop_bbox is not None and (output_size == 256 or original_image is not None)
 
 
 def _build_cofw_json_cropped(
@@ -1668,6 +1685,12 @@ def _build_cofw_json_cropped(
         landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
         sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or f"cofw/{idx:04d}")
 
+        if _cofw_entry_is_materialized_crop(entry, metadata):
+            raise ValueError(
+                "--cofw-json points to an already-cropped manifest entry "
+                f"{sample_id!r}; use raw COFW JSON/source instead"
+            )
+
         if image_value is None or landmark_value is None:
             skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
             continue
@@ -1681,7 +1704,7 @@ def _build_cofw_json_cropped(
                 source_schema=source_schema,
             )
             visibility = entry.get("visibility", metadata.get("visibility"))
-            visible_mask = _cofw_visibility_mask_for_crop(entry, metadata)
+            visible_mask, visible_mask_source = _cofw_visibility_mask_and_source(entry, metadata)
             bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask)
             crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
                 output_dir=output_dir,
@@ -1757,6 +1780,8 @@ def _build_cofw_json_cropped(
         merged_metadata["face_bbox"] = [float(v) for v in bbox_ltrb]
         merged_metadata["face_bbox_format"] = "ltrb"
         merged_metadata["face_bbox_source"] = bbox_source
+        merged_metadata["crop_visibility_mask_source"] = visible_mask_source
+        merged_metadata["crop_visible_landmark_count"] = int(np.asarray(visible_mask, dtype=bool).sum())
         merged_metadata.setdefault("source_schema", detected_schema)
         if visibility is not None:
             merged_metadata["visibility"] = visibility
