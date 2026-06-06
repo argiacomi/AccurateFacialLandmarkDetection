@@ -1617,5 +1617,254 @@ def _build_cofw(root, output_dir, **kwargs):  # noqa: F811
     )
 
 
+# ---------------------------------------------------------------------------
+# COFW bbox v2 override.
+#
+# Some local COFW materializations mark benchmark boxes as ltrb even when the
+# values are effectively xywh. Choose a bbox by checking whether it contains the
+# visible/valid landmarks. Fall back to visible-landmark bbox when the benchmark
+# bbox is inconsistent.
+# ---------------------------------------------------------------------------
+_build_cofw_bbox_v2_override = True
+_build_cofw_before_bbox_v2 = _build_cofw
+
+
+def _cofw_visibility_mask_for_crop(entry, metadata):
+    raw = entry.get("visibility", metadata.get("visibility"))
+    if isinstance(raw, (list, tuple)) and len(raw) == 68:
+        return np.asarray([bool(v) for v in raw], dtype=bool)
+
+    # COFW Occ is occluded=True. If present, invert it.
+    occ = metadata.get("occlusion", entry.get("occlusion"))
+    if isinstance(occ, (list, tuple)) and len(occ) == 68:
+        return np.asarray([not bool(v) for v in occ], dtype=bool)
+
+    return np.ones((68,), dtype=bool)
+
+
+def _cofw_bbox_candidates(entry, metadata):
+    candidates = []
+
+    def add(label, bbox, fmt):
+        if bbox is None:
+            return
+        try:
+            vals = [float(v) for v in list(bbox)[:4]]
+        except Exception:
+            return
+        if len(vals) != 4 or not all(np.isfinite(vals)):
+            return
+        x, y, a, b = vals
+        if fmt == "xywh":
+            if a > 0 and b > 0:
+                candidates.append((label + "_xywh", [x, y, x + a, y + b]))
+        elif fmt == "ltrb":
+            if a > x and b > y:
+                candidates.append((label + "_ltrb", [x, y, a, b]))
+        else:
+            # Include both interpretations; the scorer will choose.
+            if a > x and b > y:
+                candidates.append((label + "_as_ltrb", [x, y, a, b]))
+            if a > 0 and b > 0:
+                candidates.append((label + "_as_xywh", [x, y, x + a, y + b]))
+
+    source = str(metadata.get("face_bbox_source") or metadata.get("bbox_source") or "").lower()
+    raw_fmt = str(metadata.get("face_bbox_raw_format") or metadata.get("bbox_raw_format") or "").lower()
+    fmt = str(metadata.get("face_bbox_format") or metadata.get("bbox_format") or "").lower()
+
+    # Prefer raw benchmark bbox if available.
+    raw_bbox = metadata.get("face_bbox_raw") or metadata.get("bbox_raw")
+    if raw_bbox is not None:
+        add("face_bbox_raw", raw_bbox, raw_fmt or "xywh")
+
+    bbox = entry.get("face_bbox") or entry.get("bbox") or metadata.get("face_bbox") or metadata.get("bbox")
+    if bbox is not None:
+        if "cofw" in source and raw_bbox is None:
+            # The local builder has shown stale/misleading "ltrb" metadata for
+            # COFW. For COFW benchmark boxes, consider xywh first.
+            add("face_bbox", bbox, "xywh")
+            add("face_bbox", bbox, "ltrb")
+        else:
+            add("face_bbox", bbox, fmt or None)
+
+    # Deduplicate.
+    out = []
+    seen = set()
+    for label, box in candidates:
+        key = tuple(round(float(v), 4) for v in box)
+        if key not in seen:
+            seen.add(key)
+            out.append((label, box))
+    return out
+
+
+def _cofw_score_bbox_candidate(bbox_ltrb, points68, visible_mask, image_hw):
+    try:
+        left, top, right, bottom = _bbox_to_square_with_padding(
+            bbox_ltrb,
+            image_hw=image_hw,
+            pad_ratio=0.25,
+        )
+    except Exception:
+        return -1, float("inf")
+
+    pts = np.asarray(points68, dtype=np.float32)
+    mask = np.asarray(visible_mask, dtype=bool)
+    if not mask.any():
+        mask = np.ones((68,), dtype=bool)
+
+    valid = pts[mask]
+    inside = (
+        (valid[:, 0] >= left - 2)
+        & (valid[:, 0] <= right + 2)
+        & (valid[:, 1] >= top - 2)
+        & (valid[:, 1] <= bottom + 2)
+    )
+    count_inside = int(inside.sum())
+    area = float(max(right - left, 1.0) * max(bottom - top, 1.0))
+    return count_inside, area
+
+
+def _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
+    image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise FileNotFoundError(f"could not read COFW image: {image_path}")
+    image_hw = image_bgr.shape[:2]
+
+    required = int(max(1, np.asarray(visible_mask, dtype=bool).sum()))
+    best = None
+
+    for label, bbox in _cofw_bbox_candidates(entry, metadata):
+        score, area = _cofw_score_bbox_candidate(bbox, points68, visible_mask, image_hw)
+        if best is None or score > best[0] or (score == best[0] and area < best[1]):
+            best = (score, area, label, bbox)
+
+    if best is not None and best[0] >= max(1, int(0.95 * required)):
+        return best[3], f"cofw_bbox_v2:{best[2]}"
+
+    # Benchmark bbox is inconsistent with visible landmarks. Use visible
+    # landmarks to derive the crop. This is safer for CD-ViT than training on
+    # exploded coordinates.
+    pts = np.asarray(points68, dtype=np.float32)
+    mask = np.asarray(visible_mask, dtype=bool)
+    if not mask.any():
+        mask = np.ones((68,), dtype=bool)
+    return _bbox_from_points_xyxy(pts[mask]), "cofw_bbox_v2:visible_landmark_bbox_fallback"
+
+
+def _build_cofw(root, output_dir, **kwargs):  # noqa: F811
+    root_path = Path(root) if root is not None else None
+    scenario = kwargs.get("scenario", "occlusion")
+    scenarios = kwargs.get("scenarios")
+    limit = kwargs.get("limit")
+    mode = kwargs.get("mode", "replace")
+    allow_overlap = bool(kwargs.get("allow_overlap", False))
+    image_root = kwargs.get("image_root")
+
+    # Use previous COFW builder into a temp directory, then re-crop/remap its
+    # manifest entries with robust bbox selection.
+    import shutil as _shutil
+
+    tmp_dir = Path(output_dir) / "_cofw_bbox_v2_uncropped_tmp"
+    if tmp_dir.exists():
+        _shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    uncropped_manifest = _build_cofw_before_bbox_v2(root, tmp_dir, **kwargs)
+    payload = _read_json(Path(uncropped_manifest))
+    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        raise ValueError(f"COFW uncropped manifest did not contain samples list: {uncropped_manifest}")
+
+    entry_base = Path(uncropped_manifest).parent
+    image_base = Path(image_root) if image_root else entry_base
+
+    samples = []
+    skipped = []
+
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+
+        metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
+        image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
+        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
+
+        if image_value is None or landmark_value is None:
+            skipped.append({"sample_id": str(idx), "reason": "missing image or landmarks"})
+            continue
+
+        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or f"cofw/{idx:04d}")
+
+        try:
+            image_path = _resolve_path(image_value, base_dir=image_base)
+            points68, detected_schema = _load_points(
+                landmark_value,
+                base_dir=entry_base,
+                source_schema=str(entry.get("source_schema") or metadata.get("source_schema") or "") or None,
+            )
+            visibility = entry.get("visibility", metadata.get("visibility"))
+            visible_mask = _cofw_visibility_mask_for_crop(entry, metadata)
+            bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask)
+
+            crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
+                output_dir=Path(output_dir),
+                dataset="cofw",
+                sample_id=sample_id,
+                image_path=image_path,
+                points68=points68,
+                bbox_xyxy=bbox_ltrb,
+                bbox_source=bbox_source,
+                pad_ratio=0.25,
+            )
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": sample_id, "reason": str(err)})
+            continue
+
+        is_occluded = isinstance(visibility, (list, tuple)) and any(not bool(v) for v in visibility)
+        conds = _conditions(entry, "occlusion" if is_occluded else scenario)
+        if is_occluded and "occlusion" not in conds:
+            conds = tuple(dict.fromkeys((*conds, "occlusion")))
+
+        merged_metadata = dict(metadata)
+        merged_metadata.update(crop_metadata)
+        merged_metadata["face_bbox"] = [float(v) for v in bbox_ltrb]
+        merged_metadata["face_bbox_format"] = "ltrb"
+        merged_metadata["face_bbox_source"] = bbox_source
+        merged_metadata.setdefault("source_schema", detected_schema)
+        if visibility is not None:
+            merged_metadata["visibility"] = visibility
+
+        samples.append(
+            _sample(
+                output_dir=Path(output_dir),
+                dataset="cofw",
+                sample_id=sample_id,
+                image=crop_image_path,
+                points68=crop_points68,
+                condition="occlusion" if is_occluded else str(entry.get("condition") or conds[0]),
+                conditions=tuple(_label(item) for item in conds),
+                source_schema=detected_schema,
+                source_id=str(entry.get("source_id") or sample_id),
+                metadata=merged_metadata,
+                visibility=visibility,
+            )
+        )
+
+    if not samples:
+        raise ValueError(f"no COFW bbox-v2 samples built; skipped={skipped[:10]}")
+
+    return _write_manifest(
+        Path(output_dir),
+        "cofw",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
