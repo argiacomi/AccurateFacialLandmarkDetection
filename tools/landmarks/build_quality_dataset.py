@@ -29,6 +29,7 @@ import typing as T
 from pathlib import Path
 
 import numpy as np
+import cv2
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -298,6 +299,137 @@ def _normalizer(points68: np.ndarray, sample_id: str) -> float:
     value = float(np.linalg.norm(points68[36] - points68[45]))
     if np.isfinite(value) and value > 0.0:
         return value
+
+
+def _bbox_from_points_xyxy(points: np.ndarray) -> list[float]:
+    valid = np.asarray(points, dtype=np.float32)
+    valid = valid[np.isfinite(valid).all(axis=1)]
+    if valid.size == 0:
+        raise ValueError("cannot derive crop bbox from empty/non-finite landmarks")
+    left, top = np.min(valid, axis=0)
+    right, bottom = np.max(valid, axis=0)
+    return [float(left), float(top), float(right), float(bottom)]
+
+
+def _bbox_to_square_with_padding(bbox: T.Sequence[float], *, image_hw: tuple[int, int], pad_ratio: float) -> tuple[float, float, float, float]:
+    if len(bbox) != 4:
+        raise ValueError(f"bbox must have 4 values, got {bbox!r}")
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+
+    # If a source accidentally provides x,y,w,h, recover it.
+    if x2 <= x1 and x2 > 0:
+        x2 = x1 + x2
+    if y2 <= y1 and y2 > 0:
+        y2 = y1 + y2
+
+    if not all(np.isfinite([x1, y1, x2, y2])) or x2 <= x1 or y2 <= y1:
+        raise ValueError(f"invalid crop bbox {bbox!r}")
+
+    width = x2 - x1
+    height = y2 - y1
+    side = max(width, height) * (1.0 + 2.0 * float(pad_ratio))
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+
+    left = cx - side * 0.5
+    top = cy - side * 0.5
+    right = cx + side * 0.5
+    bottom = cy + side * 0.5
+    return left, top, right, bottom
+
+
+def _crop_image_and_remap_points(
+    image_path: Path,
+    points68: np.ndarray,
+    bbox_xyxy: T.Sequence[float],
+    *,
+    pad_ratio: float = 0.25,
+    output_size: int = 256,
+) -> tuple[np.ndarray, np.ndarray, list[float]]:
+    image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise FileNotFoundError(f"could not read image for crop: {image_path}")
+
+    image_rgb = image_bgr[:, :, [2, 1, 0]]
+    height, width = image_rgb.shape[:2]
+    left, top, right, bottom = _bbox_to_square_with_padding(
+        bbox_xyxy,
+        image_hw=(height, width),
+        pad_ratio=pad_ratio,
+    )
+    side = max(right - left, bottom - top)
+    if not np.isfinite(side) or side <= 1:
+        raise ValueError(f"invalid crop side for {image_path}: {side}")
+
+    ix1 = int(np.floor(max(0.0, left)))
+    iy1 = int(np.floor(max(0.0, top)))
+    ix2 = int(np.ceil(min(float(width), right)))
+    iy2 = int(np.ceil(min(float(height), bottom)))
+
+    if ix2 <= ix1 or iy2 <= iy1:
+        raise ValueError(f"empty crop for {image_path}: {(left, top, right, bottom)}")
+
+    crop = image_rgb[iy1:iy2, ix1:ix2]
+    pad_left = int(round(max(0.0, -left)))
+    pad_top = int(round(max(0.0, -top)))
+    pad_right = int(round(max(0.0, right - width)))
+    pad_bottom = int(round(max(0.0, bottom - height)))
+
+    if any(v > 0 for v in (pad_left, pad_top, pad_right, pad_bottom)):
+        crop = cv2.copyMakeBorder(crop, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT)
+
+    # Ensure exact virtual crop size before resize.
+    virtual_w = max(1.0, right - left)
+    virtual_h = max(1.0, bottom - top)
+    scale_x = float(output_size) / virtual_w
+    scale_y = float(output_size) / virtual_h
+
+    crop_resized = cv2.resize(crop, (output_size, output_size), interpolation=cv2.INTER_LINEAR)
+
+    remapped = np.asarray(points68, dtype=np.float32).copy()
+    remapped[:, 0] = (remapped[:, 0] - float(left)) * scale_x
+    remapped[:, 1] = (remapped[:, 1] - float(top)) * scale_y
+
+    return crop_resized, remapped.astype(np.float32), [float(left), float(top), float(right), float(bottom)]
+
+
+def _write_crop_image(output_dir: Path, dataset: str, sample_id: str, crop_rgb: np.ndarray) -> Path:
+    safe = _safe_id(sample_id).replace("#", "_").replace("/", "_")
+    out = output_dir / "images" / dataset / f"{safe}.jpg"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    return out
+
+
+def _crop_sample_image(
+    *,
+    output_dir: Path,
+    dataset: str,
+    sample_id: str,
+    image_path: Path,
+    points68: np.ndarray,
+    bbox_xyxy: T.Sequence[float] | None,
+    bbox_source: str,
+    pad_ratio: float = 0.25,
+) -> tuple[Path, np.ndarray, dict[str, T.Any]]:
+    if bbox_xyxy is None or len(bbox_xyxy) != 4:
+        bbox_xyxy = _bbox_from_points_xyxy(points68)
+
+    crop_rgb, crop_points68, crop_bbox = _crop_image_and_remap_points(
+        image_path,
+        points68,
+        bbox_xyxy,
+        pad_ratio=pad_ratio,
+        output_size=256,
+    )
+    crop_path = _write_crop_image(output_dir, dataset, sample_id, crop_rgb)
+    return crop_path, crop_points68, {
+        "original_image": str(image_path.resolve()),
+        "crop_bbox_xyxy": crop_bbox,
+        "crop_padding_ratio": float(pad_ratio),
+        "crop_bbox_source": bbox_source,
+        "crop_output_size": 256,
+    }
 
     span = np.ptp(points68[:, :2], axis=0)
     fallback = float(max(span[0], span[1]))
@@ -644,18 +776,34 @@ def _build_directory(
             continue
         sample_id = landmark_path.relative_to(root).with_suffix("").as_posix()
         condition, conds = _condition_for_landmark_file(dataset, landmark_path.relative_to(root), scenario)
+        sample_image = image
+        sample_points68 = points68
+        sample_metadata = {"source_landmarks": str(landmark_path.resolve())}
+        if dataset in {"300w", "w300"}:
+            sample_image, sample_points68, crop_metadata = _crop_sample_image(
+                output_dir=output_dir,
+                dataset="300w",
+                sample_id=sample_id,
+                image_path=image,
+                points68=points68,
+                bbox_xyxy=_bbox_from_points_xyxy(points68),
+                bbox_source="landmark_bbox",
+                pad_ratio=0.25,
+            )
+            sample_metadata.update(crop_metadata)
+
         samples.append(
             _sample(
                 output_dir=output_dir,
                 dataset=dataset,
                 sample_id=sample_id,
-                image=image,
-                points68=points68,
+                image=sample_image,
+                points68=sample_points68,
                 condition=condition,
                 conditions=conds,
                 source_schema=source_schema,
                 source_id=sample_id,
-                metadata={"source_landmarks": str(landmark_path.resolve())},
+                metadata=sample_metadata,
             )
         )
     if not samples:
@@ -1091,18 +1239,30 @@ def _build_wflw(
             skipped.append({"sample_id": sample_id, "reason": f"image not found: {image_path}"})
             continue
         points68 = normalize_landmarks(points98, source_schema="2d_98")
+        crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
+            output_dir=output_dir,
+            dataset="wflw",
+            sample_id=sample_id,
+            image_path=image_path,
+            points68=points68,
+            bbox_xyxy=bbox,
+            bbox_source="wflw_rect_attr_bbox",
+            pad_ratio=0.25,
+        )
+        metadata = {"bbox": bbox, "attributes": attrs, "image_id": image_rel}
+        metadata.update(crop_metadata)
         samples.append(
             _sample(
                 output_dir=output_dir,
                 dataset="wflw",
                 sample_id=sample_id,
-                image=image_path,
-                points68=points68,
+                image=crop_image_path,
+                points68=crop_points68,
                 condition=conds[0],
                 conditions=tuple(_label(item) for item in conds),
                 source_schema="2d_98",
                 source_id=sample_id,
-                metadata={"bbox": bbox, "attributes": attrs, "image_id": image_rel},
+                metadata=metadata,
             )
         )
     if not samples:

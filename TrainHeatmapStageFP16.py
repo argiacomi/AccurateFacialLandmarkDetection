@@ -72,13 +72,17 @@ def _build_dataset(args, split, aug, heatmap_size=0):
 
 
 def _unpack_train_batch(batch, device):
-    if len(batch) == 4:
+    if len(batch) == 5:
+        data, target, heatmap, sample_weight, landmark_mask = batch
+    elif len(batch) == 4:
         data, target, heatmap, sample_weight = batch
+        landmark_mask = None
     elif len(batch) == 3:
         data, target, heatmap = batch
         sample_weight = None
+        landmark_mask = None
     else:
-        raise ValueError(f"expected train batch with 3 or 4 items, got {len(batch)}")
+        raise ValueError(f"expected train batch with 3, 4, or 5 items, got {len(batch)}")
 
     data = data.to(device)
     target = target.to(device).float()
@@ -86,25 +90,72 @@ def _unpack_train_batch(batch, device):
     if sample_weight is not None:
         sample_weight = sample_weight.to(device).float()
         sample_weight = sample_weight / sample_weight.mean().clamp_min(1e-6)
-    return data, target, heatmap, sample_weight
+    if landmark_mask is None:
+        landmark_mask = torch.ones(target.shape[:2], device=device, dtype=torch.float32)
+    else:
+        landmark_mask = landmark_mask.to(device).float()
+    return data, target, heatmap, sample_weight, landmark_mask
 
 
-def _weighted_smooth_l1(pred_loc, target, sample_weight, beta=0.001):
-    if sample_weight is None:
-        return F.smooth_l1_loss(pred_loc, target, beta=beta)
-    loss = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(dim=(1, 2))
-    return (loss * sample_weight).mean()
+def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
+    per_point = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(dim=2)
+    landmark_mask = landmark_mask.to(per_point.device).float()
+    per_sample = (per_point * landmark_mask).sum(dim=1) / landmark_mask.sum(dim=1).clamp_min(1.0)
+    if sample_weight is not None:
+        return (per_sample * sample_weight).mean()
+    return per_sample.mean()
 
 
-def _heatmap_batch_weight(sample_weight, pred_heatmap):
-    if sample_weight is None:
+def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
+    if sample_weight is None and landmark_mask is None:
         return None
-    dims = [sample_weight.shape[0]] + [1] * (pred_heatmap.ndim - 1)
-    return sample_weight.reshape(*dims)
+    weights = torch.ones(
+        (pred_heatmap.shape[0], pred_heatmap.shape[1]),
+        device=pred_heatmap.device,
+        dtype=pred_heatmap.dtype,
+    )
+    if landmark_mask is not None:
+        weights = weights * landmark_mask.to(pred_heatmap.device).to(pred_heatmap.dtype)
+    if sample_weight is not None:
+        weights = weights * sample_weight.to(pred_heatmap.device).to(pred_heatmap.dtype).reshape(-1, 1)
+    return weights.reshape(pred_heatmap.shape[0], pred_heatmap.shape[1], 1, 1)
 
 
 def _unpack_eval_batch(batch):
-    return batch[0], batch[1]
+    data = batch[0]
+    target = batch[1]
+    if len(batch) >= 3:
+        landmark_mask = batch[2]
+    else:
+        landmark_mask = torch.ones(target.shape[:2], dtype=torch.float32)
+    return data, target, landmark_mask
+
+
+def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
+    pred = pred_keypoints.detach().float().cpu().numpy()
+    target = keypoints.detach().float().cpu().numpy()
+    mask = landmark_mask.detach().float().cpu().numpy() > 0.5
+
+    values = []
+    for pred_i, target_i, mask_i in zip(pred, target, mask):
+        if mask_i.sum() <= 0:
+            continue
+
+        # Prefer canonical outer-eye interocular when both eye corners are valid.
+        if mask_i.shape[0] > 45 and mask_i[36] and mask_i[45]:
+            normalizer = float(np.linalg.norm(target_i[36] - target_i[45]))
+        else:
+            valid = target_i[mask_i]
+            span = np.max(valid, axis=0) - np.min(valid, axis=0)
+            normalizer = float(max(span[0], span[1]))
+
+        if not np.isfinite(normalizer) or normalizer <= 1e-6:
+            continue
+
+        dist = np.linalg.norm(target_i[mask_i] - pred_i[mask_i], axis=1)
+        values.append(float(dist.mean() / normalizer))
+
+    return np.asarray(values, dtype=np.float32)
 
 
 def main():
@@ -245,12 +296,12 @@ def main():
                         pred_loc, pred_heatmap = pred_info[i]
                         B, C, H, W = pred_heatmap.shape
                         # loss_loc = vertex_loss_func(pred_heatmap, target)
-                        loss_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, beta=0.001) * args.locw
+                        loss_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001) * args.locw
                         pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W))
                         loss_heatmap = heatmap_loss_func(
                             pred_prob,
                             heatmap,
-                            batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap),
+                            batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask),
                         ) * args.hw  # for awing loss
                         # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
                         loss = loss + (loss_loc + loss_heatmap) * weights[i]
@@ -284,12 +335,12 @@ def main():
                     SME = 0.0
                     IONs = None
                     for batch_idx, batch in enumerate(tqdm(test_dataloader)):
-                        data, target = _unpack_eval_batch(batch)
+                        data, target, landmark_mask = _unpack_eval_batch(batch)
                         data = data.to(device)
                         keypoints = target.to(device)
+                        landmark_mask = landmark_mask.to(device)
                         pred_keypoints, heatmap = net(data)[-1]
-                        sum_ion, ion_list = calc_nme(pred_keypoints, keypoints, data_name=args.data_name)
-                        SME += sum_ion
+                        ion_list = _masked_nme_list(pred_keypoints, keypoints, landmark_mask)
                         IONs = np.concatenate((IONs, ion_list), 0) if IONs is not None else ion_list
 
                     nme, fr, auc = compute_fr_and_auc(IONs, thres=0.10, step=0.0001)
@@ -310,12 +361,12 @@ def main():
                     SME = 0.0
                     IONs = None
                     for batch_idx, batch in enumerate(tqdm(test_dataloader)):
-                        data, target = _unpack_eval_batch(batch)
+                        data, target, landmark_mask = _unpack_eval_batch(batch)
                         data = data.to(device)
                         keypoints = target.to(device)
+                        landmark_mask = landmark_mask.to(device)
                         pred_keypoints, heatmap = ema(data)[-1]
-                        sum_ion, ion_list = calc_nme(pred_keypoints, keypoints, data_name=args.data_name)
-                        SME += sum_ion
+                        ion_list = _masked_nme_list(pred_keypoints, keypoints, landmark_mask)
                         IONs = np.concatenate((IONs, ion_list), 0) if IONs is not None else ion_list
 
                     nme, fr, auc = compute_fr_and_auc(IONs, thres=0.10, step=0.0001)

@@ -112,6 +112,61 @@ def _entry_split(entry):
     return _normalize_label(raw)
 
 
+def _as_bool_landmark_mask(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        # Accept dicts keyed by landmark index.
+        arr = [value.get(str(i), value.get(i, True)) for i in range(68)]
+    else:
+        arr = value
+    if isinstance(arr, np.ndarray):
+        arr = arr.tolist()
+    if not isinstance(arr, (list, tuple)) or len(arr) != 68:
+        return None
+
+    out = []
+    for item in arr:
+        if isinstance(item, str):
+            label = _normalize_label(item)
+            out.append(label not in {"", "0", "false", "none", "invalid", "missing", "self_occluded", "selfoccluded"})
+        else:
+            out.append(bool(item))
+    return np.asarray(out, dtype=np.float32)
+
+
+def _landmark_mask_from_entry(entry, metadata):
+    # Priority matters. For MERL-RAV, coordinate-valid includes visible plus externally
+    # occluded estimated points, and excludes only true no-coordinate self-occlusion.
+    for key in (
+        "landmark_mask",
+        "landmark_coordinate_valid_mask",
+        "landmark_source_valid_mask",
+        "landmark_in_image_mask",
+        "coordinate_valid_mask",
+        "source_valid_mask",
+        "valid_mask",
+    ):
+        mask = _as_bool_landmark_mask(entry.get(key))
+        if mask is not None:
+            return mask
+        mask = _as_bool_landmark_mask(metadata.get(key))
+        if mask is not None:
+            return mask
+
+    # Lower priority: visibility often means score-visible only, which would drop
+    # externally occluded but coordinate-valid MERL-RAV points.
+    for key in ("visibility", "landmark_score_visibility_mask", "score_visibility_mask"):
+        mask = _as_bool_landmark_mask(entry.get(key))
+        if mask is not None:
+            return mask
+        mask = _as_bool_landmark_mask(metadata.get(key))
+        if mask is not None:
+            return mask
+
+    return np.ones((68,), dtype=np.float32)
+
+
 class LandmarkDataset(Dataset):
     """Faceswap-compatible 68-point landmark manifest dataset.
 
@@ -179,6 +234,7 @@ class LandmarkDataset(Dataset):
                 skipped_non_68 += 1
                 continue
 
+            landmark_mask = _landmark_mask_from_entry(entry, metadata)
             conditions = _coerce_conditions(entry, metadata)
             samples.append(
                 {
@@ -190,6 +246,7 @@ class LandmarkDataset(Dataset):
                     "conditions": conditions,
                     "metadata": metadata,
                     "sample_weight": _weight_from_entry(entry, metadata, conditions),
+                    "landmark_mask": landmark_mask,
                 }
             )
 
@@ -224,12 +281,20 @@ class LandmarkDataset(Dataset):
         data_list = []
         for sample in self.samples:
             img, lmk = self._load_image_and_landmarks(sample)
-            data_list.append((img, lmk))
+            data_list.append((img, lmk, sample["landmark_mask"].copy()))
         return data_list
 
-    def MakeLMKInsideImage(self, img, lmk):
-        lt = np.min(lmk, axis=0)
-        rb = np.max(lmk, axis=0)
+    def MakeLMKInsideImage(self, img, lmk, landmark_mask=None):
+        if landmark_mask is None:
+            valid = np.ones((lmk.shape[0],), dtype=bool)
+        else:
+            valid = np.asarray(landmark_mask, dtype=np.float32) > 0.5
+            if valid.shape[0] != lmk.shape[0] or not valid.any():
+                valid = np.ones((lmk.shape[0],), dtype=bool)
+
+        valid_lmk = lmk[valid]
+        lt = np.min(valid_lmk, axis=0)
+        rb = np.max(valid_lmk, axis=0)
         padding = 0
         margin = 5
         if lt[0] < margin:
@@ -253,25 +318,36 @@ class LandmarkDataset(Dataset):
         sample = self.samples[item]
         if self.data_list is None:
             img, lmk = self._load_image_and_landmarks(sample)
+            landmark_mask = sample["landmark_mask"].copy()
         else:
-            img, lmk = self.data_list[item]
+            img, lmk, landmark_mask = self.data_list[item]
             img = img.copy()
             lmk = lmk.copy()
+            landmark_mask = landmark_mask.copy()
 
         if self.aug_transform is not None:
             transformed = self.aug_transform(image=img, keypoints=lmk)
             img = transformed["image"]
             lmk = np.array(transformed["keypoints"], dtype=np.float32)
-            img, lmk = random_flip(img, lmk, flip_points("300W"), p=0.5)
 
-        img, lmk = self.MakeLMKInsideImage(img, lmk)
+            if np.random.random() < 0.5:
+                flip_index = np.asarray(flip_points("300W"), dtype=np.int64)
+                img = cv2.flip(img, 1)
+                lmk = lmk[flip_index, :]
+                landmark_mask = landmark_mask[flip_index]
+                lmk[:, 0] = 255 - lmk[:, 0]
+
+        img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
         img = self.transform(img)
         lmk = torch.from_numpy(lmk / 255.0).float()
+        landmark_mask_t = torch.from_numpy(np.asarray(landmark_mask, dtype=np.float32)).float()
 
         if self.generateHM is not None:
             heatmap = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
             heatmap = torch.from_numpy(heatmap).float()
-            heatmap = heatmap / torch.sum(heatmap, dim=(1, 2), keepdim=True).clamp_min(1e-6)
-            return img, lmk, heatmap, torch.tensor(sample["sample_weight"], dtype=torch.float32)
+            heatmap = heatmap * landmark_mask_t.reshape(-1, 1, 1)
+            denom = torch.sum(heatmap, dim=(1, 2), keepdim=True).clamp_min(1e-6)
+            heatmap = torch.where(landmark_mask_t.reshape(-1, 1, 1) > 0.0, heatmap / denom, heatmap)
+            return img, lmk, heatmap, torch.tensor(sample["sample_weight"], dtype=torch.float32), landmark_mask_t
 
-        return img, lmk
+        return img, lmk, landmark_mask_t
