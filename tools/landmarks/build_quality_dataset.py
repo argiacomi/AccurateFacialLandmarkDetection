@@ -1359,6 +1359,8 @@ def build(args: argparse.Namespace) -> Path:
     output_dir = Path(args.output_dir)
     scenarios = _parse_csv(args.scenarios)
     limit = None if not args.samples_per_scenario else int(args.samples_per_scenario)
+    if args.cofw_json and dataset != "cofw":
+        raise ValueError("--cofw-json is only valid with --dataset cofw")
 
     with _source_context(args.source_dir, args.source_zip) as root:
         if dataset == "wflw":
@@ -1395,18 +1397,6 @@ def build(args: argparse.Namespace) -> Path:
                 limit=limit,
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
-            )
-        if args.cofw_json:
-            return _build_json(
-                Path(args.cofw_json),
-                output_dir,
-                dataset=dataset,
-                scenario=args.scenario,
-                scenarios=scenarios,
-                limit=limit,
-                mode=args.manifest_mode,
-                allow_overlap=args.allow_overlap,
-                image_root=args.image_root,
             )
         if dataset == "multipie":
             if root is None:
@@ -1653,7 +1643,7 @@ def _cofw_entry_is_materialized_crop(entry: T.Mapping[str, T.Any], metadata: T.M
         output_size = int(crop_output_size)
     except (TypeError, ValueError):
         output_size = None
-    return crop_bbox is not None and (output_size == 256 or original_image is not None)
+    return crop_bbox is not None or output_size == 256 or original_image is not None
 
 
 def _build_cofw_json_cropped(
