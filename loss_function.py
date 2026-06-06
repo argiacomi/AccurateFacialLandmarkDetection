@@ -1,6 +1,9 @@
 import torch
 import numpy as np
-from scipy.integrate import simps
+try:
+    from scipy.integrate import simps
+except ImportError:
+    from scipy.integrate import simpson as simps
 
 
 def compute_fr_and_auc(nmes, thres=0.10, step=0.0001):

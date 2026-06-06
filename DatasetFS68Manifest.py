@@ -160,7 +160,8 @@ class LandmarkDataset(Dataset):
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 continue
-            if use_split_filter and _entry_split(entry) != split_label:
+            entry_split = _entry_split(entry)
+            if use_split_filter and entry_split and entry_split != split_label:
                 continue
 
             metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {}

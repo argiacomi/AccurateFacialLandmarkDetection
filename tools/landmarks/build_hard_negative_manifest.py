@@ -32,6 +32,8 @@ DATASET_DEFAULT_BUCKET: dict[str, str] = {
     "cofw68": "occlusion",
     "300w": "anchor",
     "w300": "anchor",
+    "production_validated": "anchor",
+    "multipie": "profile",
 }
 
 BUCKET_ORDER: tuple[str, ...] = ("profile_occlusion", "profile", "occlusion", "anchor")
@@ -67,12 +69,30 @@ def _default_class(dataset: str) -> HardNegativeClass | None:
     )
 
 
+def _resolve_manifest_relative_path(manifest_path: Path, value: T.Any) -> str:
+    path = Path(str(value))
+    if path.is_absolute():
+        return str(path.resolve())
+    return str((manifest_path.parent / path).resolve())
+
+
 def _load_samples(manifest_path: Path) -> list[dict[str, T.Any]]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     samples = payload.get("samples", payload.get("scenarios", []))
     if not isinstance(samples, list):
         raise ValueError(f"manifest {manifest_path} has no 'samples' list")
-    return [dict(entry) for entry in samples if isinstance(entry, T.Mapping)]
+
+    resolved: list[dict[str, T.Any]] = []
+    for entry in samples:
+        if not isinstance(entry, T.Mapping):
+            continue
+        sample = dict(entry)
+        for key in ("image", "landmarks", "ground_truth"):
+            value = sample.get(key)
+            if value:
+                sample[key] = _resolve_manifest_relative_path(manifest_path, value)
+        resolved.append(sample)
+    return resolved
 
 
 def _stable_order(samples: T.Sequence[dict[str, T.Any]], *, seed: int) -> list[dict[str, T.Any]]:
@@ -298,6 +318,14 @@ def build_hard_negative_manifest(
             dataset_label = str(sample.get("dataset", "")).strip().lower() or "unknown"
             by_dataset.setdefault(dataset_label, {})
             by_dataset[dataset_label][bucket] = by_dataset[dataset_label].get(bucket, 0) + 1
+
+            split_key = f"{dataset_label}|{sample.get('sample_id') or sample.get('image') or sample.get('landmarks')}"
+            split_hash = int(hashlib.sha256(split_key.encode()).hexdigest()[:8], 16)
+            split = "test" if (split_hash % 100) < 5 else "train"
+            sample["split"] = split
+            metadata = sample.setdefault("metadata", {})
+            if isinstance(metadata, dict):
+                metadata["split"] = split
         selected.extend(ordered)
 
     total_selected = len(selected)

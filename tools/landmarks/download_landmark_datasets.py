@@ -352,9 +352,9 @@ def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
     print(f"Extracting {path} -> {destination}")
-    if zipfile.is_zipfile(path) or path.name.lower().endswith(".zip"):
+    if zipfile.is_zipfile(path):
         _extract_zip(path, destination)
-    elif tarfile.is_tarfile(path) or path.name.lower().endswith((".tar", ".tar.gz", ".tgz")):
+    elif tarfile.is_tarfile(path):
         _extract_tar(path, destination)
     else:
         raise ValueError(f"unsupported archive format: {path}")

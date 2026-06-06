@@ -115,9 +115,27 @@ def _resolve_prod_source(prod_source: Path, output_dir: Path) -> tuple[Path, Pat
     raise FileNotFoundError(f"production source must be a directory or .zip file: {prod_source}")
 
 
+def _is_ignored_macos_sidecar(path: Path) -> bool:
+    parts = set(path.parts)
+    return (
+        "__MACOSX" in parts
+        or path.name.startswith("._")
+        or any(part.startswith("._") for part in path.parts)
+    )
+
+
+def _is_real_fsa(path: Path) -> bool:
+    return (
+        path.is_file()
+        and path.suffix.lower() == ".fsa"
+        and not path.name.startswith(".")
+        and not _is_ignored_macos_sidecar(path)
+    )
+
+
 def _find_fsa(prod_dir: Path) -> Path:
-    direct = sorted(path for path in prod_dir.iterdir() if path.is_file() and path.suffix.lower() == ".fsa")
-    recursive = sorted(path for path in prod_dir.rglob("*.fsa") if path.is_file())
+    direct = sorted(path for path in prod_dir.iterdir() if _is_real_fsa(path))
+    recursive = sorted(path for path in prod_dir.rglob("*.fsa") if _is_real_fsa(path))
     candidates = direct or recursive
     if not candidates:
         raise FileNotFoundError(f"no .fsa file found under {prod_dir}")
@@ -210,9 +228,20 @@ def _landmarks(face: T.Mapping[str, T.Any]) -> np.ndarray:
     raw = _first_present(face, ("landmarks_xy", "landmarks", "landmarksXY", "landmark"))
     if raw is None:
         raise ValueError("face has no landmarks_xy")
-    points = normalize_landmarks(np.asarray(raw, dtype=np.float32), source_schema="2d_68")
+
+    raw_points = np.asarray(raw, dtype=np.float32)
+    if raw_points.ndim == 1:
+        if raw_points.size % 2 != 0:
+            raise ValueError(f"flat landmark array has odd value count: {raw_points.size}")
+        raw_points = raw_points.reshape((-1, 2))
+    if raw_points.ndim != 2 or raw_points.shape[1] < 2:
+        raise ValueError(f"expected Nx2 landmarks, got {raw_points.shape}")
+
+    source_schema = "2d_98" if raw_points.shape[0] == 98 else "2d_68"
+    points = normalize_landmarks(raw_points[:, :2], source_schema=source_schema)
+
     if points.shape != (68, 2):
-        raise ValueError(f"expected 68x2 landmarks, got {points.shape}")
+        raise ValueError(f"expected canonical 68x2 landmarks from {source_schema}, got {points.shape}")
     if not np.all(np.isfinite(points)):
         raise ValueError("landmarks contain NaN or infinite values")
     return np.ascontiguousarray(points, dtype=np.float32)
@@ -234,17 +263,12 @@ def _bbox(face: T.Mapping[str, T.Any], points: np.ndarray) -> list[float]:
 
 
 def _normalizer(face: T.Mapping[str, T.Any], points: np.ndarray) -> float:
-    try:
-        w = float(_face_value(face, "w"))
-        h = float(_face_value(face, "h"))
-        value = float(np.hypot(w, h))
-        if np.isfinite(value) and value > 0:
-            return value
-    except Exception:
-        pass
+    # Match the quality dataset/WFLW path: normalize source landmarks to
+    # canonical 68 first, then use canonical eye-corner interocular distance.
+    del face
     value = float(np.linalg.norm(points[36] - points[45]))
     if not np.isfinite(value) or value <= 0:
-        raise ValueError(f"invalid normalizer: {value}")
+        raise ValueError(f"invalid interocular normalizer after canonical 68 conversion: {value}")
     return value
 
 

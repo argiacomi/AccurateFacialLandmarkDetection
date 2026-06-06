@@ -296,9 +296,21 @@ def _load_points(value: T.Any, *, base_dir: Path, source_schema: str | None = No
 
 def _normalizer(points68: np.ndarray, sample_id: str) -> float:
     value = float(np.linalg.norm(points68[36] - points68[45]))
-    if not np.isfinite(value) or value <= 0.0:
-        raise ValueError(f"invalid interocular normalizer for {sample_id}: {value}")
-    return value
+    if np.isfinite(value) and value > 0.0:
+        return value
+
+    span = np.ptp(points68[:, :2], axis=0)
+    fallback = float(max(span[0], span[1]))
+    if np.isfinite(fallback) and fallback > 0.0:
+        logger.warning(
+            "invalid interocular normalizer for %s: %s; using landmark span fallback %s",
+            sample_id,
+            value,
+            fallback,
+        )
+        return fallback
+
+    raise ValueError(f"invalid normalizer for {sample_id}: interocular={value}, span={fallback}")
 
 
 def _build_image_index(root: Path) -> dict[str, list[Path]]:
@@ -369,12 +381,25 @@ def _sample(
     source_id: str | None = None,
     metadata: dict[str, T.Any] | None = None,
     visibility: T.Any = None,
+    normalizer: T.Any = None,
 ) -> dict[str, T.Any]:
     sample_id = _safe_id(sample_id)
     landmarks = _save_landmarks(output_dir, sample_id, points68)
-    normalizer = _normalizer(points68, sample_id)
     meta = dict(metadata or {})
-    meta.setdefault("normalizer_source", DEFAULT_NORMALIZER_SOURCE)
+
+    normalizer_value = float("nan")
+    if normalizer is not None:
+        try:
+            normalizer_value = float(normalizer)
+        except (TypeError, ValueError):
+            normalizer_value = float("nan")
+
+    if not np.isfinite(normalizer_value) or normalizer_value <= 0.0:
+        normalizer_value = _normalizer(points68, sample_id)
+        meta.setdefault("normalizer_source", DEFAULT_NORMALIZER_SOURCE)
+    else:
+        meta.setdefault("normalizer_source", "explicit_manifest_normalizer")
+
     meta.setdefault("source_schema", source_schema)
     out: dict[str, T.Any] = {
         "sample_id": sample_id,
@@ -384,7 +409,7 @@ def _sample(
         "image": str(image.resolve()),
         "landmarks": _relative_or_absolute(landmarks, output_dir),
         "source_schema": "2d_68",
-        "normalizer": normalizer,
+        "normalizer": normalizer_value,
         "source": {"dataset": dataset, "source_id": source_id or sample_id},
         "metadata": meta,
     }
@@ -538,6 +563,7 @@ def _build_json(
                 source_id=str(entry.get("source_id") or sample_id),
                 metadata=metadata,
                 visibility=entry.get("visibility", metadata.get("visibility")),
+                normalizer=entry.get("normalizer", metadata.get("normalizer")),
             )
         )
     return _write_manifest(
@@ -637,6 +663,329 @@ def _build_directory(
     return _write_manifest(
         output_dir,
         dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
+
+def _cofw68_annotation_paths(root: Path) -> list[Path]:
+    return sorted(
+        path for path in root.rglob("*_points.mat")
+        if path.is_file() and "test_annotations" in path.as_posix()
+    )
+
+
+def _cofw_test_color_mat(root: Path) -> Path:
+    matches = sorted(root.rglob("COFW_test_color.mat"), key=lambda item: len(item.parts))
+    if not matches:
+        raise FileNotFoundError(f"COFW_test_color.mat not found below {root}")
+    return matches[0]
+
+
+def _cofw_test_bboxes(root: Path) -> np.ndarray | None:
+    matches = sorted(root.rglob("cofw68_test_bboxes.mat"), key=lambda item: len(item.parts))
+    if not matches:
+        return None
+    try:
+        import scipy.io as sio
+        payload = sio.loadmat(matches[0])
+        boxes = np.asarray(payload.get("bboxes"), dtype=np.float32)
+        return boxes if boxes.ndim == 2 and boxes.shape[1] == 4 else None
+    except Exception:
+        return None
+
+
+def _cofw_annotation_index(path: Path) -> int:
+    text = path.stem.replace("_points", "")
+    return int(text) - 1
+
+
+def _cofw_points_and_occ(path: Path) -> tuple[np.ndarray, list[bool], dict[str, T.Any]]:
+    import scipy.io as sio
+
+    payload = sio.loadmat(path)
+    if "Points" not in payload:
+        raise ValueError(f"COFW68 annotation missing Points: {path}")
+    points68, schema = _canonical_points(payload["Points"], source_schema="2d_68")
+
+    occ_raw = payload.get("Occ")
+    occ_mask: list[bool] = []
+    visibility: list[bool] = []
+    if occ_raw is not None:
+        occ_arr = np.asarray(occ_raw).reshape(-1)
+        occ_mask = [bool(x) for x in occ_arr[:68]]
+        visibility = [not bool(x) for x in occ_arr[:68]]
+    if len(visibility) != 68:
+        visibility = [True] * 68
+
+    metadata = {
+        "source_schema": schema,
+        "occlusion_mask": occ_mask,
+        "landmark_score_visibility_mask": visibility,
+    }
+    return points68, visibility, metadata
+
+
+def _cofw_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
+    import h5py
+
+    with h5py.File(mat_path, "r") as h5:
+        refs = h5["IsT"][()]
+        ref = refs.reshape(-1)[index]
+        arr = np.asarray(h5[ref])
+
+    # COFW HDF5 images are usually channel-first: C,H,W.
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4):
+        arr = np.moveaxis(arr, 0, -1)
+    if arr.ndim == 3 and arr.shape[-1] == 1:
+        arr = arr[:, :, 0]
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(arr)
+
+
+def _write_cofw_image(output_dir: Path, index: int, image: np.ndarray) -> Path:
+    from PIL import Image
+
+    path = output_dir / "images" / f"cofw_test_{index + 1:04d}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_file():
+        Image.fromarray(image).save(path)
+    return path
+
+
+def _build_cofw(
+    root: Path,
+    output_dir: Path,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+) -> Path:
+    color_mat = _cofw_test_color_mat(root)
+    annotations = _cofw68_annotation_paths(root)
+    boxes = _cofw_test_bboxes(root)
+
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+
+    for ann in annotations:
+        try:
+            idx = _cofw_annotation_index(ann)
+            points68, visibility, metadata = _cofw_points_and_occ(ann)
+            image_arr = _cofw_hdf5_image_by_index(color_mat, idx)
+            image_path = _write_cofw_image(output_dir, idx, image_arr)
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": ann.as_posix(), "reason": str(err)})
+            continue
+
+        if boxes is not None and 0 <= idx < len(boxes):
+            metadata["face_bbox"] = [float(x) for x in boxes[idx].tolist()]
+            metadata["face_bbox_source"] = "cofw68_test_bboxes"
+
+        metadata.update(
+            {
+                "annotation_file": str(ann.resolve()),
+                "cofw_index": idx + 1,
+                "split": "test",
+                "image_source_mat": str(color_mat.resolve()),
+                "source_schema": "2d_68",
+            }
+        )
+
+        samples.append(
+            _sample(
+                output_dir=output_dir,
+                dataset="cofw",
+                sample_id=f"cofw_test_{idx + 1:04d}",
+                image=image_path,
+                points68=points68,
+                condition="occlusion",
+                conditions=("occlusion", "testset"),
+                source_schema="2d_68",
+                source_id=f"cofw_test_{idx + 1:04d}",
+                metadata=metadata,
+                visibility=visibility,
+            )
+        )
+
+    if not samples:
+        raise ValueError(f"no COFW68 test samples built; skipped={skipped[:5]}")
+
+    return _write_manifest(
+        output_dir,
+        "cofw",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
+
+def _find_multipie_root(root: Path) -> Path:
+    candidates = sorted(
+        path.parent for path in root.rglob("MultiPIE_*_train.txt")
+        if path.is_file()
+    )
+    if candidates:
+        return candidates[0]
+    if (root / "image").is_dir():
+        return root
+    raise FileNotFoundError(f"MultiPIE root not found below {root}")
+
+
+def _multipie_annotation_files(root: Path) -> list[Path]:
+    multipie_root = _find_multipie_root(root)
+    files = sorted(multipie_root.glob("MultiPIE_*_train.txt"))
+    if not files:
+        raise FileNotFoundError(f"MultiPIE train txt files not found in {multipie_root}")
+    return files
+
+
+def _multipie_conditions(annotation_file: Path, image_rel: str, scenario: str) -> tuple[str, tuple[str, ...]]:
+    text = f"{annotation_file.name} {image_rel}".lower()
+    labels: list[str] = []
+    if "profile" in text:
+        labels.append("profile")
+    if "semifrontal" in text or "semi_frontal" in text:
+        labels.append("semifrontal")
+    if "train" in annotation_file.name.lower():
+        labels.append("trainset")
+    if not labels:
+        labels.append(_label(scenario))
+    labels = list(dict.fromkeys(_label(item) for item in labels))
+    return labels[0], tuple(labels)
+
+
+def _multipie_parse_line(line: str, *, line_no: int, path: Path) -> tuple[str, np.ndarray, list[float]]:
+    parts = line.strip().split()
+    if len(parts) < 2:
+        raise ValueError("empty or malformed line")
+
+    image_rel = parts[0].replace("\\", "/")
+    try:
+        values = [float(item) for item in parts[1:]]
+    except ValueError as err:
+        raise ValueError(f"non-numeric landmark value on line {line_no}") from err
+
+    header_values = 14  # 4 bbox + 5 detector/reference points * 2
+    dense_count = len(values) - header_values
+
+    if dense_count == 78:
+        raise ValueError("39-point profile sample skipped for 68-point CD-ViT manifest")
+
+    if dense_count != 136:
+        raise ValueError(
+            f"line {line_no} in {path} has {len(values)} numeric values; "
+            "expected 150 for 68-point rows or 92 for 39-point profile rows"
+        )
+
+    bbox = [float(item) for item in values[:4]]
+    raw = values[header_values:]
+    points = np.asarray(raw, dtype=np.float32).reshape(68, 2)
+    points = normalize_landmarks(points, source_schema="2d_68")
+    return image_rel, points, bbox
+
+
+def _bbox_from_points(points68: np.ndarray) -> list[float]:
+    left, top = np.min(points68, axis=0)
+    right, bottom = np.max(points68, axis=0)
+    return [float(left), float(top), float(right), float(bottom)]
+
+
+def _normalizer_from_bbox(bbox: list[float]) -> float:
+    value = max(float(bbox[2] - bbox[0]), float(bbox[3] - bbox[1]))
+    return value if np.isfinite(value) and value > 0.0 else 1.0
+
+
+def _build_multipie(
+    root: Path,
+    output_dir: Path,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+) -> Path:
+    multipie_root = _find_multipie_root(root)
+    annotation_files = _multipie_annotation_files(root)
+
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+
+    for annotation_file in annotation_files:
+        for line_no, line in enumerate(annotation_file.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                image_rel, points68, bbox = _multipie_parse_line(
+                    line,
+                    line_no=line_no,
+                    path=annotation_file,
+                )
+                image_path = (multipie_root / image_rel).resolve()
+                if not image_path.is_file():
+                    raise FileNotFoundError(f"image not found: {image_path}")
+
+                condition, conds = _multipie_conditions(annotation_file, image_rel, scenario)
+                bbox = bbox or _bbox_from_points(points68)
+                sample_id = Path(image_rel).with_suffix("").as_posix()
+                normalizer = _normalizer(points68, sample_id)
+
+                metadata = {
+                    "annotation_file": str(annotation_file.resolve()),
+                    "annotation_line": line_no,
+                    "image_id": image_rel,
+                    "face_bbox": bbox,
+                    "face_bbox_source": "multipie_landmark_bounds",
+                    "normalizer_source": DEFAULT_NORMALIZER_SOURCE,
+                    "source_schema": "2d_68",
+                }
+
+                sample_kwargs = dict(
+                    output_dir=output_dir,
+                    dataset="multipie",
+                    sample_id=sample_id,
+                    image=image_path,
+                    points68=points68,
+                    condition=condition,
+                    conditions=conds,
+                    source_schema="2d_68",
+                    source_id=sample_id,
+                    metadata=metadata,
+                )
+                try:
+                    sample = _sample(**sample_kwargs, normalizer=normalizer)
+                except TypeError:
+                    sample = _sample(**sample_kwargs)
+
+                samples.append(sample)
+            except Exception as err:  # noqa: BLE001
+                skipped.append(
+                    {
+                        "sample_id": f"{annotation_file.as_posix()}:{line_no}",
+                        "reason": str(err),
+                    }
+                )
+                continue
+
+    if not samples:
+        raise ValueError(f"no MultiPIE samples built; skipped={skipped[:5]}")
+
+    return _write_manifest(
+        output_dir,
+        "multipie",
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,
@@ -818,6 +1167,30 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
                 image_root=args.image_root,
+            )
+        if dataset == "cofw":
+            if root is None:
+                raise ValueError("--source-dir or --source-zip is required for COFW")
+            return _build_cofw(
+                root,
+                output_dir,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+            )
+        if dataset == "multipie":
+            if root is None:
+                raise ValueError("--source-dir or --source-zip is required for MultiPIE")
+            return _build_multipie(
+                root,
+                output_dir,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
             )
         if root is None:
             raise ValueError("--source-dir, --source-zip, --wflw-annotations, or --cofw-json is required")
