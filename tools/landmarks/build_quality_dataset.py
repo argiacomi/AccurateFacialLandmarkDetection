@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -410,7 +411,9 @@ def _write_crop_image(output_dir: Path, dataset: str, sample_id: str, crop_rgb: 
     safe = _safe_id(sample_id).replace("#", "_").replace("/", "_")
     out = output_dir / "images" / dataset / f"{safe}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    ok = cv2.imwrite(str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    if not ok:
+        raise OSError(f"failed to write crop image: {out}")
     return out
 
 
@@ -549,6 +552,20 @@ def _sample(
         out["visibility"] = visibility
         out["metadata"].setdefault("visibility", visibility)
     return out
+
+
+def _deterministic_split(dataset: str, sample_id: str, *, test_percent: int = 5) -> str:
+    split_key = f"{_dataset(dataset)}|{sample_id}"
+    split_hash = int(hashlib.sha256(split_key.encode()).hexdigest()[:8], 16)
+    return "test" if (split_hash % 100) < int(test_percent) else "train"
+
+
+def _with_split(sample: dict[str, T.Any], split: str) -> dict[str, T.Any]:
+    sample["split"] = split
+    metadata = sample.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata["split"] = split
+    return sample
 
 
 def _filter(samples: list[dict[str, T.Any]], scenarios: tuple[str, ...] | None, limit: int | None) -> list[dict[str, T.Any]]:
@@ -927,6 +944,8 @@ def _build_cofw(
     for ann in annotations:
         try:
             idx = _cofw_annotation_index(ann)
+            sample_id = f"cofw_test_{idx + 1:04d}"
+            split = _deterministic_split("cofw", sample_id)
             points68, visibility, metadata = _cofw_points_and_occ(ann)
             image_arr = _cofw_hdf5_image_by_index(color_mat, idx)
             image_path = _write_cofw_image(output_dir, idx, image_arr)
@@ -946,7 +965,7 @@ def _build_cofw(
                 {
                     "annotation_file": str(ann.resolve()),
                     "cofw_index": idx + 1,
-                    "split": "test",
+                    "split": split,
                     "image_source_mat": str(color_mat.resolve()),
                     "source_schema": "2d_68",
                 }
@@ -964,7 +983,7 @@ def _build_cofw(
             crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
                 output_dir=output_dir,
                 dataset="cofw",
-                sample_id=f"cofw_test_{idx + 1:04d}",
+                sample_id=sample_id,
                 image_path=image_path,
                 points68=points68,
                 bbox_xyxy=bbox_ltrb,
@@ -982,18 +1001,21 @@ def _build_cofw(
         metadata["visibility"] = visibility
 
         samples.append(
-            _sample(
-                output_dir=output_dir,
-                dataset="cofw",
-                sample_id=f"cofw_test_{idx + 1:04d}",
-                image=crop_image_path,
-                points68=crop_points68,
-                condition="occlusion",
-                conditions=("occlusion", "testset"),
-                source_schema="2d_68",
-                source_id=f"cofw_test_{idx + 1:04d}",
-                metadata=metadata,
-                visibility=visibility,
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset="cofw",
+                    sample_id=sample_id,
+                    image=crop_image_path,
+                    points68=crop_points68,
+                    condition="occlusion",
+                    conditions=("occlusion", f"{split}set"),
+                    source_schema="2d_68",
+                    source_id=sample_id,
+                    metadata=metadata,
+                    visibility=visibility,
+                ),
+                split,
             )
         )
 
@@ -1349,6 +1371,29 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
             )
+        if dataset == "cofw":
+            if args.cofw_json:
+                return _build_cofw_json_cropped(
+                    Path(args.cofw_json),
+                    output_dir,
+                    scenario=args.scenario,
+                    scenarios=scenarios,
+                    limit=limit,
+                    mode=args.manifest_mode,
+                    allow_overlap=args.allow_overlap,
+                    image_root=args.image_root,
+                )
+            if root is None:
+                raise ValueError("--source-dir or --source-zip is required for COFW")
+            return _build_cofw(
+                root,
+                output_dir,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+            )
         if args.cofw_json:
             return _build_json(
                 Path(args.cofw_json),
@@ -1360,18 +1405,6 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
                 image_root=args.image_root,
-            )
-        if dataset == "cofw":
-            if root is None:
-                raise ValueError("--source-dir or --source-zip is required for COFW")
-            return _build_cofw(
-                root,
-                output_dir,
-                scenario=args.scenario,
-                scenarios=scenarios,
-                limit=limit,
-                mode=args.manifest_mode,
-                allow_overlap=args.allow_overlap,
             )
         if dataset == "multipie":
             if root is None:
@@ -1492,12 +1525,30 @@ def _cofw_bbox_candidates(entry, metadata):
             if a > 0 and b > 0:
                 candidates.append((label + "_as_xywh", [x, y, x + a, y + b]))
 
-    source = str(metadata.get("face_bbox_source") or metadata.get("bbox_source") or "").lower()
-    raw_fmt = str(metadata.get("face_bbox_raw_format") or metadata.get("bbox_raw_format") or "").lower()
-    fmt = str(metadata.get("face_bbox_format") or metadata.get("bbox_format") or "").lower()
+    source = str(
+        entry.get("face_bbox_source")
+        or entry.get("bbox_source")
+        or metadata.get("face_bbox_source")
+        or metadata.get("bbox_source")
+        or ""
+    ).lower()
+    raw_fmt = str(
+        entry.get("face_bbox_raw_format")
+        or entry.get("bbox_raw_format")
+        or metadata.get("face_bbox_raw_format")
+        or metadata.get("bbox_raw_format")
+        or ""
+    ).lower()
+    fmt = str(
+        entry.get("face_bbox_format")
+        or entry.get("bbox_format")
+        or metadata.get("face_bbox_format")
+        or metadata.get("bbox_format")
+        or ""
+    ).lower()
 
     # Prefer raw benchmark bbox if available.
-    raw_bbox = metadata.get("face_bbox_raw") or metadata.get("bbox_raw")
+    raw_bbox = entry.get("face_bbox_raw") or entry.get("bbox_raw") or metadata.get("face_bbox_raw") or metadata.get("bbox_raw")
     if raw_bbox is not None:
         add("face_bbox_raw", raw_bbox, raw_fmt or "xywh")
 
@@ -1574,6 +1625,174 @@ def _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
     if not mask.any():
         mask = np.ones((68,), dtype=bool)
     return _bbox_from_points_xyxy(pts[mask]), "cofw_bbox_v2:visible_landmark_bbox_fallback"
+
+
+def _cofw_bbox4(value: T.Any) -> list[float] | None:
+    if value is None:
+        return None
+    try:
+        values = [float(v) for v in list(value)[:4]]
+    except Exception:
+        return None
+    if len(values) != 4 or not all(np.isfinite(values)):
+        return None
+    return values
+
+
+def _build_cofw_json_cropped(
+    path: Path,
+    output_dir: Path,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
+    payload = _read_json(path)
+    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        raise ValueError(f"COFW JSON source must contain list, entries, or samples list: {path}")
+
+    image_base = Path(image_root) if image_root else path.parent
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+
+        metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
+        image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
+        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
+        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or f"cofw/{idx:04d}")
+
+        if image_value is None or landmark_value is None:
+            skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
+            continue
+
+        try:
+            image_path = _resolve_path(image_value, base_dir=image_base)
+            source_schema = str(entry.get("source_schema") or metadata.get("source_schema") or "") or None
+            points68, detected_schema = _load_points(
+                landmark_value,
+                base_dir=path.parent,
+                source_schema=source_schema,
+            )
+            visibility = entry.get("visibility", metadata.get("visibility"))
+            visible_mask = _cofw_visibility_mask_for_crop(entry, metadata)
+            bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask)
+            crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
+                output_dir=output_dir,
+                dataset="cofw",
+                sample_id=sample_id,
+                image_path=image_path,
+                points68=points68,
+                bbox_xyxy=bbox_ltrb,
+                bbox_source=bbox_source,
+                pad_ratio=0.25,
+            )
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": sample_id, "reason": str(err)})
+            continue
+
+        is_occluded = True
+        if isinstance(visibility, (list, tuple)) and visibility:
+            is_occluded = any(not bool(v) for v in visibility)
+
+        explicit_split = _label(entry.get("split") or metadata.get("split") or "")
+        split = explicit_split if explicit_split in {"train", "test"} else _deterministic_split("cofw", sample_id)
+
+        conds = _conditions(entry, "occlusion" if is_occluded else scenario)
+        if is_occluded and "occlusion" not in conds:
+            conds = tuple(dict.fromkeys((*conds, "occlusion")))
+        split_condition = f"{split}set"
+        if split_condition not in conds:
+            conds = tuple(dict.fromkeys((*conds, split_condition)))
+
+        merged_metadata = dict(metadata)
+        input_bbox = _cofw_bbox4(entry.get("face_bbox") or entry.get("bbox") or metadata.get("face_bbox") or metadata.get("bbox"))
+        if input_bbox is not None:
+            merged_metadata.setdefault("face_bbox_input", input_bbox)
+            input_format = str(
+                entry.get("face_bbox_format")
+                or entry.get("bbox_format")
+                or metadata.get("face_bbox_format")
+                or metadata.get("bbox_format")
+                or ""
+            ).strip()
+            if input_format:
+                merged_metadata.setdefault("face_bbox_input_format", input_format)
+            input_source = str(
+                entry.get("face_bbox_source")
+                or entry.get("bbox_source")
+                or metadata.get("face_bbox_source")
+                or metadata.get("bbox_source")
+                or "cofw_json"
+            )
+            merged_metadata.setdefault("face_bbox_input_source", input_source)
+
+        raw_bbox = _cofw_bbox4(entry.get("face_bbox_raw") or entry.get("bbox_raw") or metadata.get("face_bbox_raw") or metadata.get("bbox_raw"))
+        if raw_bbox is not None:
+            merged_metadata.setdefault("face_bbox_raw", raw_bbox)
+            raw_format = str(
+                entry.get("face_bbox_raw_format")
+                or entry.get("bbox_raw_format")
+                or metadata.get("face_bbox_raw_format")
+                or metadata.get("bbox_raw_format")
+                or "xywh"
+            )
+            merged_metadata.setdefault("face_bbox_raw_format", raw_format)
+            raw_source = str(
+                entry.get("face_bbox_raw_source")
+                or entry.get("bbox_raw_source")
+                or metadata.get("face_bbox_raw_source")
+                or metadata.get("bbox_raw_source")
+                or "cofw_json"
+            )
+            merged_metadata.setdefault("face_bbox_raw_source", raw_source)
+
+        merged_metadata.update(crop_metadata)
+        merged_metadata["face_bbox"] = [float(v) for v in bbox_ltrb]
+        merged_metadata["face_bbox_format"] = "ltrb"
+        merged_metadata["face_bbox_source"] = bbox_source
+        merged_metadata.setdefault("source_schema", detected_schema)
+        if visibility is not None:
+            merged_metadata["visibility"] = visibility
+
+        samples.append(
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset="cofw",
+                    sample_id=sample_id,
+                    image=crop_image_path,
+                    points68=crop_points68,
+                    condition="occlusion" if is_occluded else str(entry.get("condition") or conds[0]),
+                    conditions=tuple(_label(item) for item in conds),
+                    source_schema=source_schema or detected_schema,
+                    source_id=str(entry.get("source_id") or sample_id),
+                    metadata=merged_metadata,
+                    visibility=visibility,
+                ),
+                split,
+            )
+        )
+
+    if not samples:
+        raise ValueError(f"no cropped COFW JSON samples built; skipped={skipped[:10]}")
+
+    return _write_manifest(
+        output_dir,
+        "cofw",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
 
 
 if __name__ == "__main__":
