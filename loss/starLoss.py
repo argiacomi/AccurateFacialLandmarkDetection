@@ -43,7 +43,7 @@ class STARLoss(nn.Module):
     def _make_grid(self, h, w):
         yy, xx = torch.meshgrid(
             torch.arange(h).float() / (h - 1) * 2 - 1,
-            torch.arange(w).float() / (w - 1) * 2 - 1)
+            torch.arange(w).float() / (w - 1) * 2 - 1, indexing="ij")
         return yy, xx
 
     def weighted_mean(self, heatmap):

@@ -224,7 +224,7 @@ class Res50PredictBasisCoefficients(nn.Module):
         self.register_buffer("hm_basis", hm_basis, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -310,7 +310,7 @@ class Res50PredictBasisCoefficients2(nn.Module):
         self.coord_conv3 = CoordConvTh(16, 16, True, False, 1024, 1024, kernel_size=3, padding=1)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -410,7 +410,7 @@ class Res50MultiResHM(nn.Module):
         self.short_cut2 = nn.Conv2d(512, 1024, 3, stride=2, padding=1)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -480,7 +480,7 @@ class Res50MultiTuckedUpHM(nn.Module):
         self.head8 = nn.Conv2d(2048, self.lmk_num * 16, 1)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c

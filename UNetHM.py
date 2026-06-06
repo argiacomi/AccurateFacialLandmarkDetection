@@ -75,7 +75,7 @@ class UNetStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -212,7 +212,7 @@ class StackedHG(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -356,14 +356,14 @@ class StackedHGCoraseAndFine(nn.Module):
         self.register_buffer("f_yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
         return row.reshape((1, 1, size, size)), col.reshape((1, 1, size, size))
 
     def make_fine_grid(self, device="cpu", local_size=8, global_size=32):
-        row, col = torch.meshgrid(torch.arange(local_size, device=device), torch.arange(local_size, device=device))
+        row, col = torch.meshgrid(torch.arange(local_size, device=device), torch.arange(local_size, device=device), indexing="ij")
         c = global_size - 1.0
         row = row / c
         col = col / c
@@ -488,7 +488,7 @@ class UNetStageCoeff(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -632,7 +632,7 @@ class StackedHG2Head(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -767,7 +767,7 @@ class StackedHG2HeadCondition(nn.Module):
         self.max_depth = max_depth
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -862,7 +862,7 @@ class SeparateHM(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c

@@ -158,7 +158,7 @@ if __name__ == "__main__":
     img = Image.fromarray(img)
     img.show()
 
-    row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size))
+    row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij")
     c = heatmap_size - 1
     row = row / c
     col = col / c

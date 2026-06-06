@@ -49,7 +49,7 @@ class Res50PredictBasisCoefficients(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -119,7 +119,7 @@ class Net(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -162,7 +162,7 @@ class NetAttn(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -208,7 +208,7 @@ class NetAttn2(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -254,7 +254,7 @@ class NetAttnSA2(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -309,7 +309,7 @@ class NetAttnSA2Condition(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -393,7 +393,7 @@ class NetAttnSA2Branch(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -480,7 +480,7 @@ class NetAttnSA2BranchPatch(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -578,7 +578,7 @@ class NetAttnSA2GobalLocal(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -656,7 +656,7 @@ class NetAttnStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -736,7 +736,7 @@ class NetAttnStageResSkip(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -805,7 +805,7 @@ class Net50AttnStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -889,7 +889,7 @@ class VitAttnStageMultiResHM(nn.Module):
         self.register_buffer("yy_loc8", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1052,7 +1052,7 @@ class NetAttnStageDW(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1118,7 +1118,7 @@ class NetAttn64SA2(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1174,7 +1174,7 @@ class UNetStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1282,7 +1282,7 @@ class VitAttnStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1409,7 +1409,7 @@ class VitAttnStageDenseConn(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1533,7 +1533,7 @@ class VitAttnStageResSkip(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1611,7 +1611,7 @@ class NetVitAttnStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c

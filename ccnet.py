@@ -203,7 +203,7 @@ class CCNet(nn.Module):
         self.lmk_num = lmk_num
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device))
+        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
         c = size - 1.0
         row = row / c
         col = col / c

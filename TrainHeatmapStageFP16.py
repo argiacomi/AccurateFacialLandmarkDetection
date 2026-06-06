@@ -20,7 +20,7 @@ import numpy as np
 from loss import AWingLoss
 from EMA import EMA
 import math
-from torch.backends.cuda import sdp_kernel, SDPBackend
+from torch.nn.attention import sdpa_kernel, SDPBackend
 import random
 
 
@@ -184,6 +184,7 @@ def main():
     parser.add_argument("--test_manifest", type=str, default="", help="faceswap-compatible test manifest for FS68Manifest")
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
+    parser.add_argument("--find_unused_parameters", action="store_true", help="Enable only if the model forward pass can skip trainable parameters")
     args = parser.parse_args()
     setup_seed(args.seed)
     lmk_num = _landmark_count_for_dataset(args)
@@ -196,12 +197,7 @@ def main():
     dist.init_process_group("nccl", rank=args.local_rank, init_method="env://")
     device = torch.device("cuda", args.local_rank)
 
-    backend_map = {
-        SDPBackend.MATH: {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
-        SDPBackend.FLASH_ATTENTION: {"enable_math": False, "enable_flash": True, "enable_mem_efficient": False},
-        SDPBackend.EFFICIENT_ATTENTION: {"enable_math": False, "enable_flash": False, "enable_mem_efficient": True},
-    }
-    with sdp_kernel(**backend_map[SDPBackend.FLASH_ATTENTION]):
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         # if True:
 
         train_dataset = _build_dataset(args, "train", aug=True, heatmap_size=args.heatmap_size)
@@ -259,7 +255,7 @@ def main():
         if args.resume != "":
             ckpt = torch.load(args.resume)
             net.load_state_dict(ckpt)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank], find_unused_parameters=True)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank], find_unused_parameters=args.find_unused_parameters)
 
         optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
         scheduler = StepLR(optimizer, args.sched_step, gamma=0.5)
@@ -274,7 +270,7 @@ def main():
         # vertex_loss_func = STARLoss_v2()
         if dist.get_rank() == 0:
             ema = EMA(net.module, 0.99, 100, 10)
-        scaler = torch.cuda.amp.GradScaler()
+        scaler = torch.amp.GradScaler("cuda")
         for epoch in range(args.epoch):
             n = 0
             net.train()
