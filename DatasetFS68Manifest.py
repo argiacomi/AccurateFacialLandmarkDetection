@@ -216,8 +216,11 @@ class LandmarkDataset(Dataset):
             if not isinstance(entry, dict):
                 continue
             entry_split = _entry_split(entry)
-            if use_split_filter and entry_split and entry_split != split_label:
-                continue
+            if use_split_filter:
+                if not entry_split:
+                    continue
+                if entry_split != split_label:
+                    continue
 
             metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {}
             landmarks_value = entry.get("landmarks") or entry.get("ground_truth")

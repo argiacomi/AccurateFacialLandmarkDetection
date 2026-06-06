@@ -285,7 +285,7 @@ def main():
             train_sampler.set_epoch(epoch)
             for batch_idx, batch in enumerate(train_dataloader):
                 optimizer.zero_grad()
-                data, target, heatmap, sample_weight = _unpack_train_batch(batch, device)
+                data, target, heatmap, sample_weight, landmark_mask = _unpack_train_batch(batch, device)
                 loss = 0
                 loss_loc = torch.tensor(0.0, device=device)
                 loss_heatmap = torch.tensor(0.0, device=device)

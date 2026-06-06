@@ -300,6 +300,19 @@ def _normalizer(points68: np.ndarray, sample_id: str) -> float:
     if np.isfinite(value) and value > 0.0:
         return value
 
+    span = np.ptp(points68[:, :2], axis=0)
+    fallback = float(max(span[0], span[1]))
+    if np.isfinite(fallback) and fallback > 0.0:
+        logger.warning(
+            "invalid interocular normalizer for %s: %s; using landmark span fallback %s",
+            sample_id,
+            value,
+            fallback,
+        )
+        return fallback
+
+    raise ValueError(f"invalid normalizer for {sample_id}: interocular={value}, span={fallback}")
+
 
 def _bbox_from_points_xyxy(points: np.ndarray) -> list[float]:
     valid = np.asarray(points, dtype=np.float32)
@@ -430,19 +443,6 @@ def _crop_sample_image(
         "crop_bbox_source": bbox_source,
         "crop_output_size": 256,
     }
-
-    span = np.ptp(points68[:, :2], axis=0)
-    fallback = float(max(span[0], span[1]))
-    if np.isfinite(fallback) and fallback > 0.0:
-        logger.warning(
-            "invalid interocular normalizer for %s: %s; using landmark span fallback %s",
-            sample_id,
-            value,
-            fallback,
-        )
-        return fallback
-
-    raise ValueError(f"invalid normalizer for {sample_id}: interocular={value}, span={fallback}")
 
 
 def _build_image_index(root: Path) -> dict[str, list[Path]]:
@@ -930,31 +930,64 @@ def _build_cofw(
             points68, visibility, metadata = _cofw_points_and_occ(ann)
             image_arr = _cofw_hdf5_image_by_index(color_mat, idx)
             image_path = _write_cofw_image(output_dir, idx, image_arr)
+
+            raw_bbox = None
+            if boxes is not None and 0 <= idx < len(boxes):
+                raw_bbox = [float(x) for x in boxes[idx].tolist()]
+                x, y, width, height = raw_bbox
+                metadata["face_bbox_raw"] = raw_bbox
+                metadata["face_bbox_raw_format"] = "xywh"
+                metadata["face_bbox_raw_source"] = "cofw68_test_bboxes"
+                metadata["face_bbox"] = [x, y, x + width, y + height]
+                metadata["face_bbox_format"] = "ltrb"
+                metadata["face_bbox_source"] = "cofw68_test_bboxes"
+
+            metadata.update(
+                {
+                    "annotation_file": str(ann.resolve()),
+                    "cofw_index": idx + 1,
+                    "split": "test",
+                    "image_source_mat": str(color_mat.resolve()),
+                    "source_schema": "2d_68",
+                }
+            )
+
+            entry_for_crop = {"visibility": visibility}
+            visible_mask = _cofw_visibility_mask_for_crop(entry_for_crop, metadata)
+            bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(
+                entry_for_crop,
+                metadata,
+                image_path,
+                points68,
+                visible_mask,
+            )
+            crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
+                output_dir=output_dir,
+                dataset="cofw",
+                sample_id=f"cofw_test_{idx + 1:04d}",
+                image_path=image_path,
+                points68=points68,
+                bbox_xyxy=bbox_ltrb,
+                bbox_source=bbox_source,
+                pad_ratio=0.25,
+            )
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": ann.as_posix(), "reason": str(err)})
             continue
 
-        if boxes is not None and 0 <= idx < len(boxes):
-            metadata["face_bbox"] = [float(x) for x in boxes[idx].tolist()]
-            metadata["face_bbox_source"] = "cofw68_test_bboxes"
-
-        metadata.update(
-            {
-                "annotation_file": str(ann.resolve()),
-                "cofw_index": idx + 1,
-                "split": "test",
-                "image_source_mat": str(color_mat.resolve()),
-                "source_schema": "2d_68",
-            }
-        )
+        metadata.update(crop_metadata)
+        metadata["face_bbox"] = [float(v) for v in bbox_ltrb]
+        metadata["face_bbox_format"] = "ltrb"
+        metadata["face_bbox_source"] = bbox_source
+        metadata["visibility"] = visibility
 
         samples.append(
             _sample(
                 output_dir=output_dir,
                 dataset="cofw",
                 sample_id=f"cofw_test_{idx + 1:04d}",
-                image=image_path,
-                points68=points68,
+                image=crop_image_path,
+                points68=crop_points68,
                 condition="occlusion",
                 conditions=("occlusion", "testset"),
                 source_schema="2d_68",
@@ -1407,235 +1440,26 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# COFW crop/remap override.
-#
-# The upstream COFW-68 benchmark stores bbox rows as xywh. Faceswap materializes
-# those as explicit ltrb metadata. DatasetFS68Manifest does not crop from bbox
-# at load-time, so materialize 256x256 face crops here and remap the 68 points
-# into crop coordinates.
-# ---------------------------------------------------------------------------
-_build_cofw_uncropped = _build_cofw
-
-
-def _cofw_bbox_to_ltrb_for_cdvit(bbox, metadata):
-    if bbox is None:
-        return None
-    values = [float(v) for v in list(bbox)[:4]]
-    if len(values) != 4:
-        return None
-
-    fmt = str(
-        metadata.get("face_bbox_format")
-        or metadata.get("bbox_format")
-        or metadata.get("face_bbox_raw_format")
-        or ""
-    ).strip().lower()
-
-    x1, y1, x2, y2 = values
-    if fmt == "xywh":
-        return [x1, y1, x1 + x2, y1 + y2]
-
-    # Faceswap's COFW export marks face_bbox as ltrb. Trust it.
-    if fmt == "ltrb":
-        return [x1, y1, x2, y2]
-
-    # Conservative fallback: if right/bottom look impossibly close to left/top,
-    # treat as xywh. Otherwise treat as ltrb.
-    if x2 <= x1 or y2 <= y1:
-        return [x1, y1, x1 + x2, y1 + y2]
-
-    return [x1, y1, x2, y2]
-
-
-def _cofw_entries_from_manifest_like_source(root):
-    json_path = _json_source(root) if root is not None else None
-    if json_path is None:
-        return None, None
-    payload = _read_json(json_path)
-    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
-    if not isinstance(entries, list):
-        return None, None
-    return json_path, entries
-
-
-def _build_cofw_cropped_entries(
-    *,
-    entries,
-    entry_base,
-    output_dir,
-    scenario,
-    scenarios,
-    limit,
-    mode,
-    allow_overlap,
-    image_root,
-):
-    image_base = Path(image_root) if image_root else entry_base
-    samples = []
-    skipped = []
-
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            continue
-
-        metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
-        image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
-        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
-
-        if image_value is None or landmark_value is None:
-            skipped.append({"sample_id": str(idx), "reason": "missing image or landmarks"})
-            continue
-
-        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or f"cofw/{idx:04d}")
-
-        try:
-            image_path = _resolve_path(image_value, base_dir=image_base)
-            points68, detected_schema = _load_points(
-                landmark_value,
-                base_dir=entry_base,
-                source_schema=str(entry.get("source_schema") or metadata.get("source_schema") or "") or None,
-            )
-
-            raw_bbox = (
-                entry.get("face_bbox")
-                or entry.get("bbox")
-                or metadata.get("face_bbox")
-                or metadata.get("bbox")
-                or metadata.get("face_bbox_raw")
-            )
-            bbox_ltrb = _cofw_bbox_to_ltrb_for_cdvit(raw_bbox, metadata)
-            if bbox_ltrb is None:
-                bbox_ltrb = _bbox_from_points_xyxy(points68)
-                bbox_source = "landmark_bbox_fallback"
-            else:
-                bbox_source = str(metadata.get("face_bbox_source") or "cofw68_benchmark")
-
-            crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
-                output_dir=output_dir,
-                dataset="cofw",
-                sample_id=sample_id,
-                image_path=image_path,
-                points68=points68,
-                bbox_xyxy=bbox_ltrb,
-                bbox_source=bbox_source,
-                pad_ratio=0.25,
-            )
-
-        except Exception as err:  # noqa: BLE001
-            skipped.append({"sample_id": sample_id, "reason": str(err)})
-            continue
-
-        visibility = entry.get("visibility", metadata.get("visibility"))
-
-        # COFW visibility should be visible=True, occluded=False. Keep it as
-        # visibility so DatasetFS68Manifest can use it as a per-landmark mask.
-        if isinstance(visibility, (list, tuple)):
-            is_occluded = any(not bool(v) for v in visibility)
-        else:
-            is_occluded = True
-
-        conds = _conditions(entry, "occlusion" if is_occluded else scenario)
-        if is_occluded and "occlusion" not in conds:
-            conds = tuple(dict.fromkeys((*conds, "occlusion")))
-
-        merged_metadata = dict(metadata)
-        merged_metadata.update(crop_metadata)
-        merged_metadata["face_bbox"] = [float(v) for v in bbox_ltrb]
-        merged_metadata["face_bbox_format"] = "ltrb"
-        merged_metadata["face_bbox_source"] = bbox_source
-        merged_metadata.setdefault("source_schema", detected_schema)
-        if visibility is not None:
-            merged_metadata["visibility"] = visibility
-
-        samples.append(
-            _sample(
-                output_dir=output_dir,
-                dataset="cofw",
-                sample_id=sample_id,
-                image=crop_image_path,
-                points68=crop_points68,
-                condition="occlusion" if is_occluded else str(entry.get("condition") or conds[0]),
-                conditions=tuple(_label(item) for item in conds),
-                source_schema=detected_schema,
-                source_id=str(entry.get("source_id") or sample_id),
-                metadata=merged_metadata,
-                visibility=visibility,
-            )
-        )
-
-    if not samples:
-        raise ValueError(f"no cropped COFW samples built; skipped={skipped[:10]}")
-
-    return _write_manifest(
-        output_dir,
-        "cofw",
-        scenario,
-        _filter(samples, scenarios, limit),
-        mode=mode,
-        allow_overlap=allow_overlap,
-        scenarios=scenarios,
-        skipped=skipped,
-    )
-
-
-def _build_cofw(root, output_dir, **kwargs):  # noqa: F811
-    root_path = Path(root) if root is not None else None
-    scenario = kwargs.get("scenario", "occlusion")
-    scenarios = kwargs.get("scenarios")
-    limit = kwargs.get("limit")
-    mode = kwargs.get("mode", "replace")
-    allow_overlap = bool(kwargs.get("allow_overlap", False))
-    image_root = kwargs.get("image_root")
-
-    json_path, entries = _cofw_entries_from_manifest_like_source(root_path) if root_path is not None else (None, None)
-
-    if entries is None:
-        # Fall back to the existing local builder into a temp directory, then
-        # crop/remap the manifest it produced.
-        import shutil as _shutil
-
-        tmp_dir = Path(output_dir) / "_cofw_uncropped_tmp"
-        if tmp_dir.exists():
-            _shutil.rmtree(tmp_dir)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-
-        uncropped_manifest = _build_cofw_uncropped(root, tmp_dir, **kwargs)
-        payload = _read_json(Path(uncropped_manifest))
-        entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
-        json_path = Path(uncropped_manifest)
-
-    return _build_cofw_cropped_entries(
-        entries=entries,
-        entry_base=Path(json_path).parent,
-        output_dir=Path(output_dir),
-        scenario=scenario,
-        scenarios=scenarios,
-        limit=limit,
-        mode=mode,
-        allow_overlap=allow_overlap,
-        image_root=image_root,
-    )
-
-
-# ---------------------------------------------------------------------------
-# COFW bbox v2 override.
+# COFW bbox helpers.
 #
 # Some local COFW materializations mark benchmark boxes as ltrb even when the
 # values are effectively xywh. Choose a bbox by checking whether it contains the
 # visible/valid landmarks. Fall back to visible-landmark bbox when the benchmark
 # bbox is inconsistent.
 # ---------------------------------------------------------------------------
-_build_cofw_bbox_v2_override = True
-_build_cofw_before_bbox_v2 = _build_cofw
-
-
 def _cofw_visibility_mask_for_crop(entry, metadata):
     raw = entry.get("visibility", metadata.get("visibility"))
     if isinstance(raw, (list, tuple)) and len(raw) == 68:
         return np.asarray([bool(v) for v in raw], dtype=bool)
 
+    raw = metadata.get("landmark_score_visibility_mask")
+    if isinstance(raw, (list, tuple)) and len(raw) == 68:
+        return np.asarray([bool(v) for v in raw], dtype=bool)
+
     # COFW Occ is occluded=True. If present, invert it.
     occ = metadata.get("occlusion", entry.get("occlusion"))
+    if not isinstance(occ, (list, tuple)):
+        occ = metadata.get("occlusion_mask")
     if isinstance(occ, (list, tuple)) and len(occ) == 68:
         return np.asarray([not bool(v) for v in occ], dtype=bool)
 
@@ -1750,120 +1574,6 @@ def _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
     if not mask.any():
         mask = np.ones((68,), dtype=bool)
     return _bbox_from_points_xyxy(pts[mask]), "cofw_bbox_v2:visible_landmark_bbox_fallback"
-
-
-def _build_cofw(root, output_dir, **kwargs):  # noqa: F811
-    root_path = Path(root) if root is not None else None
-    scenario = kwargs.get("scenario", "occlusion")
-    scenarios = kwargs.get("scenarios")
-    limit = kwargs.get("limit")
-    mode = kwargs.get("mode", "replace")
-    allow_overlap = bool(kwargs.get("allow_overlap", False))
-    image_root = kwargs.get("image_root")
-
-    # Use previous COFW builder into a temp directory, then re-crop/remap its
-    # manifest entries with robust bbox selection.
-    import shutil as _shutil
-
-    tmp_dir = Path(output_dir) / "_cofw_bbox_v2_uncropped_tmp"
-    if tmp_dir.exists():
-        _shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    uncropped_manifest = _build_cofw_before_bbox_v2(root, tmp_dir, **kwargs)
-    payload = _read_json(Path(uncropped_manifest))
-    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
-    if not isinstance(entries, list):
-        raise ValueError(f"COFW uncropped manifest did not contain samples list: {uncropped_manifest}")
-
-    entry_base = Path(uncropped_manifest).parent
-    image_base = Path(image_root) if image_root else entry_base
-
-    samples = []
-    skipped = []
-
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            continue
-
-        metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
-        image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
-        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
-
-        if image_value is None or landmark_value is None:
-            skipped.append({"sample_id": str(idx), "reason": "missing image or landmarks"})
-            continue
-
-        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or f"cofw/{idx:04d}")
-
-        try:
-            image_path = _resolve_path(image_value, base_dir=image_base)
-            points68, detected_schema = _load_points(
-                landmark_value,
-                base_dir=entry_base,
-                source_schema=str(entry.get("source_schema") or metadata.get("source_schema") or "") or None,
-            )
-            visibility = entry.get("visibility", metadata.get("visibility"))
-            visible_mask = _cofw_visibility_mask_for_crop(entry, metadata)
-            bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask)
-
-            crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
-                output_dir=Path(output_dir),
-                dataset="cofw",
-                sample_id=sample_id,
-                image_path=image_path,
-                points68=points68,
-                bbox_xyxy=bbox_ltrb,
-                bbox_source=bbox_source,
-                pad_ratio=0.25,
-            )
-        except Exception as err:  # noqa: BLE001
-            skipped.append({"sample_id": sample_id, "reason": str(err)})
-            continue
-
-        is_occluded = isinstance(visibility, (list, tuple)) and any(not bool(v) for v in visibility)
-        conds = _conditions(entry, "occlusion" if is_occluded else scenario)
-        if is_occluded and "occlusion" not in conds:
-            conds = tuple(dict.fromkeys((*conds, "occlusion")))
-
-        merged_metadata = dict(metadata)
-        merged_metadata.update(crop_metadata)
-        merged_metadata["face_bbox"] = [float(v) for v in bbox_ltrb]
-        merged_metadata["face_bbox_format"] = "ltrb"
-        merged_metadata["face_bbox_source"] = bbox_source
-        merged_metadata.setdefault("source_schema", detected_schema)
-        if visibility is not None:
-            merged_metadata["visibility"] = visibility
-
-        samples.append(
-            _sample(
-                output_dir=Path(output_dir),
-                dataset="cofw",
-                sample_id=sample_id,
-                image=crop_image_path,
-                points68=crop_points68,
-                condition="occlusion" if is_occluded else str(entry.get("condition") or conds[0]),
-                conditions=tuple(_label(item) for item in conds),
-                source_schema=detected_schema,
-                source_id=str(entry.get("source_id") or sample_id),
-                metadata=merged_metadata,
-                visibility=visibility,
-            )
-        )
-
-    if not samples:
-        raise ValueError(f"no COFW bbox-v2 samples built; skipped={skipped[:10]}")
-
-    return _write_manifest(
-        Path(output_dir),
-        "cofw",
-        scenario,
-        _filter(samples, scenarios, limit),
-        mode=mode,
-        allow_overlap=allow_overlap,
-        scenarios=scenarios,
-        skipped=skipped,
-    )
 
 
 if __name__ == "__main__":
