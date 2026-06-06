@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
-"""Download landmark dataset source archives used by the local manifest builders.
-
-The source table mirrors the dataset URL/file-id constants from faceswap's
-landmark dataset source helpers. Direct URLs are downloaded with urllib. Google
-Drive assets require ``--include-google-drive`` and the optional ``gdown`` CLI.
-
-Examples:
-
-    python tools/landmarks/download_landmark_datasets.py --output-root data/landmarks
-    python tools/landmarks/download_landmark_datasets.py --dataset wflw,300w --extract
-    python tools/landmarks/download_landmark_datasets.py --include-google-drive --extract
-    python tools/landmarks/download_landmark_datasets.py --dataset 300w --include-alternates
-
-Google Drive downloads require:
-
-    pip install gdown
-"""
+"""Download landmark dataset source archives used by local manifest builders."""
 
 from __future__ import annotations
 
@@ -34,7 +18,6 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 CHUNK_SIZE = 1024 * 1024
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
 ALL_DATASETS = (
@@ -51,8 +34,6 @@ ALL_DATASETS = (
 
 @dataclass(frozen=True)
 class SourceAsset:
-    """One downloadable or manual dataset asset."""
-
     dataset: str
     name: str
     filename: str
@@ -156,20 +137,14 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="AFLW.zip",
         google_drive_file_id="1uSx5hTxkxm48a3No0xm26DeJKpIooqrx",
         google_drive_view_url="https://drive.google.com/file/d/1uSx5hTxkxm48a3No0xm26DeJKpIooqrx/view",
-        note=(
-            "Native AFLW package used by MERL-RAV native mode. Requires --include-google-drive. "
-            "Faceswap also stores a drive.usercontent direct URL, but gdown is more reliable."
-        ),
+        note="Native AFLW package used by MERL-RAV native mode. Requires --include-google-drive.",
     ),
     SourceAsset(
         dataset="merl-rav",
         name="MERL-RAV labels",
         filename="MERL-RAV_dataset-master.zip",
         url="https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip",
-        note=(
-            "MERL-RAV annotations. Pair with AFLW images by imageNNNNN, or use AFLW release-2 "
-            "translation if you have that older cropped release."
-        ),
+        note="MERL-RAV annotations. Pair with AFLW images by imageNNNNN.",
     ),
     SourceAsset(
         dataset="aflw2000-3d",
@@ -316,9 +291,17 @@ def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> P
     if force and destination.exists():
         destination.unlink()
     print(f"Downloading Google Drive file {file_id} -> {destination}")
-    subprocess.run([gdown, "--id", file_id, "-O", str(destination)], check=True)
-    if not destination.is_file() or destination.stat().st_size == 0:
-        raise OSError(f"Google Drive download failed or produced empty file: {destination}")
+    tmp_destination = destination.with_name(f"{destination.name}.part")
+    if tmp_destination.exists():
+        tmp_destination.unlink()
+    try:
+        subprocess.run([gdown, file_id, "-O", str(tmp_destination)], check=True)
+        if not tmp_destination.is_file() or tmp_destination.stat().st_size == 0:
+            raise OSError(f"Google Drive download failed or produced empty file: {tmp_destination}")
+        os.replace(tmp_destination, destination)
+    finally:
+        if tmp_destination.exists():
+            tmp_destination.unlink()
     return destination
 
 
@@ -382,12 +365,10 @@ def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
 def _write_manual_steps(asset: SourceAsset, dataset_dir: Path) -> Path:
     dataset_dir.mkdir(parents=True, exist_ok=True)
     path = dataset_dir / asset.filename
-    steps = asset.manual_steps
-    if not steps:
-        steps = (
-            f"Install gdown and rerun with --include-google-drive, or manually download Google Drive file id {asset.google_drive_file_id}.",
-            f"Save it as {dataset_dir / 'archives' / asset.filename}.",
-        )
+    steps = asset.manual_steps or (
+        f"Install gdown and rerun with --include-google-drive, or manually download Google Drive file id {asset.google_drive_file_id}.",
+        f"Save it as {dataset_dir / 'archives' / asset.filename}.",
+    )
     lines = [f"# {asset.name}", "", asset.note or "Manual setup required.", ""]
     if asset.google_drive_view_url:
         lines.extend([f"Google Drive view URL: {asset.google_drive_view_url}", ""])
