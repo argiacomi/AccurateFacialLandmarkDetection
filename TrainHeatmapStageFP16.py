@@ -31,6 +31,11 @@ from lib.landmarks.evaluation.split_safe import (
     write_eval_csv,
     write_eval_json,
 )
+from lib.landmarks.training.domain_balanced_sampler import (
+    DEFAULT_BUCKET_TARGETS,
+    DomainBalancedBatchSampler,
+    parse_target_spec,
+)
 
 
 # from torch.cuda.amp import autocast as autocast
@@ -159,7 +164,16 @@ def _schema_aware_collate(batch):
             "sample_weight": default_collate(payload["sample_weight"]),
             "metadata": payload["metadata"],
         }
-    return {"image": images, "heads": heads}
+    mix = {"bucket": {}, "dataset": {}, "schema": {}}
+    for item in batch:
+        metadata = item.get("metadata", {})
+        bucket = str(metadata.get("hard_negative_bucket") or metadata.get("condition") or "unknown")
+        dataset = str(metadata.get("dataset") or "unknown")
+        schema = str(item.get("schema") or metadata.get("source_schema") or "unknown")
+        mix["bucket"][bucket] = mix["bucket"].get(bucket, 0) + 1
+        mix["dataset"][dataset] = mix["dataset"].get(dataset, 0) + 1
+        mix["schema"][schema] = mix["schema"].get(schema, 0) + 1
+    return {"image": images, "heads": heads, "mix": mix}
 
 
 def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
@@ -391,6 +405,14 @@ def main():
         help="For FS68Manifest, train schema-specific 68/98/profile39 heads from mixed-schema manifests.",
     )
     parser.add_argument("--schema-consistency-weight", type=float, default=0.05)
+    parser.add_argument("--domain-balanced-sampling", action="store_true")
+    parser.add_argument(
+        "--bucket-targets",
+        default="anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
+        help="Comma-separated hard bucket target weights for domain-balanced sampling.",
+    )
+    parser.add_argument("--dataset-targets", default="", help="Comma-separated dataset target weights.")
+    parser.add_argument("--schema-targets", default="", help="Comma-separated schema target weights.")
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument("--find_unused_parameters", action="store_true", help="Enable only if the model forward pass can skip trainable parameters")
@@ -422,14 +444,32 @@ def main():
         if args.data_name == FS68_DATASET_NAME:
             validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8, collate_fn=_eval_collate)
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        train_dataloader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            sampler=train_sampler,
-            num_workers=args.num_workers,
-            collate_fn=_schema_aware_collate if schema_aware_training else None,
-        )
+        if args.domain_balanced_sampling and args.data_name == FS68_DATASET_NAME:
+            train_sampler = DomainBalancedBatchSampler(
+                train_dataset.samples,
+                bucket_targets=parse_target_spec(args.bucket_targets, DEFAULT_BUCKET_TARGETS),
+                dataset_targets=parse_target_spec(args.dataset_targets),
+                schema_targets=parse_target_spec(args.schema_targets),
+                batch_size=args.batch_size,
+                seed=args.seed,
+                rank=dist.get_rank(),
+                world_size=dist.get_world_size(),
+            )
+            train_dataloader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_sampler=train_sampler,
+                num_workers=args.num_workers,
+                collate_fn=_schema_aware_collate if schema_aware_training else None,
+            )
+        else:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+            train_dataloader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_size=args.batch_size,
+                sampler=train_sampler,
+                num_workers=args.num_workers,
+                collate_fn=_schema_aware_collate if schema_aware_training else None,
+            )
         # net = NetAttnStage(
         #     args.lmk_num, Attn=lambda:SA2SA1_2(args.heatmap_size, args.max_depth), nstack=args.nstack, heatmap_size=args.heatmap_size, max_depth=args.max_depth
         # ).cuda()
@@ -556,8 +596,9 @@ def main():
                     ema.update_parameters(net.module)
                 n += data.shape[0]
                 if batch_idx % 20 == 0 and dist.get_rank() == 0:
+                    mix_text = f" mix: {batch.get('mix')}" if isinstance(batch, dict) and "mix" in batch else ""
                     print(
-                        f"train epoch {epoch} batch_idx {batch_idx} rank {dist.get_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()}"
+                        f"train epoch {epoch} batch_idx {batch_idx} rank {dist.get_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()}{mix_text}"
                     )
 
             if dist.get_rank() == 0 and (epoch + 1) % args.save_n_epoch == 0:
