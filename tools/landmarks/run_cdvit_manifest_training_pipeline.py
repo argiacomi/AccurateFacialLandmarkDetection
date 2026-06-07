@@ -307,6 +307,8 @@ def _hard_negative_command(args: argparse.Namespace, paths: PipelinePaths) -> li
         argv.extend(["--max-occlusion", str(args.max_occlusion)])
     if args.max_anchors is not None:
         argv.extend(["--max-anchors", str(args.max_anchors)])
+    if args.exclude_image_ids_file is not None:
+        argv.extend(["--exclude-image-ids-file", str(args.exclude_image_ids_file)])
     return _append_extra(argv, args.hard_negative_arg or [])
 
 
@@ -558,6 +560,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-build-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_quality_dataset.py; repeatable.")
     parser.add_argument("--production-build-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_production_validated_manifest.py; repeatable.")
     parser.add_argument("--hard-negative-arg", action="append", default=[], help="Extra quoted arg(s) passed to build_hard_negative_manifest.py; repeatable.")
+    parser.add_argument("--exclude-image-ids-file", type=Path, default=None, help="Drop MERL-RAV samples whose imageNNNNN id appears in this file during hard-negative manifest build.")
     parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; local builder emits canonical 68 only.")
     parser.add_argument("--allow-non68", action="store_true", help="Allow mixed landmark counts and train on the exact-68 subset.")
     parser.add_argument("--max-profile-occlusion", type=int, default=None)

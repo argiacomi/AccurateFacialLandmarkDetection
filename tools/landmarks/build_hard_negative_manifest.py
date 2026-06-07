@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import sys
 import typing as T
 from pathlib import Path
@@ -44,6 +45,58 @@ DEFAULT_BUCKET_RATIOS: dict[str, float] = {
     "anchor": 1.0,
 }
 DEFAULT_TOTAL_SAMPLES = 0
+
+IMAGE_ID_RE = re.compile(r"(image\d+)", re.IGNORECASE)
+
+
+def _image_ids_from_values(*values: T.Any) -> set[str]:
+    out: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        for match in IMAGE_ID_RE.findall(str(value)):
+            out.add(match.lower())
+    return out
+
+
+def _sample_image_ids(sample: T.Mapping[str, T.Any]) -> set[str]:
+    source = sample.get("source") if isinstance(sample.get("source"), dict) else {}
+    metadata = (
+        sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
+    )
+
+    return _image_ids_from_values(
+        sample.get("sample_id"),
+        sample.get("id"),
+        sample.get("name"),
+        sample.get("image"),
+        sample.get("image_path"),
+        sample.get("landmarks"),
+        sample.get("ground_truth"),
+        source.get("source_id"),
+        source.get("image_id"),
+        source.get("sample_id"),
+        metadata.get("image_id"),
+        metadata.get("merl_image_id"),
+        metadata.get("source_landmarks"),
+        metadata.get("annotation_file"),
+        metadata.get("original_image"),
+    )
+
+
+def _load_excluded_image_ids(path: Path | None) -> set[str]:
+    if path is None:
+        return set()
+    if not path.is_file():
+        raise FileNotFoundError(f"exclude image-id file not found: {path}")
+    out: set[str] = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        out.update(_image_ids_from_values(raw))
+    return out
+
 
 MANIFEST_ARGS: tuple[tuple[str, str], ...] = (
     ("wflw_manifest", "wflw"),
@@ -257,9 +310,11 @@ def build_hard_negative_manifest(
     allow_overlap: bool = False,
     seed: int = 1337,
     write_audit: bool = False,
+    exclude_image_ids_file: Path | None = None,
 ) -> dict[str, T.Any]:
     ratios = _ratio_targets(bucket_ratios=bucket_ratios, bucket_percentages=bucket_percentages)
     target_percentages = _normalize_ratios(ratios)
+    excluded_image_ids = _load_excluded_image_ids(exclude_image_ids_file)
     ceilings = _quota_ceilings(
         max_profile_occlusion=max_profile_occlusion,
         max_profile=max_profile,
@@ -274,11 +329,39 @@ def build_hard_negative_manifest(
     for dataset, manifest_path in manifests.items():
         dataset_label = dataset.strip().lower()
         dataset_counts: dict[str, int] = dict.fromkeys(
-            (*BUCKET_ORDER, "classified_by_label", "dataset_default", "skipped", "duplicate"),
+            (
+                *BUCKET_ORDER,
+                "classified_by_label",
+                "dataset_default",
+                "skipped",
+                "duplicate",
+                "excluded_image_id",
+            ),
             0,
         )
         for sample in _load_samples(manifest_path):
             sample.setdefault("dataset", dataset_label)
+
+            sample_image_ids = _sample_image_ids(sample)
+            if (
+                dataset_label == "merl-rav"
+                and excluded_image_ids
+                and (sample_image_ids & excluded_image_ids)
+            ):
+                dataset_counts["excluded_image_id"] += 1
+                continue
+
+            if sample_image_ids:
+                metadata = (
+                    dict(sample.get("metadata", {}))
+                    if isinstance(sample.get("metadata"), dict)
+                    else {}
+                )
+                metadata.setdefault("source_image_ids", sorted(sample_image_ids))
+                if dataset_label == "merl-rav":
+                    metadata.setdefault("merl_image_id", sorted(sample_image_ids)[0])
+                sample["metadata"] = metadata
+
             classification = classify_hard_negative(sample)
             classification_source = "classified_by_label"
             if classification is None:
@@ -319,7 +402,16 @@ def build_hard_negative_manifest(
             by_dataset.setdefault(dataset_label, {})
             by_dataset[dataset_label][bucket] = by_dataset[dataset_label].get(bucket, 0) + 1
 
-            split_key = f"{dataset_label}|{sample.get('sample_id') or sample.get('image') or sample.get('landmarks')}"
+            sample_image_ids = _sample_image_ids(sample)
+            if dataset_label == "merl-rav" and sample_image_ids:
+                split_identity = sorted(sample_image_ids)[0]
+            else:
+                split_identity = (
+                    sample.get("sample_id")
+                    or sample.get("image")
+                    or sample.get("landmarks")
+                )
+            split_key = f"{dataset_label}|{split_identity}"
             split_hash = int(hashlib.sha256(split_key.encode()).hexdigest()[:8], 16)
             split = "test" if (split_hash % 100) < 5 else "train"
             sample["split"] = split
@@ -345,7 +437,9 @@ def build_hard_negative_manifest(
         "effective_capacities": effective_capacities,
         "target_total": target_total,
         "requested_total": total_samples,
-        "target_ratios": {bucket: float(ratios.get(bucket, 0.0)) for bucket in BUCKET_ORDER},
+        "target_ratios": {
+            bucket: float(ratios.get(bucket, 0.0)) for bucket in BUCKET_ORDER
+        },
         "target_percentages": target_percentages,
         "actual_percentages": actual_percentages,
         "ceilings": ceilings,
@@ -353,12 +447,17 @@ def build_hard_negative_manifest(
         "weights": dict(BUCKET_WEIGHT),
         "dataset_default_buckets": dict(DATASET_DEFAULT_BUCKET),
         "bucket_fill_rates": {
-            bucket: counts[bucket] / max(float(target_counts[bucket]), 1.0) for bucket in BUCKET_ORDER
+            bucket: counts[bucket] / max(float(target_counts[bucket]), 1.0)
+            for bucket in BUCKET_ORDER
         },
         "anchor_count": counts.get("anchor", 0),
         "total": total_selected,
         "seed": seed,
         "allow_overlap": allow_overlap,
+        "exclude_image_ids_file": str(exclude_image_ids_file)
+        if exclude_image_ids_file
+        else None,
+        "excluded_image_id_count": len(excluded_image_ids),
     }
     (output_dir / "hard_negative_mix.json").write_text(
         json.dumps(mix_report, indent=2, sort_keys=True), encoding="utf-8"
@@ -418,6 +517,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-overlap", action="store_true")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--write-audit", action="store_true")
+    parser.add_argument(
+        "--exclude-image-ids-file",
+        type=Path,
+        default=None,
+        help="Drop MERL-RAV samples whose imageNNNNN id appears in this file.",
+    )
     parser.add_argument("--log-level", default="INFO")
     return parser
 
@@ -447,6 +552,7 @@ def main(argv: T.Sequence[str] | None = None) -> int:
         allow_overlap=args.allow_overlap,
         seed=args.seed,
         write_audit=args.write_audit,
+        exclude_image_ids_file=args.exclude_image_ids_file,
     )
     return 0
 
