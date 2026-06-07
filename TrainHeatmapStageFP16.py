@@ -22,7 +22,7 @@ from EMA import EMA
 import math
 from torch.nn.attention import sdpa_kernel, SDPBackend
 import random
-from lib.landmarks.core.schema import MAP_98_TO_68
+from lib.landmarks.core.schema import DEFAULT_SCHEMA_HEADS, MAP_98_TO_68, head_name_for_schema
 from lib.landmarks.evaluation.split_safe import (
     EVAL_MODES,
     SPLIT_POLICIES,
@@ -341,10 +341,46 @@ def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
 def _eval_collate(batch):
     if batch and len(batch[0]) >= 4 and isinstance(batch[0][3], dict):
         data = default_collate([item[0] for item in batch])
-        target = default_collate([item[1] for item in batch])
-        landmark_mask = default_collate([item[2] for item in batch])
         metadata = [item[3] for item in batch]
-        return data, target, landmark_mask, metadata
+        head_names = []
+        for item in batch:
+            meta = item[3]
+            head_name = str(meta.get("head_name") or "")
+            if not head_name:
+                schema = meta.get("source_schema") or meta.get("schema") or ""
+                if schema:
+                    try:
+                        head_name = head_name_for_schema(schema)
+                    except ValueError:
+                        head_name = ""
+            head_names.append(head_name or "landmarks_68")
+        target_shapes = {tuple(item[1].shape) for item in batch}
+        if len(target_shapes) == 1 and set(head_names) == {"landmarks_68"}:
+            target = default_collate([item[1] for item in batch])
+            landmark_mask = default_collate([item[2] for item in batch])
+            return data, target, landmark_mask, metadata
+
+        grouped = {}
+        for index, (item, head_name) in enumerate(zip(batch, head_names)):
+            grouped.setdefault(head_name, {"indices": [], "target": [], "landmark_mask": [], "metadata": []})
+            grouped[head_name]["indices"].append(index)
+            grouped[head_name]["target"].append(item[1])
+            grouped[head_name]["landmark_mask"].append(item[2])
+            meta = dict(item[3])
+            meta["head_name"] = head_name
+            grouped[head_name]["metadata"].append(meta)
+        return {
+            "image": data,
+            "heads": {
+                head_name: {
+                    "indices": torch.as_tensor(payload["indices"], dtype=torch.long),
+                    "target": default_collate(payload["target"]),
+                    "landmark_mask": default_collate(payload["landmark_mask"]),
+                    "metadata": payload["metadata"],
+                }
+                for head_name, payload in grouped.items()
+            },
+        }
     return default_collate(batch)
 
 
@@ -449,16 +485,21 @@ def _visibility_target_from_meta(meta, expected_count):
     return arr
 
 
-def _visibility_logits_from_stage(stage_pred):
+def _visibility_logits_from_stage(stage_pred, head_name="landmarks_68"):
     if not isinstance(stage_pred, dict):
         return None
-    for key in ("visibility_logits", "landmarks_68_visibility_logits", "visibility_68_logits"):
+    point_suffix = head_name.removeprefix("landmarks_").removeprefix("profile")
+    for key in (
+        f"{head_name}_visibility_logits",
+        f"visibility_{point_suffix}_logits",
+        "visibility_logits",
+    ):
         value = stage_pred.get(key)
         if torch.is_tensor(value):
             return value
-    landmarks_68 = stage_pred.get("landmarks_68")
-    if isinstance(landmarks_68, (list, tuple)) and len(landmarks_68) >= 3 and torch.is_tensor(landmarks_68[2]):
-        return landmarks_68[2]
+    head_payload = stage_pred.get(head_name)
+    if isinstance(head_payload, (list, tuple)) and len(head_payload) >= 3 and torch.is_tensor(head_payload[2]):
+        return head_payload[2]
     return None
 
 
@@ -486,6 +527,8 @@ def _visibility_aware_records(pred_keypoints, keypoints, landmark_mask, metadata
         unknown_mask = mask_i & ~np.isin(visibility_target, (0, 1))
 
         record = record_for_sample(meta, nme)
+        record["evaluation_head"] = str(meta.get("head_name") or "")
+        record["visibility_target_source"] = str(meta.get("visibility_target_source") or "")
         record["visible_landmark_count"] = int(np.sum(visible_mask))
         record["occluded_landmark_count"] = int(np.sum(occluded_mask))
         record["visibility_label_skipped_count"] = int(np.sum(unknown_mask))
@@ -513,19 +556,42 @@ def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=
     model.eval()
     records = []
     for batch_idx, batch in enumerate(tqdm(test_dataloader)):
+        if isinstance(batch, dict) and "heads" in batch:
+            data = batch["image"].to(device)
+            stage_pred = model(data)[-1]
+            for head_name, payload in batch["heads"].items():
+                indices = payload["indices"].to(device)
+                pred_keypoints, heatmap = _landmark_prediction_for_head(stage_pred, head_name)
+                pred_keypoints = pred_keypoints.index_select(0, indices)
+                keypoints = payload["target"].to(device)
+                landmark_mask = payload["landmark_mask"].to(device)
+                visibility_logits = _visibility_logits_from_stage(stage_pred, head_name)
+                if visibility_logits is not None:
+                    visibility_logits = visibility_logits.index_select(0, indices)
+                records.extend(
+                    _visibility_aware_records(
+                        pred_keypoints,
+                        keypoints,
+                        landmark_mask,
+                        payload["metadata"],
+                        visibility_logits=visibility_logits,
+                    )
+                )
+            continue
+
         data, target, landmark_mask, metadata = _unpack_eval_batch(batch)
         data = data.to(device)
         keypoints = target.to(device)
         landmark_mask = landmark_mask.to(device)
         stage_pred = model(data)[-1]
-        pred_keypoints, heatmap = _landmarks_68_prediction(stage_pred)
+        pred_keypoints, heatmap = _landmark_prediction_for_head(stage_pred, "landmarks_68")
         records.extend(
             _visibility_aware_records(
                 pred_keypoints,
                 keypoints,
                 landmark_mask,
                 metadata,
-                visibility_logits=_visibility_logits_from_stage(stage_pred),
+                visibility_logits=_visibility_logits_from_stage(stage_pred, "landmarks_68"),
             )
         )
     report = build_slice_report(records)
@@ -540,8 +606,17 @@ def _records_from_report(report):
 
 
 def _landmarks_68_prediction(stage_pred):
+    return _landmark_prediction_for_head(stage_pred, "landmarks_68")
+
+
+def _landmark_prediction_for_head(stage_pred, head_name):
     if isinstance(stage_pred, dict):
-        return stage_pred["landmarks_68"]
+        if head_name not in stage_pred:
+            available = ", ".join(sorted(key for key in stage_pred if not key.startswith("_")))
+            raise ValueError(f"model output does not include evaluation head '{head_name}' (available: {available})")
+        return stage_pred[head_name]
+    if head_name != "landmarks_68":
+        raise ValueError(f"legacy model output can only evaluate landmarks_68, not '{head_name}'")
     return stage_pred
 
 
@@ -657,7 +732,14 @@ def main():
             schema_aware_training=schema_aware_training,
         )
         print('----------------------len(train_dataset)', len(train_dataset))
-        test_dataset = _build_dataset(args, "test", aug=False, heatmap_size=0, include_metadata=True)
+        test_dataset = _build_dataset(
+            args,
+            "test",
+            aug=False,
+            heatmap_size=0,
+            include_metadata=True,
+            schema_aware_training=schema_aware_training,
+        )
         if args.data_name == FS68_DATASET_NAME:
             validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8, collate_fn=_eval_collate)
@@ -717,9 +799,7 @@ def main():
             heatmap_size=args.heatmap_size,
             max_depth=args.max_depth,
             backbone_net=backbone_net,
-            schema_heads={"landmarks_68": 68, "landmarks_98": 98, "profile39": 39}
-            if schema_aware_training
-            else None,
+            schema_heads=DEFAULT_SCHEMA_HEADS if schema_aware_training else None,
             auxiliary_heads={name: len(labels) for name, labels in AUXILIARY_CLASS_NAMES.items()}
             if schema_aware_training and args.auxiliary_heads
             else None,

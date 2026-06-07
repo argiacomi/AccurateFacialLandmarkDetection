@@ -32,6 +32,7 @@ from lib.landmarks.evaluation.split_safe import (
     write_eval_records_csv,
     write_eval_records_jsonl,
 )
+from lib.landmarks.core.schema import DEFAULT_SCHEMA_HEADS
 
 
 def _backbone_for_heatmap_size(heatmap_size: int, max_depth: int):
@@ -67,9 +68,7 @@ def _build_model(args: argparse.Namespace, device: torch.device) -> VitAttnStage
         heatmap_size=args.heatmap_size,
         max_depth=args.max_depth,
         backbone_net=backbone_net,
-        schema_heads={"landmarks_68": 68, "landmarks_98": 98, "profile39": 39}
-        if args.schema_aware_model
-        else None,
+        schema_heads=DEFAULT_SCHEMA_HEADS if args.schema_aware_model else None,
     ).to(device)
     missing, unexpected = model.load_state_dict(_load_state_dict(args.checkpoint, device), strict=False)
     if missing:
@@ -91,7 +90,7 @@ def _dataset(args: argparse.Namespace, split: str):
         eval_mode=args.eval_mode,
         heldout_datasets=args.heldout_dataset,
         include_metadata=split == "test",
-        schema_aware_training=False,
+        schema_aware_training=bool(args.schema_aware_eval),
         split_policy=args.split_policy,
     )
 
@@ -121,6 +120,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--heatmap-size", type=int, default=32)
     parser.add_argument("--max-depth", type=int, default=256)
     parser.add_argument("--schema-aware-model", action="store_true")
+    parser.add_argument(
+        "--schema-aware-eval",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Evaluate manifest samples through native schema heads. Defaults to --schema-aware-model.",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser
 
@@ -134,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         args.split_policy = "declared"
     if args.ignore_declared_splits:
         args.split_policy = "random_hash"
+    if args.schema_aware_eval is None:
+        args.schema_aware_eval = bool(args.schema_aware_model)
 
     device = torch.device(args.device)
     train_dataset = _dataset(args, "train")

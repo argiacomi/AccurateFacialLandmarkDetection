@@ -1,9 +1,11 @@
 import json
 import sys
 import types
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 import torch
 
 augmentation_stub = types.ModuleType("ImageAugmentation")
@@ -11,8 +13,9 @@ augmentation_stub.GetAugTransform = lambda: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 from DatasetFS68Manifest import LandmarkDataset
-from TrainHeatmapStageFP16 import _schema_aware_collate
-from lib.landmarks.core.schema import flip_map_for_schema, head_name_for_schema
+from TrainHeatmapStageFP16 import _eval_collate, _evaluate_landmark_model, _schema_aware_collate
+from lib.landmarks.core.schema import DEFAULT_SCHEMA_HEADS, flip_map_for_schema, head_name_for_schema
+from tools.landmarks.evaluate_cdvit_manifest import _dataset as standalone_eval_dataset
 
 
 def _write_manifest(tmp_path, points, *, schema, extra_sample=None):
@@ -45,7 +48,13 @@ def _write_manifest(tmp_path, points, *, schema, extra_sample=None):
 def test_schema_registry_has_required_training_heads_and_flip_maps():
     assert head_name_for_schema("2d_68") == "landmarks_68"
     assert head_name_for_schema("2d_98") == "landmarks_98"
+    assert head_name_for_schema("2d_106") == "landmarks_106"
+    assert head_name_for_schema("2d_194") == "landmarks_194"
+    assert head_name_for_schema("2d_29") == "landmarks_29"
     assert head_name_for_schema("multipie_profile_39") == "profile39"
+    assert DEFAULT_SCHEMA_HEADS["landmarks_106"] == 106
+    assert DEFAULT_SCHEMA_HEADS["landmarks_194"] == 194
+    assert DEFAULT_SCHEMA_HEADS["landmarks_29"] == 29
     assert flip_map_for_schema("2d_68").shape == (68,)
     assert flip_map_for_schema("2d_98").shape == (98,)
     assert flip_map_for_schema("multipie_profile_39").shape == (39,)
@@ -138,3 +147,87 @@ def test_fs68_eval_metadata_preserves_optional_visibility_targets(tmp_path):
 
     _, _, _, metadata = dataset[0]
     assert metadata["visibility_target"][:6] == [1, 0, 1, 0, -1, -1]
+    assert metadata["visibility_target_source"] == "entry.visibility"
+
+
+def test_standalone_eval_dataset_keeps_native_schema_when_enabled(tmp_path):
+    points = np.stack([np.linspace(32, 224, 98), np.linspace(40, 216, 98)], axis=1)
+    manifest_path = _write_manifest(
+        tmp_path,
+        points,
+        schema="2d_98",
+        extra_sample={"split": "test", "visibility_target": [1, 0, *([-1] * 96)]},
+    )
+    args = SimpleNamespace(
+        manifest=str(manifest_path),
+        preload=0,
+        eval_mode="random_hash",
+        heldout_dataset=[],
+        split_policy="declared",
+        schema_aware_eval=True,
+    )
+
+    dataset = standalone_eval_dataset(args, "test")
+
+    _, target, _, metadata = dataset[0]
+    assert target.shape == (98, 2)
+    assert metadata["head_name"] == "landmarks_98"
+    assert metadata["visibility_target"][:2] == [1, 0]
+
+
+def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
+    points_68 = torch.stack((torch.linspace(0.1, 0.9, 68), torch.linspace(0.2, 0.8, 68)), dim=1)
+    points_98 = torch.stack((torch.linspace(0.1, 0.9, 98), torch.linspace(0.2, 0.8, 98)), dim=1)
+    batch = _eval_collate(
+        [
+            (
+                torch.zeros(3, 256, 256),
+                points_68,
+                torch.ones(68),
+                {
+                    "sample_id": "sample-68",
+                    "source_schema": "2d_68",
+                    "head_name": "landmarks_68",
+                    "visibility_target": [1, 0, *([-1] * 66)],
+                    "visibility_target_source": "entry.visibility_target",
+                },
+            ),
+            (
+                torch.zeros(3, 256, 256),
+                points_98,
+                torch.ones(98),
+                {
+                    "sample_id": "sample-98",
+                    "source_schema": "2d_98",
+                    "head_name": "landmarks_98",
+                    "visibility_target": [1, 1, 0, *([-1] * 95)],
+                    "visibility_target_source": "metadata.landmark_visibility",
+                },
+            ),
+        ]
+    )
+
+    class NativeHeadModel(torch.nn.Module):
+        def forward(self, data):
+            pred_68 = torch.zeros(data.shape[0], 68, 2)
+            pred_98 = torch.zeros(data.shape[0], 98, 2)
+            pred_68[0] = points_68
+            pred_98[1] = points_98
+            return [
+                {
+                    "landmarks_68": (pred_68, torch.zeros(data.shape[0], 68, 8, 8)),
+                    "landmarks_98": (pred_98, torch.zeros(data.shape[0], 98, 8, 8)),
+                }
+            ]
+
+    report = _evaluate_landmark_model(NativeHeadModel(), [batch], torch.device("cpu"), include_records=True)
+
+    assert report["overall"]["sample_count"] == 2
+    assert report["overall"]["NME_all"] == pytest.approx(0.0)
+    assert report["overall"]["visible_landmark_count"] == 3
+    assert report["overall"]["occluded_landmark_count"] == 2
+    assert report["by_schema"]["2d_98"]["sample_count"] == 1
+    records = {record["sample_id"]: record for record in report["records"]}
+    assert records["sample-68"]["evaluation_head"] == "landmarks_68"
+    assert records["sample-98"]["evaluation_head"] == "landmarks_98"
+    assert records["sample-98"]["visibility_target_source"] == "metadata.landmark_visibility"

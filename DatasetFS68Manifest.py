@@ -242,11 +242,11 @@ def _visibility_target_from_entry(entry, metadata, landmark_count):
     ):
         target = _as_visibility_target(entry.get(key), landmark_count)
         if target is not None:
-            return target
+            return target, f"entry.{key}"
         target = _as_visibility_target(metadata.get(key), landmark_count)
         if target is not None:
-            return target
-    return None
+            return target, f"metadata.{key}"
+    return None, ""
 
 
 class LandmarkDataset(Dataset):
@@ -364,7 +364,7 @@ class LandmarkDataset(Dataset):
                 continue
 
             landmark_mask = _landmark_mask_from_entry(entry, metadata, landmarks.shape[0])
-            visibility_target = _visibility_target_from_entry(entry, metadata, landmarks.shape[0])
+            visibility_target, visibility_target_source = _visibility_target_from_entry(entry, metadata, landmarks.shape[0])
             conditions = _coerce_conditions(entry, metadata)
             samples.append(
                 {
@@ -381,6 +381,7 @@ class LandmarkDataset(Dataset):
                     "face_bbox": entry.get("face_bbox", metadata.get("face_bbox", entry.get("bbox", metadata.get("bbox")))),
                     "bbox_format": entry.get("bbox_format", metadata.get("bbox_format", "")),
                     "visibility_target": visibility_target,
+                    "visibility_target_source": visibility_target_source,
                     "sample_weight": _weight_from_entry(entry, metadata, conditions),
                     "landmark_mask": landmark_mask,
                 }
@@ -469,13 +470,17 @@ class LandmarkDataset(Dataset):
 
             if np.random.random() < 0.5:
                 if self.schema_aware_training:
-                    flip_index = flip_map_for_schema(sample["source_schema"])
+                    try:
+                        flip_index = flip_map_for_schema(sample["source_schema"])
+                    except ValueError:
+                        flip_index = None
                 else:
                     flip_index = np.asarray(flip_points("300W"), dtype=np.int64)
-                img = cv2.flip(img, 1)
-                lmk = lmk[flip_index, :]
-                landmark_mask = landmark_mask[flip_index]
-                lmk[:, 0] = 255 - lmk[:, 0]
+                if flip_index is not None:
+                    img = cv2.flip(img, 1)
+                    lmk = lmk[flip_index, :]
+                    landmark_mask = landmark_mask[flip_index]
+                    lmk[:, 0] = 255 - lmk[:, 0]
 
         img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
         img = self.transform(img)
@@ -503,6 +508,7 @@ class LandmarkDataset(Dataset):
                         "visibility_target": sample.get("visibility_target").tolist()
                         if sample.get("visibility_target") is not None
                         else None,
+                        "visibility_target_source": sample.get("visibility_target_source", ""),
                         "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                     }
                 )
@@ -529,12 +535,14 @@ class LandmarkDataset(Dataset):
                     "condition": sample.get("condition", ""),
                     "conditions": list(sample.get("conditions", ())),
                     "source_schema": sample.get("source_schema", ""),
+                    "head_name": sample.get("head_name", ""),
                     "source": sample.get("source", {}),
                     "face_bbox": sample.get("face_bbox"),
                     "bbox_format": sample.get("bbox_format", ""),
                     "visibility_target": sample.get("visibility_target").tolist()
                     if sample.get("visibility_target") is not None
                     else None,
+                    "visibility_target_source": sample.get("visibility_target_source", ""),
                     "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                 }
             )

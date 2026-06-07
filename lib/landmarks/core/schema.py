@@ -37,19 +37,34 @@ class LandmarkSchema:
 
 SUPPORTED_SCHEMAS: dict[str, LandmarkSchema] = {
     "2d_4": LandmarkSchema("2d_4", 4, 2),
+    "2d_29": LandmarkSchema("2d_29", 29, 2),
     "2d_39": LandmarkSchema("2d_39", 39, 2),
     "2d_51": LandmarkSchema("2d_51", 51, 2),
     "2d_68": LandmarkSchema("2d_68", 68, 2),
     "2d_98": LandmarkSchema("2d_98", 98, 2),
+    "2d_106": LandmarkSchema("2d_106", 106, 2),
+    "2d_194": LandmarkSchema("2d_194", 194, 2),
     "3d_26": LandmarkSchema("3d_26", 26, 3),
     "menpo2d_profile_39": LandmarkSchema("menpo2d_profile_39", 39, 2),
     "multipie_profile_39": LandmarkSchema("multipie_profile_39", 39, 2),
+}
+
+DEFAULT_SCHEMA_HEADS: dict[str, int] = {
+    "landmarks_68": 68,
+    "landmarks_98": 98,
+    "landmarks_106": 106,
+    "landmarks_194": 194,
+    "profile39": 39,
+    "landmarks_29": 29,
 }
 
 _SCHEMA_ALIASES = {
     "4": "2d_4",
     "4pt": "2d_4",
     "lm_2d_4": "2d_4",
+    "29": "2d_29",
+    "29pt": "2d_29",
+    "lm_2d_29": "2d_29",
     "39": "2d_39",
     "39pt": "2d_39",
     "profile39": "2d_39",
@@ -69,6 +84,12 @@ _SCHEMA_ALIASES = {
     "98": "2d_98",
     "98pt": "2d_98",
     "lm_2d_98": "2d_98",
+    "106": "2d_106",
+    "106pt": "2d_106",
+    "lm_2d_106": "2d_106",
+    "194": "2d_194",
+    "194pt": "2d_194",
+    "lm_2d_194": "2d_194",
     "26": "3d_26",
     "26pt3d": "3d_26",
     "lm_3d_26": "3d_26",
@@ -253,6 +274,12 @@ def head_name_for_schema(schema: str | object) -> str:
         return "landmarks_68"
     if schema_name == "2d_98":
         return "landmarks_98"
+    if schema_name == "2d_106":
+        return "landmarks_106"
+    if schema_name == "2d_194":
+        return "landmarks_194"
+    if schema_name == "2d_29":
+        return "landmarks_29"
     if schema_name in {"2d_39", "menpo2d_profile_39", "multipie_profile_39"}:
         return "profile39"
     raise ValueError(f"Schema '{schema_name}' is not trainable by the CD-ViT multi-head path")

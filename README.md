@@ -205,4 +205,16 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
   --start-at validate_cdvit_manifest
 ```
 
-By default, Menpo2D and MultiPIE non-68 profile samples are excluded because CD-ViT currently trains on exactly 68 landmarks. Use `--allow-non68` only if you intentionally want mixed manifests and are comfortable with `DatasetFS68Manifest` training on the exact-68 subset.
+Schema-aware CD-ViT training and evaluation use native heads for supported manifest schemas instead of forcing every sample through the 68-point output. The default head registry covers `landmarks_68`, `landmarks_98`, `landmarks_106`, `landmarks_194`, `profile39`, and `landmarks_29`; production inference still consumes `landmarks_68`. Schemas without audited flip maps are not randomly flipped during augmentation until a schema-specific flip map is registered.
+
+For standalone checkpoint evaluation, pass `--schema-aware-model` to construct the native heads. `--schema-aware-eval` defaults to the same value and makes the evaluator load non-68 samples with their native schema/head metadata:
+
+```bash
+python tools/landmarks/evaluate_cdvit_manifest.py \
+  --checkpoint runs/landmarks/cdvit/best_model \
+  --manifest runs/landmarks/cdvit_fs68_hard/hard_negative_mix/manifest.json \
+  --schema-aware-model \
+  --eval-report-json runs/landmarks/eval/report.json
+```
+
+Visible/occluded landmark metrics are emitted when per-point visibility targets are present. JSON and CSV summaries include `NME_all`, `NME_visible`, `NME_occluded`, visibility AP/F1@0.5/ROC-AUC when visibility scores are predicted, visible/occluded landmark counts, and skipped-label counts. Per-sample records include visible/occluded counts, per-sample visible/occluded NME, the native evaluation head, and `visibility_target_source` so fields such as `visibility_mask` remain auditable. `NME_visible` and `NME_occluded` are means of per-sample visible/occluded NME values; use the reported landmark counts when interpreting slices where samples have very different numbers of labeled visible or occluded points.
