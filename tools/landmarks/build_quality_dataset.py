@@ -907,6 +907,14 @@ def _cofw_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
     # COFW HDF5 images are usually channel-first: C,H,W.
     if arr.ndim == 3 and arr.shape[0] in (1, 3, 4):
         arr = np.moveaxis(arr, 0, -1)
+
+    # MATLAB/HDF5 stores COFW image planes transposed relative to the
+    # annotation coordinate frame. Points/bboxes align after swapping H/W.
+    if arr.ndim == 3:
+        arr = np.transpose(arr, (1, 0, 2))
+    elif arr.ndim == 2:
+        arr = arr.T
+
     if arr.ndim == 3 and arr.shape[-1] == 1:
         arr = arr[:, :, 0]
     if arr.dtype != np.uint8:
