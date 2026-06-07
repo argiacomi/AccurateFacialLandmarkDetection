@@ -141,13 +141,37 @@ def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
         if mask_i.sum() <= 0:
             continue
 
-        # Prefer canonical outer-eye interocular when both eye corners are valid.
+        valid = target_i[mask_i]
+        if valid.shape[0] <= 1:
+            continue
+
+        span = np.max(valid, axis=0) - np.min(valid, axis=0)
+        span_norm = float(max(span[0], span[1]))
+
+        eye_norm = None
         if mask_i.shape[0] > 45 and mask_i[36] and mask_i[45]:
-            normalizer = float(np.linalg.norm(target_i[36] - target_i[45]))
+            eye_norm = float(np.linalg.norm(target_i[36] - target_i[45]))
+
+        # Prefer canonical outer-eye interocular only when it is plausible.
+        #
+        # MERL-RAV has some frontal samples where landmarks 36/45 are valid but
+        # nearly collapsed, e.g. eye_norm ~= 0.04 in normalized coordinates.
+        # That explodes NME even when the rest of the face is reasonable.
+        #
+        # Since targets are normalized to roughly [0, 1], 0.05 is ~12.75px on
+        # a 256 crop. Also require eye_norm to be at least 15% of the visible
+        # landmark span, otherwise fall back to span normalization.
+        if (
+            eye_norm is not None
+            and np.isfinite(eye_norm)
+            and eye_norm > 0.05
+            and np.isfinite(span_norm)
+            and span_norm > 1e-6
+            and eye_norm >= 0.15 * span_norm
+        ):
+            normalizer = eye_norm
         else:
-            valid = target_i[mask_i]
-            span = np.max(valid, axis=0) - np.min(valid, axis=0)
-            normalizer = float(max(span[0], span[1]))
+            normalizer = span_norm
 
         if not np.isfinite(normalizer) or normalizer <= 1e-6:
             continue
