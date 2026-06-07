@@ -4,7 +4,10 @@ from lib.landmarks.evaluation.split_safe import (
     build_slice_report,
     entry_in_eval_split,
     metrics_for_nmes,
+    slice_labels,
+    stable_random_hash_split,
     validate_no_train_test_leakage,
+    write_eval_records_jsonl,
 )
 
 
@@ -51,6 +54,48 @@ def test_dataset_modes_require_heldout_dataset():
             eval_mode="by_dataset",
             heldout_datasets=(),
         )
+    with pytest.raises(ValueError, match="requires exactly one --heldout-dataset"):
+        entry_in_eval_split(
+            {"sample_id": "a", "dataset": "wflw"},
+            0,
+            split="test",
+            eval_mode="leave_one_dataset_out",
+            heldout_datasets=("wflw", "cofw"),
+        )
+    assert entry_in_eval_split(
+        {"sample_id": "a", "dataset": "wflw"},
+        0,
+        split="test",
+        eval_mode="by_dataset",
+        heldout_datasets=("wflw", "cofw"),
+    )
+
+
+def test_split_policy_can_force_declared_or_hash_split():
+    sample = None
+    for index in range(1000):
+        candidate = {"sample_id": f"sample-{index}", "dataset": "wflw", "split": "test"}
+        if stable_random_hash_split(candidate, index) == "train":
+            sample = candidate
+            break
+    assert sample is not None
+
+    assert entry_in_eval_split(
+        sample,
+        0,
+        split="test",
+        eval_mode="random_hash",
+        has_declared_splits=True,
+        split_policy="declared",
+    )
+    assert not entry_in_eval_split(
+        sample,
+        0,
+        split="test",
+        eval_mode="random_hash",
+        has_declared_splits=True,
+        split_policy="random_hash",
+    )
 
 
 def test_leakage_check_fails_on_duplicate_image_or_landmark_sources():
@@ -72,6 +117,41 @@ def test_leakage_check_fails_on_duplicate_image_or_landmark_sources():
 
     with pytest.raises(ValueError, match="train/test source leakage detected"):
         validate_no_train_test_leakage(train, test)
+
+
+def test_leakage_check_catches_identity_sequence_and_archive_sources():
+    train = [
+        {
+            "sample_id": "train",
+            "image": "/data/train.jpg",
+            "landmarks": "/data/train.npy",
+            "metadata": {
+                "subject_id": "person-1",
+                "video_id": "video-1",
+                "archive_path": "/archives/source.zip",
+            },
+        }
+    ]
+    test = [
+        {
+            "sample_id": "test",
+            "image": "/data/test.jpg",
+            "landmarks": "/data/test.npy",
+            "metadata": {
+                "person_id": "person-1",
+                "clip_id": "video-1",
+                "original_archive": "/archives/source.zip",
+            },
+        }
+    ]
+
+    with pytest.raises(ValueError) as err:
+        validate_no_train_test_leakage(train, test)
+
+    message = str(err.value)
+    assert "duplicate_identity_count" in message
+    assert "duplicate_sequence_count" in message
+    assert "duplicate_archive_count" in message
 
 
 def test_slice_report_includes_required_metrics_and_ci():
@@ -109,6 +189,44 @@ def test_slice_report_includes_required_metrics_and_ci():
     assert overall["auc"] is not None
     assert overall["nme_ci95"]["low"] is not None
     assert report["by_dataset"]["wflw"]["sample_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1", "occlusion"),
+        ("true", "occlusion"),
+        ("yes", "occlusion"),
+        ("occluded", "occlusion"),
+        ("0", "no_occlusion"),
+        ("false", "no_occlusion"),
+        ("no", "no_occlusion"),
+        ("none", "no_occlusion"),
+        ("clean", "no_occlusion"),
+        ("clear", "no_occlusion"),
+        ("possibly", "unknown"),
+        (True, "occlusion"),
+        (False, "no_occlusion"),
+    ],
+)
+def test_occlusion_labels_are_normalized(value, expected):
+    assert slice_labels({"occlusion": value})["by_occlusion"] == expected
+
+
+def test_face_size_bucket_respects_explicit_bbox_format():
+    assert slice_labels({"bbox": [0, 0, 63, 63], "bbox_format": "xyxy"})["by_face_size"] == "small"
+    assert slice_labels({"bbox": [20, 20, 90, 90], "bbox_format": "xywh"})["by_face_size"] == "medium"
+    assert slice_labels({"bbox": [0, 0, 63, 63]})["by_face_size"] == "unknown"
+    assert slice_labels({"bbox": {"x": 0, "y": 0, "w": 129, "h": 129}})["by_face_size"] == "large"
+
+
+def test_eval_records_jsonl_can_be_written(tmp_path):
+    path = tmp_path / "records.jsonl"
+    write_eval_records_jsonl(path, [{"sample_id": "a", "nme": 0.1}, {"sample_id": "b", "nme": 0.2}])
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert '"sample_id": "a"' in lines[0]
 
 
 def test_empty_metrics_are_reportable():

@@ -15,6 +15,45 @@ from loss_function import compute_fr_and_auc
 
 
 EVAL_MODES = ("random_hash", "by_dataset", "leave_one_dataset_out")
+SPLIT_POLICIES = ("declared_or_random_hash", "random_hash", "declared")
+LEAKAGE_KEYS = {
+    "image": (
+        "image",
+        "image_path",
+        "path",
+        "original_image",
+        "source_image",
+        "source_image_ids",
+        "image_id",
+        "merl_image_id",
+        "frame_name",
+    ),
+    "landmark": (
+        "landmarks",
+        "ground_truth",
+        "points",
+        "original_landmarks",
+        "source_landmarks",
+    ),
+    "identity": (
+        "subject_id",
+        "person_id",
+        "identity_id",
+        "source_dataset_id",
+    ),
+    "sequence": (
+        "video_id",
+        "clip_id",
+        "sequence_id",
+        "session_id",
+        "capture_id",
+    ),
+    "archive": (
+        "archive",
+        "archive_path",
+        "original_archive",
+    ),
+}
 
 
 def normalize_label(value: T.Any) -> str:
@@ -82,6 +121,7 @@ def entry_in_eval_split(
     eval_mode: str,
     heldout_datasets: T.Iterable[str] | None = None,
     has_declared_splits: bool = False,
+    split_policy: str = "declared_or_random_hash",
 ) -> bool:
     split_label = normalize_label(split)
     mode = normalize_label(eval_mode) or "random_hash"
@@ -94,6 +134,8 @@ def entry_in_eval_split(
     if mode in {"by_dataset", "leave_one_dataset_out"}:
         if not heldout:
             raise ValueError(f"--eval-mode {mode} requires at least one --heldout-dataset")
+        if mode == "leave_one_dataset_out" and len(heldout) != 1:
+            raise ValueError("--eval-mode leave_one_dataset_out requires exactly one --heldout-dataset")
         is_heldout = dataset in heldout
         if split_label == "train":
             return not is_heldout
@@ -101,7 +143,13 @@ def entry_in_eval_split(
             return is_heldout
         return False
 
-    if has_declared_splits:
+    policy = normalize_label(split_policy) or "declared_or_random_hash"
+    if policy not in SPLIT_POLICIES:
+        raise ValueError(f"unknown split policy {split_policy!r}; expected one of {SPLIT_POLICIES}")
+    if policy == "declared":
+        entry_split = manifest_entry_split(entry)
+        return bool(entry_split) and entry_split == split_label
+    if policy == "declared_or_random_hash" and has_declared_splits:
         entry_split = manifest_entry_split(entry)
         return bool(entry_split) and entry_split == split_label
     return stable_random_hash_split(entry, index) == split_label
@@ -136,66 +184,48 @@ def _source_values(sample: T.Mapping[str, T.Any], keys: T.Sequence[str]) -> set[
 
 
 def image_source_ids(sample: T.Mapping[str, T.Any]) -> set[str]:
-    return _source_values(
-        sample,
-        (
-            "image",
-            "image_path",
-            "path",
-            "original_image",
-            "source_image",
-            "source_image_ids",
-            "image_id",
-            "merl_image_id",
-            "frame_name",
-        ),
-    )
+    return _source_values(sample, LEAKAGE_KEYS["image"])
 
 
 def landmark_source_ids(sample: T.Mapping[str, T.Any]) -> set[str]:
-    return _source_values(
-        sample,
-        (
-            "landmarks",
-            "ground_truth",
-            "points",
-            "original_landmarks",
-            "source_landmarks",
-        ),
-    )
+    return _source_values(sample, LEAKAGE_KEYS["landmark"])
+
+
+def leakage_source_ids(sample: T.Mapping[str, T.Any], category: str) -> set[str]:
+    return _source_values(sample, LEAKAGE_KEYS[category])
 
 
 def validate_no_train_test_leakage(
     train_samples: T.Sequence[T.Mapping[str, T.Any]],
     test_samples: T.Sequence[T.Mapping[str, T.Any]],
 ) -> None:
-    train_images: dict[str, str] = {}
-    train_landmarks: dict[str, str] = {}
+    train_sources: dict[str, dict[str, str]] = {category: {} for category in LEAKAGE_KEYS}
     for sample in train_samples:
         sample_id = str(sample.get("sample_id") or sample.get("image") or sample.get("landmarks"))
-        for source_id in image_source_ids(sample):
-            train_images.setdefault(source_id, sample_id)
-        for source_id in landmark_source_ids(sample):
-            train_landmarks.setdefault(source_id, sample_id)
+        for category in LEAKAGE_KEYS:
+            for source_id in leakage_source_ids(sample, category):
+                train_sources[category].setdefault(source_id, sample_id)
 
-    duplicate_images = []
-    duplicate_landmarks = []
+    duplicates: dict[str, list[tuple[str, str, str]]] = {category: [] for category in LEAKAGE_KEYS}
     for sample in test_samples:
         sample_id = str(sample.get("sample_id") or sample.get("image") or sample.get("landmarks"))
-        for source_id in image_source_ids(sample):
-            if source_id in train_images:
-                duplicate_images.append((source_id, train_images[source_id], sample_id))
-        for source_id in landmark_source_ids(sample):
-            if source_id in train_landmarks:
-                duplicate_landmarks.append((source_id, train_landmarks[source_id], sample_id))
+        for category in LEAKAGE_KEYS:
+            for source_id in leakage_source_ids(sample, category):
+                if source_id in train_sources[category]:
+                    duplicates[category].append((source_id, train_sources[category][source_id], sample_id))
 
-    if duplicate_images or duplicate_landmarks:
+    if any(duplicates.values()):
         details = {
-            "duplicate_image_sources": duplicate_images[:10],
-            "duplicate_landmark_sources": duplicate_landmarks[:10],
-            "duplicate_image_count": len(duplicate_images),
-            "duplicate_landmark_count": len(duplicate_landmarks),
+            f"duplicate_{category}_count": len(values)
+            for category, values in duplicates.items()
         }
+        details.update(
+            {
+                f"duplicate_{category}_examples": values[:10]
+                for category, values in duplicates.items()
+                if values
+            }
+        )
         raise ValueError(f"train/test source leakage detected: {json.dumps(details, sort_keys=True)}")
 
 
@@ -260,9 +290,11 @@ def _occlusion_bucket(meta: T.Mapping[str, T.Any], conditions: T.Sequence[str]) 
     if explicit is not None:
         if isinstance(explicit, str):
             label = normalize_label(explicit)
-            if label in {"none", "no", "false", "0", "clear", "clean"}:
+            if label in {"1", "true", "yes", "occluded", "occlusion"}:
+                return "occlusion"
+            if label in {"0", "false", "no", "none", "clear", "clean"}:
                 return "no_occlusion"
-            return label or "unknown"
+            return "unknown"
         return "occlusion" if bool(explicit) else "no_occlusion"
     return "occlusion" if any("occlusion" in label or "occlud" in label for label in conditions) else "no_occlusion"
 
@@ -281,16 +313,19 @@ def _profile_side(meta: T.Mapping[str, T.Any], conditions: T.Sequence[str]) -> s
     return "not_profile"
 
 
-def _bbox_value(meta: T.Mapping[str, T.Any]) -> T.Any:
+def _bbox_value(meta: T.Mapping[str, T.Any]) -> tuple[T.Any, str]:
     for key in ("face_bbox", "bbox", "crop_bbox_xyxy"):
         value = meta.get(key)
         if value is not None:
-            return value
-    return None
+            fmt = normalize_label(meta.get("bbox_format") or meta.get(f"{key}_format"))
+            if key == "crop_bbox_xyxy" and not fmt:
+                fmt = "xyxy"
+            return value, fmt
+    return None, ""
 
 
 def _face_size_bucket(meta: T.Mapping[str, T.Any]) -> str:
-    bbox = _bbox_value(meta)
+    bbox, bbox_format = _bbox_value(meta)
     if bbox is None:
         return "unknown"
     try:
@@ -307,9 +342,15 @@ def _face_size_bucket(meta: T.Mapping[str, T.Any]) -> str:
             flat = list(bbox)
             if len(flat) < 4:
                 return "unknown"
-            left, top, third, fourth = (float(item) for item in flat[:4])
-            width = third - left if third > left else third
-            height = fourth - top if fourth > top else fourth
+            first, second, third, fourth = (float(item) for item in flat[:4])
+            if bbox_format == "xyxy":
+                width = third - first
+                height = fourth - second
+            elif bbox_format == "xywh":
+                width = third
+                height = fourth
+            else:
+                return "unknown"
     except (TypeError, ValueError):
         return "unknown"
     size = max(width, height)
@@ -345,6 +386,24 @@ def slice_labels(meta: T.Mapping[str, T.Any]) -> dict[str, str]:
         "by_profile_side": _profile_side(merged, conditions),
         "by_face_size": _face_size_bucket(merged),
         "by_production_source": production_source,
+    }
+
+
+def record_for_sample(meta: T.Mapping[str, T.Any], nme: float) -> dict[str, T.Any]:
+    labels = slice_labels(meta)
+    return {
+        "sample_id": str(meta.get("sample_id", "")),
+        "image": str(meta.get("image", "")),
+        "dataset": labels["by_dataset"],
+        "schema": labels["by_schema"],
+        "nme": float(nme),
+        "pose_bucket": labels["by_pose_bucket"],
+        "hard_negative_bucket": labels["by_hard_negative_bucket"],
+        "occlusion": labels["by_occlusion"],
+        "profile_side": labels["by_profile_side"],
+        "face_size": labels["by_face_size"],
+        "production_source": labels["by_production_source"],
+        **labels,
     }
 
 
@@ -451,6 +510,36 @@ def write_eval_csv(path: str | Path, payload: T.Mapping[str, T.Any]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_eval_records_jsonl(path: str | Path, records: T.Sequence[T.Mapping[str, T.Any]]) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def write_eval_records_csv(path: str | Path, records: T.Sequence[T.Mapping[str, T.Any]]) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "sample_id",
+        "image",
+        "dataset",
+        "schema",
+        "nme",
+        "pose_bucket",
+        "hard_negative_bucket",
+        "occlusion",
+        "profile_side",
+        "face_size",
+        "production_source",
+    ]
+    with out.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(records)
 
 
 def _csv_row(model_key: str, slice_name: str, label: str, metrics: T.Mapping[str, T.Any]) -> dict[str, T.Any]:

@@ -8,10 +8,19 @@ import numpy as np
 
 import random
 import time
-import albumentations as A
+try:
+    import albumentations as A
+except ModuleNotFoundError:
+    A = None
+
+
+def _require_albumentations():
+    if A is None:
+        raise ModuleNotFoundError("albumentations is required for image augmentation")
 
 
 def GetAugTransform(prob_factor=1.0):
+    _require_albumentations()
     affine_worker = A.Affine(
         scale={'x':[0.8, 1.2], 'y':[0.8, 1.2]},
         translate_px={"x": [-40, 40], "y": [-40, 40]},
@@ -56,6 +65,7 @@ def GetAugTransform(prob_factor=1.0):
     return transform
 
 def GetAugTransform_2(prob_factor=1.0):
+    _require_albumentations()
     affine_worker = A.Affine(
         scale={"x": [0.9, 1.1], "y": [0.9, 1.1]},
         translate_px={"x": [-20, 20], "y": [-20, 20]},

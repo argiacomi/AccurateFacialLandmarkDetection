@@ -25,11 +25,15 @@ import random
 from lib.landmarks.core.schema import MAP_98_TO_68
 from lib.landmarks.evaluation.split_safe import (
     EVAL_MODES,
+    SPLIT_POLICIES,
     build_slice_report,
+    record_for_sample,
     slice_labels,
     validate_no_train_test_leakage,
     write_eval_csv,
     write_eval_json,
+    write_eval_records_csv,
+    write_eval_records_jsonl,
 )
 from lib.landmarks.training.domain_balanced_sampler import (
     DEFAULT_BUCKET_TARGETS,
@@ -99,6 +103,7 @@ def _build_dataset(args, split, aug, heatmap_size=0, include_metadata=False, sch
         heldout_datasets=args.heldout_dataset if args.data_name == FS68_DATASET_NAME else None,
         include_metadata=include_metadata,
         schema_aware_training=schema_aware_training,
+        split_policy=args.split_policy if args.data_name == FS68_DATASET_NAME else "declared_or_random_hash",
     )
 
 
@@ -416,7 +421,7 @@ def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
     return values[np.isfinite(values)]
 
 
-def _evaluate_landmark_model(model, test_dataloader, device):
+def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=False):
     model.eval()
     records = []
     for batch_idx, batch in enumerate(tqdm(test_dataloader)):
@@ -430,11 +435,16 @@ def _evaluate_landmark_model(model, test_dataloader, device):
             if not np.isfinite(float(nme)):
                 continue
             meta = meta if isinstance(meta, dict) else {}
-            record = {"nme": float(nme), **slice_labels(meta)}
-            if meta.get("sample_id"):
-                record["sample_id"] = str(meta["sample_id"])
-            records.append(record)
-    return build_slice_report(records)
+            records.append(record_for_sample(meta, float(nme)))
+    report = build_slice_report(records)
+    if include_records:
+        report["records"] = records
+    return report
+
+
+def _records_from_report(report):
+    records = report.get("records", [])
+    return records if isinstance(records, list) else []
 
 
 def _landmarks_68_prediction(stage_pred):
@@ -487,14 +497,19 @@ def main():
     parser.add_argument("--train_manifest", type=str, default="", help="faceswap-compatible train manifest for FS68Manifest")
     parser.add_argument("--test_manifest", type=str, default="", help="faceswap-compatible test manifest for FS68Manifest")
     parser.add_argument("--eval-mode", choices=EVAL_MODES, default="random_hash")
+    parser.add_argument("--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash")
+    parser.add_argument("--respect-declared-splits", action="store_true", help="Alias for --split-policy declared.")
+    parser.add_argument("--ignore-declared-splits", action="store_true", help="Alias for --split-policy random_hash.")
     parser.add_argument(
         "--heldout-dataset",
         action="append",
         default=[],
-        help="Dataset label to hold out for by_dataset or leave_one_dataset_out evaluation. May be repeated.",
+        help="Dataset label to hold out. by_dataset accepts one or more; leave_one_dataset_out requires exactly one.",
     )
     parser.add_argument("--eval-report-json", type=str, default="", help="Evaluation JSON path. Defaults to <ckpt_folder>/eval_report.json")
     parser.add_argument("--eval-report-csv", type=str, default="", help="Optional evaluation CSV path")
+    parser.add_argument("--eval-records-jsonl", type=str, default="", help="Optional per-sample evaluation records JSONL path")
+    parser.add_argument("--eval-records-csv", type=str, default="", help="Optional per-sample evaluation records CSV path")
     parser.add_argument(
         "--schema-aware-training",
         action=argparse.BooleanOptionalAction,
@@ -521,6 +536,12 @@ def main():
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument("--find_unused_parameters", action="store_true", help="Enable only if the model forward pass can skip trainable parameters")
     args = parser.parse_args()
+    if args.respect_declared_splits and args.ignore_declared_splits:
+        parser.error("pass only one of --respect-declared-splits or --ignore-declared-splits")
+    if args.respect_declared_splits:
+        args.split_policy = "declared"
+    if args.ignore_declared_splits:
+        args.split_policy = "random_hash"
     setup_seed(args.seed)
     lmk_num = _landmark_count_for_dataset(args)
     if "LOCAL_RANK" in os.environ and os.environ["LOCAL_RANK"] is not None:
@@ -722,7 +743,12 @@ def main():
                 duration = time.time() - epoch_start_time
                 print("#epoch duration", duration)
                 with torch.no_grad():
-                    model_report = _evaluate_landmark_model(net, test_dataloader, device)
+                    model_report = _evaluate_landmark_model(
+                        net.module,
+                        test_dataloader,
+                        device,
+                        include_records=bool(args.eval_records_jsonl or args.eval_records_csv),
+                    )
                     nme = model_report["overall"]["nme"]
                     if nme is not None and best_nme > nme:
                         best_nme = nme
@@ -745,16 +771,26 @@ def main():
                     _print_eval_summary("test ema", ema_report)
                     # print("BEST NME %: {}".format(best_nme * 100))
                     print(best_record)
+                    records = _records_from_report(model_report)
+                    compact_model_report = {
+                        key: value for key, value in model_report.items() if key != "records"
+                    }
                     eval_payload = {
                         "epoch": epoch,
                         "eval_mode": args.eval_mode,
                         "heldout_datasets": list(args.heldout_dataset),
-                        "model": model_report,
+                        "model": compact_model_report,
                         "ema": ema_report,
                     }
                     write_eval_json(_eval_report_json_path(args), eval_payload)
                     if args.eval_report_csv:
                         write_eval_csv(args.eval_report_csv, eval_payload)
+                    if args.eval_records_jsonl:
+                        write_eval_records_jsonl(args.eval_records_jsonl, records)
+                    if args.eval_records_csv:
+                        write_eval_records_csv(args.eval_records_csv, records)
+            if dist.is_initialized():
+                dist.barrier()
 
 
 if __name__ == "__main__":

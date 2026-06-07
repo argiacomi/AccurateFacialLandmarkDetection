@@ -17,6 +17,7 @@ def GetDataset(
     heldout_datasets=None,
     include_metadata=False,
     schema_aware_training=False,
+    split_policy="declared_or_random_hash",
 ):
     if name == "WFLW":
         return DWFLW(
@@ -57,5 +58,6 @@ def GetDataset(
             heldout_datasets=heldout_datasets,
             include_metadata=include_metadata,
             schema_aware_training=schema_aware_training,
+            split_policy=split_policy,
         )
     raise ValueError(f"unknown dataset name: {name}")

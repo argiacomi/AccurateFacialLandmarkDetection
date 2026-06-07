@@ -9,7 +9,6 @@ from torch.utils.data import Dataset
 from torchvision.transforms import transforms
 
 from DrawHeatmap import GenerateHeatmap
-from ImageAugmentation import GetAugTransform
 from RandomFlip import flip_points, random_flip
 from lib.landmarks.core.schema import (
     canonicalize_schema,
@@ -23,6 +22,12 @@ from lib.landmarks.evaluation.split_safe import (
     manifest_entry_split,
     normalize_heldout_datasets,
 )
+
+try:
+    from ImageAugmentation import GetAugTransform
+except ModuleNotFoundError:
+    def GetAugTransform():
+        raise ModuleNotFoundError("albumentations is required when FS68Manifest aug=True")
 
 
 HARD_NEGATIVE_BUCKET_WEIGHTS = {
@@ -199,6 +204,7 @@ class LandmarkDataset(Dataset):
         heldout_datasets=None,
         include_metadata=False,
         schema_aware_training=False,
+        split_policy="declared_or_random_hash",
     ):
         super(LandmarkDataset, self).__init__()
         if perturbation:
@@ -212,8 +218,15 @@ class LandmarkDataset(Dataset):
         self.heldout_datasets = normalize_heldout_datasets(heldout_datasets)
         self.include_metadata = bool(include_metadata)
         self.schema_aware_training = bool(schema_aware_training)
+        self.split_policy = split_policy
         self.heatmap_size = int(heatmap_size or 0)
-        self.samples = self._load_manifest(self.manifest_path, split, self.eval_mode, self.heldout_datasets)
+        self.samples = self._load_manifest(
+            self.manifest_path,
+            split,
+            self.eval_mode,
+            self.heldout_datasets,
+            self.split_policy,
+        )
         if not self.samples:
             detail = f" split={split!r} eval_mode={self.eval_mode!r}"
             if self.heldout_datasets:
@@ -227,7 +240,7 @@ class LandmarkDataset(Dataset):
         self.generateHM = GenerateHeatmap(self.heatmap_size) if self.heatmap_size > 0 else None
         self.data_list = self.loaditem_list() if preload else None
 
-    def _load_manifest(self, manifest_path, split, eval_mode, heldout_datasets):
+    def _load_manifest(self, manifest_path, split, eval_mode, heldout_datasets, split_policy):
         base_dir = manifest_path.parent
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         entries = payload.get("samples", payload.get("scenarios", []))
@@ -249,6 +262,7 @@ class LandmarkDataset(Dataset):
                 eval_mode=eval_mode,
                 heldout_datasets=heldout_datasets,
                 has_declared_splits=use_split_filter,
+                split_policy=split_policy,
             ):
                 continue
 
@@ -296,6 +310,7 @@ class LandmarkDataset(Dataset):
                     "source": source,
                     "metadata": metadata,
                     "face_bbox": entry.get("face_bbox", metadata.get("face_bbox", entry.get("bbox", metadata.get("bbox")))),
+                    "bbox_format": entry.get("bbox_format", metadata.get("bbox_format", "")),
                     "sample_weight": _weight_from_entry(entry, metadata, conditions),
                     "landmark_mask": landmark_mask,
                 }
@@ -413,6 +428,8 @@ class LandmarkDataset(Dataset):
                         "conditions": list(sample.get("conditions", ())),
                         "source_schema": sample.get("source_schema", ""),
                         "head_name": sample.get("head_name", ""),
+                        "face_bbox": sample.get("face_bbox"),
+                        "bbox_format": sample.get("bbox_format", ""),
                         "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                     }
                 )
@@ -441,6 +458,7 @@ class LandmarkDataset(Dataset):
                     "source_schema": sample.get("source_schema", ""),
                     "source": sample.get("source", {}),
                     "face_bbox": sample.get("face_bbox"),
+                    "bbox_format": sample.get("bbox_format", ""),
                     "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                 }
             )
