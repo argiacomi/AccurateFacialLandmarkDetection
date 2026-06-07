@@ -13,6 +13,9 @@ def GetDataset(
     perturbation=False,
     heatmap_size=0,
     manifest_path="",
+    eval_mode="random_hash",
+    heldout_datasets=None,
+    include_metadata=False,
 ):
     if name == "WFLW":
         return DWFLW(
@@ -49,5 +52,8 @@ def GetDataset(
             aug=aug,
             perturbation=perturbation,
             heatmap_size=heatmap_size,
+            eval_mode=eval_mode,
+            heldout_datasets=heldout_datasets,
+            include_metadata=include_metadata,
         )
     raise ValueError(f"unknown dataset name: {name}")

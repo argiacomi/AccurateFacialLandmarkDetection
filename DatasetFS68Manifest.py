@@ -11,6 +11,11 @@ from torchvision.transforms import transforms
 from DrawHeatmap import GenerateHeatmap
 from ImageAugmentation import GetAugTransform
 from RandomFlip import flip_points, random_flip
+from lib.landmarks.evaluation.split_safe import (
+    entry_in_eval_split,
+    manifest_entry_split,
+    normalize_heldout_datasets,
+)
 
 
 HARD_NEGATIVE_BUCKET_WEIGHTS = {
@@ -106,10 +111,7 @@ def _weight_from_entry(entry, metadata, conditions):
 
 
 def _entry_split(entry):
-    raw = entry.get("split")
-    if raw is None and isinstance(entry.get("metadata"), dict):
-        raw = entry["metadata"].get("split")
-    return _normalize_label(raw)
+    return manifest_entry_split(entry)
 
 
 def _as_bool_landmark_mask(value):
@@ -178,7 +180,18 @@ class LandmarkDataset(Dataset):
     faceswap hard-negative metadata is preserved as a per-sample loss weight.
     """
 
-    def __init__(self, manifest_path, split="train", preload=True, aug=True, heatmap_size=0, perturbation=0):
+    def __init__(
+        self,
+        manifest_path,
+        split="train",
+        preload=True,
+        aug=True,
+        heatmap_size=0,
+        perturbation=0,
+        eval_mode="random_hash",
+        heldout_datasets=None,
+        include_metadata=False,
+    ):
         super(LandmarkDataset, self).__init__()
         if perturbation:
             raise ValueError("FS68Manifest does not support perturbation mode")
@@ -187,10 +200,16 @@ class LandmarkDataset(Dataset):
 
         self.manifest_path = Path(manifest_path)
         self.split = split
+        self.eval_mode = eval_mode
+        self.heldout_datasets = normalize_heldout_datasets(heldout_datasets)
+        self.include_metadata = bool(include_metadata)
         self.heatmap_size = int(heatmap_size or 0)
-        self.samples = self._load_manifest(self.manifest_path, split)
+        self.samples = self._load_manifest(self.manifest_path, split, self.eval_mode, self.heldout_datasets)
         if not self.samples:
-            raise ValueError(f"no 68-point samples found in {self.manifest_path} for split {split!r}")
+            detail = f" split={split!r} eval_mode={self.eval_mode!r}"
+            if self.heldout_datasets:
+                detail += f" heldout_datasets={self.heldout_datasets!r}"
+            raise ValueError(f"no 68-point samples found in {self.manifest_path} for{detail}")
 
         self.transform = transforms.Compose(
             [transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
@@ -199,14 +218,13 @@ class LandmarkDataset(Dataset):
         self.generateHM = GenerateHeatmap(self.heatmap_size) if self.heatmap_size > 0 else None
         self.data_list = self.loaditem_list() if preload else None
 
-    def _load_manifest(self, manifest_path, split):
+    def _load_manifest(self, manifest_path, split, eval_mode, heldout_datasets):
         base_dir = manifest_path.parent
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         entries = payload.get("samples", payload.get("scenarios", []))
         if not isinstance(entries, list):
             raise ValueError(f"manifest {manifest_path} must contain a samples or scenarios list")
 
-        split_label = _normalize_label(split)
         declared_splits = {_entry_split(entry) for entry in entries if isinstance(entry, dict) and _entry_split(entry)}
         use_split_filter = bool(declared_splits)
 
@@ -215,14 +233,18 @@ class LandmarkDataset(Dataset):
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 continue
-            entry_split = _entry_split(entry)
-            if use_split_filter:
-                if not entry_split:
-                    continue
-                if entry_split != split_label:
-                    continue
+            if not entry_in_eval_split(
+                entry,
+                index,
+                split=split,
+                eval_mode=eval_mode,
+                heldout_datasets=heldout_datasets,
+                has_declared_splits=use_split_filter,
+            ):
+                continue
 
             metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {}
+            source = entry.get("source", {}) if isinstance(entry.get("source"), dict) else {}
             landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
             image_value = entry.get("image")
             if not landmarks_value or not image_value:
@@ -247,7 +269,10 @@ class LandmarkDataset(Dataset):
                     "dataset": str(entry.get("dataset") or metadata.get("dataset") or ""),
                     "condition": str(entry.get("condition") or entry.get("scenario") or ""),
                     "conditions": conditions,
+                    "source_schema": str(metadata.get("source_schema") or entry.get("source_schema") or ""),
+                    "source": source,
                     "metadata": metadata,
+                    "face_bbox": entry.get("face_bbox", metadata.get("face_bbox", entry.get("bbox", metadata.get("bbox")))),
                     "sample_weight": _weight_from_entry(entry, metadata, conditions),
                     "landmark_mask": landmark_mask,
                 }
@@ -352,5 +377,23 @@ class LandmarkDataset(Dataset):
             denom = torch.sum(heatmap, dim=(1, 2), keepdim=True).clamp_min(1e-6)
             heatmap = torch.where(landmark_mask_t.reshape(-1, 1, 1) > 0.0, heatmap / denom, heatmap)
             return img, lmk, heatmap, torch.tensor(sample["sample_weight"], dtype=torch.float32), landmark_mask_t
+
+        if self.include_metadata:
+            metadata = dict(sample.get("metadata", {}))
+            metadata.update(
+                {
+                    "sample_id": sample.get("sample_id", ""),
+                    "image": sample.get("image", ""),
+                    "landmarks": sample.get("landmarks", ""),
+                    "dataset": sample.get("dataset", ""),
+                    "condition": sample.get("condition", ""),
+                    "conditions": list(sample.get("conditions", ())),
+                    "source_schema": sample.get("source_schema", ""),
+                    "source": sample.get("source", {}),
+                    "face_bbox": sample.get("face_bbox"),
+                    "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
+                }
+            )
+            return img, lmk, landmark_mask_t, metadata
 
         return img, lmk, landmark_mask_t

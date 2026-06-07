@@ -7,6 +7,7 @@ from DatasetAll import GetDataset
 from torch.optim.lr_scheduler import StepLR
 from Net import VitAttnStage, HeadingNet
 import torch.nn as nn
+from torch.utils.data._utils.collate import default_collate
 from Hourglass import Hourglass
 # from Vit import Vit
 from Attention import SA2SA1_2
@@ -15,13 +16,20 @@ from Attention import SA2SA1_2
 import torch.nn.functional as F
 import time
 from tqdm import tqdm
-from loss_function import calc_nme, compute_fr_and_auc
 import numpy as np
 from loss import AWingLoss
 from EMA import EMA
 import math
 from torch.nn.attention import sdpa_kernel, SDPBackend
 import random
+from lib.landmarks.evaluation.split_safe import (
+    EVAL_MODES,
+    build_slice_report,
+    slice_labels,
+    validate_no_train_test_leakage,
+    write_eval_csv,
+    write_eval_json,
+)
 
 
 # from torch.cuda.amp import autocast as autocast
@@ -58,7 +66,7 @@ def _manifest_for_split(args, split):
     return args.manifest or args.root_folder
 
 
-def _build_dataset(args, split, aug, heatmap_size=0):
+def _build_dataset(args, split, aug, heatmap_size=0, include_metadata=False):
     manifest_path = _manifest_for_split(args, split) if args.data_name == FS68_DATASET_NAME else ""
     return GetDataset(
         args.data_name,
@@ -68,6 +76,9 @@ def _build_dataset(args, split, aug, heatmap_size=0):
         aug=aug,
         heatmap_size=heatmap_size,
         manifest_path=manifest_path,
+        eval_mode=args.eval_mode if args.data_name == FS68_DATASET_NAME else "random_hash",
+        heldout_datasets=args.heldout_dataset if args.data_name == FS68_DATASET_NAME else None,
+        include_metadata=include_metadata,
     )
 
 
@@ -121,6 +132,16 @@ def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
     return weights.reshape(pred_heatmap.shape[0], pred_heatmap.shape[1], 1, 1)
 
 
+def _eval_collate(batch):
+    if batch and len(batch[0]) >= 4 and isinstance(batch[0][3], dict):
+        data = default_collate([item[0] for item in batch])
+        target = default_collate([item[1] for item in batch])
+        landmark_mask = default_collate([item[2] for item in batch])
+        metadata = [item[3] for item in batch]
+        return data, target, landmark_mask, metadata
+    return default_collate(batch)
+
+
 def _unpack_eval_batch(batch):
     data = batch[0]
     target = batch[1]
@@ -128,10 +149,14 @@ def _unpack_eval_batch(batch):
         landmark_mask = batch[2]
     else:
         landmark_mask = torch.ones(target.shape[:2], dtype=torch.float32)
-    return data, target, landmark_mask
+    if len(batch) >= 4:
+        metadata = batch[3]
+    else:
+        metadata = [{} for _ in range(int(target.shape[0]))]
+    return data, target, landmark_mask, metadata
 
 
-def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
+def _masked_nme_values(pred_keypoints, keypoints, landmark_mask):
     pred = pred_keypoints.detach().float().cpu().numpy()
     target = keypoints.detach().float().cpu().numpy()
     mask = landmark_mask.detach().float().cpu().numpy() > 0.5
@@ -139,10 +164,12 @@ def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
     values = []
     for pred_i, target_i, mask_i in zip(pred, target, mask):
         if mask_i.sum() <= 0:
+            values.append(float("nan"))
             continue
 
         valid = target_i[mask_i]
         if valid.shape[0] <= 1:
+            values.append(float("nan"))
             continue
 
         span = np.max(valid, axis=0) - np.min(valid, axis=0)
@@ -174,12 +201,58 @@ def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
             normalizer = span_norm
 
         if not np.isfinite(normalizer) or normalizer <= 1e-6:
+            values.append(float("nan"))
             continue
 
         dist = np.linalg.norm(target_i[mask_i] - pred_i[mask_i], axis=1)
         values.append(float(dist.mean() / normalizer))
 
     return np.asarray(values, dtype=np.float32)
+
+
+def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
+    values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
+    return values[np.isfinite(values)]
+
+
+def _evaluate_landmark_model(model, test_dataloader, device):
+    model.eval()
+    records = []
+    for batch_idx, batch in enumerate(tqdm(test_dataloader)):
+        data, target, landmark_mask, metadata = _unpack_eval_batch(batch)
+        data = data.to(device)
+        keypoints = target.to(device)
+        landmark_mask = landmark_mask.to(device)
+        pred_keypoints, heatmap = model(data)[-1]
+        nme_values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
+        for nme, meta in zip(nme_values, metadata):
+            if not np.isfinite(float(nme)):
+                continue
+            meta = meta if isinstance(meta, dict) else {}
+            record = {"nme": float(nme), **slice_labels(meta)}
+            if meta.get("sample_id"):
+                record["sample_id"] = str(meta["sample_id"])
+            records.append(record)
+    return build_slice_report(records)
+
+
+def _print_eval_summary(title, report):
+    metrics = report["overall"]
+    print(f"\n------------ {title} ------------")
+    if metrics["sample_count"] == 0:
+        print("NME %: nan")
+        print("FR_{}% : nan".format(0.10))
+        print("AUC_{}: nan".format(0.10))
+        return
+    print("NME %: {}".format(metrics["nme_percent"]))
+    print("FR_{}% : {}".format(0.10, metrics["fr_percent"]))
+    print("AUC_{}: {}".format(0.10, metrics["auc"]))
+
+
+def _eval_report_json_path(args):
+    if args.eval_report_json:
+        return args.eval_report_json
+    return os.path.join(args.ckpt_folder, "eval_report.json")
 
 
 def main():
@@ -206,6 +279,15 @@ def main():
     parser.add_argument("--manifest", type=str, default="", help="faceswap-compatible manifest for FS68Manifest train/test")
     parser.add_argument("--train_manifest", type=str, default="", help="faceswap-compatible train manifest for FS68Manifest")
     parser.add_argument("--test_manifest", type=str, default="", help="faceswap-compatible test manifest for FS68Manifest")
+    parser.add_argument("--eval-mode", choices=EVAL_MODES, default="random_hash")
+    parser.add_argument(
+        "--heldout-dataset",
+        action="append",
+        default=[],
+        help="Dataset label to hold out for by_dataset or leave_one_dataset_out evaluation. May be repeated.",
+    )
+    parser.add_argument("--eval-report-json", type=str, default="", help="Evaluation JSON path. Defaults to <ckpt_folder>/eval_report.json")
+    parser.add_argument("--eval-report-csv", type=str, default="", help="Optional evaluation CSV path")
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument("--find_unused_parameters", action="store_true", help="Enable only if the model forward pass can skip trainable parameters")
@@ -226,8 +308,10 @@ def main():
 
         train_dataset = _build_dataset(args, "train", aug=True, heatmap_size=args.heatmap_size)
         print('----------------------len(train_dataset)', len(train_dataset))
-        test_dataset = _build_dataset(args, "test", aug=False, heatmap_size=0)
-        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8)
+        test_dataset = _build_dataset(args, "test", aug=False, heatmap_size=0, include_metadata=True)
+        if args.data_name == FS68_DATASET_NAME:
+            validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
+        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8, collate_fn=_eval_collate)
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers
@@ -351,57 +435,39 @@ def main():
                 duration = time.time() - epoch_start_time
                 print("#epoch duration", duration)
                 with torch.no_grad():
-                    net.eval()
-                    SME = 0.0
-                    IONs = None
-                    for batch_idx, batch in enumerate(tqdm(test_dataloader)):
-                        data, target, landmark_mask = _unpack_eval_batch(batch)
-                        data = data.to(device)
-                        keypoints = target.to(device)
-                        landmark_mask = landmark_mask.to(device)
-                        pred_keypoints, heatmap = net(data)[-1]
-                        ion_list = _masked_nme_list(pred_keypoints, keypoints, landmark_mask)
-                        IONs = np.concatenate((IONs, ion_list), 0) if IONs is not None else ion_list
-
-                    nme, fr, auc = compute_fr_and_auc(IONs, thres=0.10, step=0.0001)
-                    if best_nme > nme:
+                    model_report = _evaluate_landmark_model(net, test_dataloader, device)
+                    nme = model_report["overall"]["nme"]
+                    if nme is not None and best_nme > nme:
                         best_nme = nme
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
                         torch.save(net.module.state_dict(), os.path.join(args.ckpt_folder, "best_model"))
                         best_record.append((epoch, best_nme * 100))
-                    print(f"\n------------ test ------------")
-                    print("NME %: {}".format(nme * 100))
-                    print("FR_{}% : {}".format(0.10, fr * 100))
-                    print("AUC_{}: {}".format(0.10, auc))
+                    _print_eval_summary("test", model_report)
                     print("BEST NME %: {}".format(best_nme * 100))
 
                 with torch.no_grad():
-                    ema.eval()
-                    SME = 0.0
-                    IONs = None
-                    for batch_idx, batch in enumerate(tqdm(test_dataloader)):
-                        data, target, landmark_mask = _unpack_eval_batch(batch)
-                        data = data.to(device)
-                        keypoints = target.to(device)
-                        landmark_mask = landmark_mask.to(device)
-                        pred_keypoints, heatmap = ema(data)[-1]
-                        ion_list = _masked_nme_list(pred_keypoints, keypoints, landmark_mask)
-                        IONs = np.concatenate((IONs, ion_list), 0) if IONs is not None else ion_list
-
-                    nme, fr, auc = compute_fr_and_auc(IONs, thres=0.10, step=0.0001)
-                    if best_nme > nme:
+                    ema_report = _evaluate_landmark_model(ema, test_dataloader, device)
+                    nme = ema_report["overall"]["nme"]
+                    if nme is not None and best_nme > nme:
                         best_nme = nme
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
                         torch.save(ema.model.state_dict(), os.path.join(args.ckpt_folder, "best_model"))
                         best_record.append((epoch, "ema", best_nme * 100))
-                    print(f"\n------------ test ema------------")
-                    print("NME %: {}".format(nme * 100))
-                    print("FR_{}% : {}".format(0.10, fr * 100))
-                    print("AUC_{}: {}".format(0.10, auc))
+                    _print_eval_summary("test ema", ema_report)
                     # print("BEST NME %: {}".format(best_nme * 100))
                     print(best_record)
+                    eval_payload = {
+                        "epoch": epoch,
+                        "eval_mode": args.eval_mode,
+                        "heldout_datasets": list(args.heldout_dataset),
+                        "model": model_report,
+                        "ema": ema_report,
+                    }
+                    write_eval_json(_eval_report_json_path(args), eval_payload)
+                    if args.eval_report_csv:
+                        write_eval_csv(args.eval_report_csv, eval_payload)
 
 
 if __name__ == "__main__":
