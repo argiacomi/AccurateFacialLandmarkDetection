@@ -22,6 +22,7 @@ from EMA import EMA
 import math
 from torch.nn.attention import sdpa_kernel, SDPBackend
 import random
+from lib.landmarks.core.schema import MAP_98_TO_68
 from lib.landmarks.evaluation.split_safe import (
     EVAL_MODES,
     build_slice_report,
@@ -66,7 +67,7 @@ def _manifest_for_split(args, split):
     return args.manifest or args.root_folder
 
 
-def _build_dataset(args, split, aug, heatmap_size=0, include_metadata=False):
+def _build_dataset(args, split, aug, heatmap_size=0, include_metadata=False, schema_aware_training=False):
     manifest_path = _manifest_for_split(args, split) if args.data_name == FS68_DATASET_NAME else ""
     return GetDataset(
         args.data_name,
@@ -79,10 +80,27 @@ def _build_dataset(args, split, aug, heatmap_size=0, include_metadata=False):
         eval_mode=args.eval_mode if args.data_name == FS68_DATASET_NAME else "random_hash",
         heldout_datasets=args.heldout_dataset if args.data_name == FS68_DATASET_NAME else None,
         include_metadata=include_metadata,
+        schema_aware_training=schema_aware_training,
     )
 
 
 def _unpack_train_batch(batch, device):
+    if isinstance(batch, dict):
+        data = batch["image"].to(device)
+        heads = {}
+        for head_name, payload in batch["heads"].items():
+            heads[head_name] = {
+                "indices": payload["indices"].to(device),
+                "target": payload["target"].to(device).float(),
+                "heatmap": payload["heatmap"].to(device).float(),
+                "landmark_mask": payload["landmark_mask"].to(device).float(),
+                "sample_weight": payload["sample_weight"].to(device).float(),
+            }
+            heads[head_name]["sample_weight"] = heads[head_name]["sample_weight"] / heads[head_name][
+                "sample_weight"
+            ].mean().clamp_min(1e-6)
+        return data, heads
+
     if len(batch) == 5:
         data, target, heatmap, sample_weight, landmark_mask = batch
     elif len(batch) == 4:
@@ -108,6 +126,42 @@ def _unpack_train_batch(batch, device):
     return data, target, heatmap, sample_weight, landmark_mask
 
 
+def _schema_aware_collate(batch):
+    images = default_collate([item["image"] for item in batch])
+    grouped = {}
+    for index, item in enumerate(batch):
+        head_name = item["head_name"]
+        grouped.setdefault(
+            head_name,
+            {
+                "indices": [],
+                "target": [],
+                "heatmap": [],
+                "landmark_mask": [],
+                "sample_weight": [],
+                "metadata": [],
+            },
+        )
+        grouped[head_name]["indices"].append(index)
+        grouped[head_name]["target"].append(item["target"])
+        grouped[head_name]["heatmap"].append(item["heatmap"])
+        grouped[head_name]["landmark_mask"].append(item["landmark_mask"])
+        grouped[head_name]["sample_weight"].append(item["sample_weight"])
+        grouped[head_name]["metadata"].append(item.get("metadata", {}))
+
+    heads = {}
+    for head_name, payload in grouped.items():
+        heads[head_name] = {
+            "indices": torch.as_tensor(payload["indices"], dtype=torch.long),
+            "target": default_collate(payload["target"]),
+            "heatmap": default_collate(payload["heatmap"]),
+            "landmark_mask": default_collate(payload["landmark_mask"]),
+            "sample_weight": default_collate(payload["sample_weight"]),
+            "metadata": payload["metadata"],
+        }
+    return {"image": images, "heads": heads}
+
+
 def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
     per_point = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(dim=2)
     landmark_mask = landmark_mask.to(per_point.device).float()
@@ -115,6 +169,42 @@ def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.0
     if sample_weight is not None:
         return (per_sample * sample_weight).mean()
     return per_sample.mean()
+
+
+def _schema_head_loss(stage_pred, heads, heatmap_loss_func, args):
+    loss = torch.tensor(0.0, device=next(iter(heads.values()))["target"].device)
+    loss_loc = torch.tensor(0.0, device=loss.device)
+    loss_heatmap = torch.tensor(0.0, device=loss.device)
+    for head_name, payload in heads.items():
+        pred_loc, pred_heatmap = stage_pred[head_name]
+        indices = payload["indices"]
+        pred_loc = pred_loc.index_select(0, indices)
+        pred_heatmap = pred_heatmap.index_select(0, indices)
+        target = payload["target"]
+        heatmap = payload["heatmap"]
+        sample_weight = payload["sample_weight"]
+        landmark_mask = payload["landmark_mask"]
+        B, C, H, W = pred_heatmap.shape
+        head_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001) * args.locw
+        pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W))
+        head_heatmap = heatmap_loss_func(
+            pred_prob,
+            heatmap,
+            batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask),
+        ) * args.hw
+        loss = loss + head_loc + head_heatmap
+        loss_loc = loss_loc + head_loc.detach()
+        loss_heatmap = loss_heatmap + head_heatmap.detach()
+
+    if args.schema_consistency_weight > 0 and "landmarks_98" in heads and "landmarks_68" in stage_pred:
+        payload = heads["landmarks_98"]
+        indices = payload["indices"]
+        pred_98 = stage_pred["landmarks_98"][0].index_select(0, indices)
+        pred_68 = stage_pred["landmarks_68"][0].index_select(0, indices)
+        projected = pred_98[:, torch.as_tensor(MAP_98_TO_68, device=pred_98.device), :]
+        loss = loss + float(args.schema_consistency_weight) * F.smooth_l1_loss(pred_68, projected.detach(), beta=0.001)
+
+    return loss, loss_loc, loss_heatmap
 
 
 def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
@@ -223,7 +313,7 @@ def _evaluate_landmark_model(model, test_dataloader, device):
         data = data.to(device)
         keypoints = target.to(device)
         landmark_mask = landmark_mask.to(device)
-        pred_keypoints, heatmap = model(data)[-1]
+        pred_keypoints, heatmap = _landmarks_68_prediction(model(data)[-1])
         nme_values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
         for nme, meta in zip(nme_values, metadata):
             if not np.isfinite(float(nme)):
@@ -234,6 +324,12 @@ def _evaluate_landmark_model(model, test_dataloader, device):
                 record["sample_id"] = str(meta["sample_id"])
             records.append(record)
     return build_slice_report(records)
+
+
+def _landmarks_68_prediction(stage_pred):
+    if isinstance(stage_pred, dict):
+        return stage_pred["landmarks_68"]
+    return stage_pred
 
 
 def _print_eval_summary(title, report):
@@ -288,6 +384,13 @@ def main():
     )
     parser.add_argument("--eval-report-json", type=str, default="", help="Evaluation JSON path. Defaults to <ckpt_folder>/eval_report.json")
     parser.add_argument("--eval-report-csv", type=str, default="", help="Optional evaluation CSV path")
+    parser.add_argument(
+        "--schema-aware-training",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For FS68Manifest, train schema-specific 68/98/profile39 heads from mixed-schema manifests.",
+    )
+    parser.add_argument("--schema-consistency-weight", type=float, default=0.05)
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument("--find_unused_parameters", action="store_true", help="Enable only if the model forward pass can skip trainable parameters")
@@ -306,7 +409,14 @@ def main():
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         # if True:
 
-        train_dataset = _build_dataset(args, "train", aug=True, heatmap_size=args.heatmap_size)
+        schema_aware_training = args.data_name == FS68_DATASET_NAME and args.schema_aware_training
+        train_dataset = _build_dataset(
+            args,
+            "train",
+            aug=True,
+            heatmap_size=args.heatmap_size,
+            schema_aware_training=schema_aware_training,
+        )
         print('----------------------len(train_dataset)', len(train_dataset))
         test_dataset = _build_dataset(args, "test", aug=False, heatmap_size=0, include_metadata=True)
         if args.data_name == FS68_DATASET_NAME:
@@ -314,7 +424,11 @@ def main():
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8, collate_fn=_eval_collate)
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         train_dataloader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers
+            train_dataset,
+            batch_size=args.batch_size,
+            sampler=train_sampler,
+            num_workers=args.num_workers,
+            collate_fn=_schema_aware_collate if schema_aware_training else None,
         )
         # net = NetAttnStage(
         #     args.lmk_num, Attn=lambda:SA2SA1_2(args.heatmap_size, args.max_depth), nstack=args.nstack, heatmap_size=args.heatmap_size, max_depth=args.max_depth
@@ -345,7 +459,10 @@ def main():
             # Attn=lambda: nn.Sequential(RCCAModule(256, 256, 256), RCCAModule(256, 256, 256)),
             heatmap_size=args.heatmap_size,
             max_depth=args.max_depth,
-            backbone_net=backbone_net
+            backbone_net=backbone_net,
+            schema_heads={"landmarks_68": 68, "landmarks_98": 98, "profile39": 39}
+            if schema_aware_training
+            else None,
         ).cuda()
         # net = VitAttnStage(
         #     nstack=args.nstack,
@@ -363,7 +480,11 @@ def main():
         if args.resume != "":
             ckpt = torch.load(args.resume)
             net.load_state_dict(ckpt)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.local_rank], find_unused_parameters=args.find_unused_parameters)
+        net = torch.nn.parallel.DistributedDataParallel(
+            net,
+            device_ids=[args.local_rank],
+            find_unused_parameters=args.find_unused_parameters or schema_aware_training,
+        )
 
         optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
         scheduler = StepLR(optimizer, args.sched_step, gamma=0.5)
@@ -389,7 +510,11 @@ def main():
             train_sampler.set_epoch(epoch)
             for batch_idx, batch in enumerate(train_dataloader):
                 optimizer.zero_grad()
-                data, target, heatmap, sample_weight, landmark_mask = _unpack_train_batch(batch, device)
+                schema_batch = isinstance(batch, dict)
+                if schema_batch:
+                    data, schema_heads = _unpack_train_batch(batch, device)
+                else:
+                    data, target, heatmap, sample_weight, landmark_mask = _unpack_train_batch(batch, device)
                 loss = 0
                 loss_loc = torch.tensor(0.0, device=device)
                 loss_heatmap = torch.tensor(0.0, device=device)
@@ -397,18 +522,29 @@ def main():
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     pred_info = net(data)
                     for i in range(len(pred_info)):
-                        pred_loc, pred_heatmap = pred_info[i]
-                        B, C, H, W = pred_heatmap.shape
-                        # loss_loc = vertex_loss_func(pred_heatmap, target)
-                        loss_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001) * args.locw
-                        pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W))
-                        loss_heatmap = heatmap_loss_func(
-                            pred_prob,
-                            heatmap,
-                            batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask),
-                        ) * args.hw  # for awing loss
-                        # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
-                        loss = loss + (loss_loc + loss_heatmap) * weights[i]
+                        if schema_batch:
+                            stage_loss, stage_loc, stage_heatmap = _schema_head_loss(
+                                pred_info[i],
+                                schema_heads,
+                                heatmap_loss_func,
+                                args,
+                            )
+                            loss_loc = stage_loc
+                            loss_heatmap = stage_heatmap
+                            loss = loss + stage_loss * weights[i]
+                        else:
+                            pred_loc, pred_heatmap = pred_info[i]
+                            B, C, H, W = pred_heatmap.shape
+                            # loss_loc = vertex_loss_func(pred_heatmap, target)
+                            loss_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001) * args.locw
+                            pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W))
+                            loss_heatmap = heatmap_loss_func(
+                                pred_prob,
+                                heatmap,
+                                batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask),
+                            ) * args.hw  # for awing loss
+                            # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
+                            loss = loss + (loss_loc + loss_heatmap) * weights[i]
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()

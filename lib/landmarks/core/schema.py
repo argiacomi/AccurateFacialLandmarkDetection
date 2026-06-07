@@ -37,16 +37,28 @@ class LandmarkSchema:
 
 SUPPORTED_SCHEMAS: dict[str, LandmarkSchema] = {
     "2d_4": LandmarkSchema("2d_4", 4, 2),
+    "2d_39": LandmarkSchema("2d_39", 39, 2),
     "2d_51": LandmarkSchema("2d_51", 51, 2),
     "2d_68": LandmarkSchema("2d_68", 68, 2),
     "2d_98": LandmarkSchema("2d_98", 98, 2),
     "3d_26": LandmarkSchema("3d_26", 26, 3),
+    "menpo2d_profile_39": LandmarkSchema("menpo2d_profile_39", 39, 2),
+    "multipie_profile_39": LandmarkSchema("multipie_profile_39", 39, 2),
 }
 
 _SCHEMA_ALIASES = {
     "4": "2d_4",
     "4pt": "2d_4",
     "lm_2d_4": "2d_4",
+    "39": "2d_39",
+    "39pt": "2d_39",
+    "profile39": "2d_39",
+    "profile_39": "2d_39",
+    "lm_2d_39": "2d_39",
+    "menpo2d_39": "menpo2d_profile_39",
+    "menpo2d_profile39": "menpo2d_profile_39",
+    "multipie_39": "multipie_profile_39",
+    "multipie_profile39": "multipie_profile_39",
     "51": "2d_51",
     "51pt": "2d_51",
     "lm_2d_51": "2d_51",
@@ -60,6 +72,37 @@ _SCHEMA_ALIASES = {
     "26": "3d_26",
     "26pt3d": "3d_26",
     "lm_3d_26": "3d_26",
+}
+
+WFLW_98_FLIP = np.array([
+    32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+    46, 45, 44, 43, 42, 50, 49, 48, 47,
+    37, 36, 35, 34, 33, 41, 40, 39, 38,
+    51, 52, 53, 54,
+    59, 58, 57, 56, 55,
+    72, 71, 70, 69, 68, 75, 74, 73,
+    64, 63, 62, 61, 60, 67, 66, 65,
+    82, 81, 80, 79, 78, 77, 76, 87, 86, 85, 84, 83,
+    92, 91, 90, 89, 88, 95, 94, 93, 97, 96,
+], dtype=np.int64)
+
+SCHEMA_FLIP_MAPS: dict[str, np.ndarray] = {
+    "2d_39": np.arange(39, dtype=np.int64),
+    "menpo2d_profile_39": np.arange(39, dtype=np.int64),
+    "multipie_profile_39": np.arange(39, dtype=np.int64),
+    "2d_68": np.array([
+        16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+        26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
+        27, 28, 29, 30,
+        35, 34, 33, 32, 31,
+        45, 44, 43, 42, 47, 46,
+        39, 38, 37, 36, 41, 40,
+        54, 53, 52, 51, 50, 49, 48,
+        59, 58, 57, 56, 55,
+        64, 63, 62, 61, 60, 67, 66, 65,
+    ], dtype=np.int64),
+    "2d_98": WFLW_98_FLIP,
 }
 
 
@@ -195,6 +238,28 @@ def normalize_landmark_array(
     elif array.shape[1] not in (2, 3):
         raise ValueError(f"landmarks must have 2 or 3 dimensions, got {array.shape[1]}")
     return np.ascontiguousarray(array, dtype=dtype)
+
+
+def flip_map_for_schema(schema: str | object) -> np.ndarray:
+    schema_name = canonicalize_schema(schema)
+    if schema_name not in SCHEMA_FLIP_MAPS:
+        raise ValueError(f"No flip map registered for schema '{schema_name}'")
+    return SCHEMA_FLIP_MAPS[schema_name].copy()
+
+
+def head_name_for_schema(schema: str | object) -> str:
+    schema_name = canonicalize_schema(schema)
+    if schema_name == "2d_68":
+        return "landmarks_68"
+    if schema_name == "2d_98":
+        return "landmarks_98"
+    if schema_name in {"2d_39", "menpo2d_profile_39", "multipie_profile_39"}:
+        return "profile39"
+    raise ValueError(f"Schema '{schema_name}' is not trainable by the CD-ViT multi-head path")
+
+
+def point_count_for_schema(schema: str | object) -> int:
+    return SUPPORTED_SCHEMAS[canonicalize_schema(schema)].points
 
 
 def to_canonical_68(

@@ -3,7 +3,7 @@
 
 This local builder covers the faceswap landmark dataset names while emitting a
 CD-ViT-friendly contract: every manifest entry points to a materialized
-canonical ``(68, 2)`` ``.npy`` file.
+trainable landmark ``.npy`` file.
 
 Supported raw inputs by dataset:
 
@@ -13,8 +13,7 @@ Supported raw inputs by dataset:
 * AFLW2000-3D: same-stem ``.mat`` files with 68 2D/3D landmarks plus images.
 * MERL-RAV, Menpo2D, MultiPIE: JSON, ``.npy``, ``.pts``, ``.mat`` sources.
 
-Non-68/non-98 samples are skipped because ``DatasetFS68Manifest`` trains a
-68-point model.
+Registered non-68 schemas are preserved for schema-aware multi-head training.
 """
 
 from __future__ import annotations
@@ -136,7 +135,7 @@ def _resolve_path(value: T.Any, *, base_dir: Path) -> Path:
 
 
 def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[np.ndarray, str]:
-    """Return canonical 68x2 points and the source schema label."""
+    """Return trainable points and the source schema label."""
     arr = np.asarray(raw, dtype=np.float32)
 
     while arr.ndim > 2 and 1 in arr.shape:
@@ -145,6 +144,8 @@ def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[
     if arr.ndim == 1:
         if arr.size == 68 * 3:
             arr = arr.reshape(68, 3)
+        elif arr.size == 39 * 2:
+            arr = arr.reshape(39, 2)
         elif arr.size == 98 * 2:
             arr = arr.reshape(98, 2)
         elif arr.size == 68 * 2:
@@ -155,7 +156,7 @@ def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[
     if arr.ndim != 2:
         raise ValueError(f"landmarks must be 2D, got shape {arr.shape}")
 
-    if arr.shape[0] in (2, 3) and arr.shape[1] in (68, 98):
+    if arr.shape[0] in (2, 3) and arr.shape[1] in (39, 68, 98):
         arr = arr.T
 
     if not np.all(np.isfinite(arr)):
@@ -167,8 +168,10 @@ def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[
         return normalize_landmarks(arr[:, :2], source_schema="2d_68"), source_schema or "2d_68"
     if arr.shape[0] == 98 and arr.shape[1] >= 2:
         return normalize_landmarks(arr[:, :2], source_schema="2d_98"), source_schema or "2d_98"
+    if arr.shape[0] == 39 and arr.shape[1] >= 2:
+        return np.ascontiguousarray(arr[:, :2], dtype=np.float32), source_schema or "2d_39"
 
-    raise ValueError(f"unsupported landmark shape {arr.shape}; expected 68 or 98 points")
+    raise ValueError(f"unsupported landmark shape {arr.shape}; expected 39, 68, or 98 points")
 
 
 def _parse_pts(path: Path) -> np.ndarray:
@@ -297,7 +300,9 @@ def _load_points(value: T.Any, *, base_dir: Path, source_schema: str | None = No
 
 
 def _normalizer(points68: np.ndarray, sample_id: str) -> float:
-    value = float(np.linalg.norm(points68[36] - points68[45]))
+    value = float("nan")
+    if points68.shape[0] > 45:
+        value = float(np.linalg.norm(points68[36] - points68[45]))
     if np.isfinite(value) and value > 0.0:
         return value
 
@@ -543,7 +548,8 @@ def _sample(
         "conditions": tuple(_label(item) for item in conditions),
         "image": str(image.resolve()),
         "landmarks": _relative_or_absolute(landmarks, output_dir),
-        "source_schema": "2d_68",
+        "source_schema": source_schema,
+        "target_schema": "2d_68" if points68.shape[0] in (68, 98) else source_schema,
         "normalizer": normalizer_value,
         "source": {"dataset": dataset, "source_id": source_id or sample_id},
         "metadata": meta,
@@ -1080,7 +1086,7 @@ def _multipie_conditions(annotation_file: Path, image_rel: str, scenario: str) -
     return labels[0], tuple(labels)
 
 
-def _multipie_parse_line(line: str, *, line_no: int, path: Path) -> tuple[str, np.ndarray, list[float]]:
+def _multipie_parse_line(line: str, *, line_no: int, path: Path) -> tuple[str, np.ndarray, list[float], str]:
     parts = line.strip().split()
     if len(parts) < 2:
         raise ValueError("empty or malformed line")
@@ -1095,7 +1101,10 @@ def _multipie_parse_line(line: str, *, line_no: int, path: Path) -> tuple[str, n
     dense_count = len(values) - header_values
 
     if dense_count == 78:
-        raise ValueError("39-point profile sample skipped for 68-point CD-ViT manifest")
+        bbox = [float(item) for item in values[:4]]
+        raw = values[header_values:]
+        points = np.asarray(raw, dtype=np.float32).reshape(39, 2)
+        return image_rel, points, bbox, "multipie_profile_39"
 
     if dense_count != 136:
         raise ValueError(
@@ -1107,7 +1116,7 @@ def _multipie_parse_line(line: str, *, line_no: int, path: Path) -> tuple[str, n
     raw = values[header_values:]
     points = np.asarray(raw, dtype=np.float32).reshape(68, 2)
     points = normalize_landmarks(points, source_schema="2d_68")
-    return image_rel, points, bbox
+    return image_rel, points, bbox, "2d_68"
 
 
 def _bbox_from_points(points68: np.ndarray) -> list[float]:
@@ -1142,7 +1151,7 @@ def _build_multipie(
             if not line.strip():
                 continue
             try:
-                image_rel, points68, bbox = _multipie_parse_line(
+                image_rel, points68, bbox, source_schema = _multipie_parse_line(
                     line,
                     line_no=line_no,
                     path=annotation_file,
@@ -1163,7 +1172,7 @@ def _build_multipie(
                     "face_bbox": bbox,
                     "face_bbox_source": "multipie_landmark_bounds",
                     "normalizer_source": DEFAULT_NORMALIZER_SOURCE,
-                    "source_schema": "2d_68",
+                    "source_schema": source_schema,
                 }
 
                 sample_kwargs = dict(
@@ -1174,7 +1183,7 @@ def _build_multipie(
                     points68=points68,
                     condition=condition,
                     conditions=conds,
-                    source_schema="2d_68",
+                    source_schema=source_schema,
                     source_id=sample_id,
                     metadata=metadata,
                 )

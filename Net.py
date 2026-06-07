@@ -1244,16 +1244,22 @@ class VitAttnStage(nn.Module):
         # backbone_net=lambda max_depth: HeadingNet([32, 64, 128, max_depth]),
         # backbone_net=lambda max_depth: HeadingNet([32, 64, 128, 256, max_depth]),
         # backbone_net=Vit
-        num_dvit_per_pred_blk=2
+        num_dvit_per_pred_blk=2,
+        schema_heads=None,
     ):
         super(VitAttnStage, self).__init__()
         # assert heatmap_size == 32
         # assert max_depth == 256 or max_depth == 192 or max_depth == 128 or max_depth == 64
 
         self.pre = backbone_net(max_depth)
+        self.schema_heads = dict(schema_heads or {})
+        self.multi_schema = bool(self.schema_heads)
+        if self.multi_schema:
+            self.schema_heads.setdefault("landmarks_68", lmk_num)
 
         stages = []
         output_layers = []
+        schema_output_layers = {name: [] for name in self.schema_heads if name != "landmarks_68"}
         merge = []
         for i in range(nstack):
             vit_list = []
@@ -1271,10 +1277,16 @@ class VitAttnStage(nn.Module):
             # )
             stages.append(block)
             output_layers.append(nn.Conv2d(max_depth, lmk_num, 1))
+            for name, point_count in schema_output_layers.items():
+                point_count = int(self.schema_heads[name])
+                schema_output_layers[name].append(nn.Conv2d(max_depth, point_count, 1))
             if i > 0:
                 merge.append(DoubleConv(max_depth * 2, max_depth, max_depth))
         self.stages = nn.ModuleList(stages)
         self.output_layers = nn.ModuleList(output_layers)
+        self.schema_output_layers = nn.ModuleDict(
+            {name: nn.ModuleList(layers) for name, layers in schema_output_layers.items()}
+        )
         self.merge = nn.ModuleList(merge)
 
         row_loc, col_loc = self.make_grid("cpu", size=heatmap_size)
@@ -1294,6 +1306,17 @@ class VitAttnStage(nn.Module):
         xx = (heatmap * self.xx_loc).sum([2, 3])
         yy = (heatmap * self.yy_loc).sum([2, 3])
         return torch.stack([xx, yy], dim=2)
+
+    def _prediction_for_stage(self, stage_index, feature):
+        hm = self.output_layers[stage_index](feature)
+        coord = self.GetCoord(hm)
+        if not self.multi_schema:
+            return coord, hm
+        out = {"landmarks_68": (coord, hm)}
+        for name, layers in self.schema_output_layers.items():
+            head_hm = layers[stage_index](feature)
+            out[name] = (self.GetCoord(head_hm), head_hm)
+        return out
     
     def forward_res(self, img):
         feat = self.pre(img)
@@ -1306,9 +1329,7 @@ class VitAttnStage(nn.Module):
             else:
                 merge = feat
             hm_0 = self.stages[i](merge)
-            hm = self.output_layers[i](hm_0)
-            coord = self.GetCoord(hm)
-            res.append((coord, hm))
+            res.append(self._prediction_for_stage(i, hm_0))
 
             pre_input = pre_output
             pre_output = hm_0
@@ -1325,9 +1346,7 @@ class VitAttnStage(nn.Module):
             else:
                 merge = feat
             hm_0 = self.stages[i](merge)
-            hm = self.output_layers[i](hm_0)
-            coord = self.GetCoord(hm)
-            res.append((coord, hm))
+            res.append(self._prediction_for_stage(i, hm_0))
 
             pre_merged = merge
             pre_output = hm_0
@@ -1340,9 +1359,7 @@ class VitAttnStage(nn.Module):
         for i in range(len(self.stages)):
             hm_0 = self.stages[i](pre_hm)
             pre_hm = hm_0
-            hm = self.output_layers[i](hm_0)
-            coord = self.GetCoord(hm)
-            res.append((coord, hm))
+            res.append(self._prediction_for_stage(i, hm_0))
 
         return res
     
@@ -1358,9 +1375,7 @@ class VitAttnStage(nn.Module):
                     merge = feat
                 hm_0 = self.stages[i](merge)
                 pre_hm = hm_0
-                hm = self.output_layers[i](hm_0)
-                coord = self.GetCoord(hm)
-                res.append((coord, hm))
+                res.append(self._prediction_for_stage(i, hm_0))
 
             return res
         elif connect_type ==0:

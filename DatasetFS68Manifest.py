@@ -11,6 +11,13 @@ from torchvision.transforms import transforms
 from DrawHeatmap import GenerateHeatmap
 from ImageAugmentation import GetAugTransform
 from RandomFlip import flip_points, random_flip
+from lib.landmarks.core.schema import (
+    canonicalize_schema,
+    flip_map_for_schema,
+    head_name_for_schema,
+    infer_schema,
+    normalize_landmark_array,
+)
 from lib.landmarks.evaluation.split_safe import (
     entry_in_eval_split,
     manifest_entry_split,
@@ -114,17 +121,17 @@ def _entry_split(entry):
     return manifest_entry_split(entry)
 
 
-def _as_bool_landmark_mask(value):
+def _as_bool_landmark_mask(value, landmark_count=68):
     if value is None:
         return None
     if isinstance(value, dict):
         # Accept dicts keyed by landmark index.
-        arr = [value.get(str(i), value.get(i, True)) for i in range(68)]
+        arr = [value.get(str(i), value.get(i, True)) for i in range(int(landmark_count))]
     else:
         arr = value
     if isinstance(arr, np.ndarray):
         arr = arr.tolist()
-    if not isinstance(arr, (list, tuple)) or len(arr) != 68:
+    if not isinstance(arr, (list, tuple)) or len(arr) != int(landmark_count):
         return None
 
     out = []
@@ -137,7 +144,7 @@ def _as_bool_landmark_mask(value):
     return np.asarray(out, dtype=np.float32)
 
 
-def _landmark_mask_from_entry(entry, metadata):
+def _landmark_mask_from_entry(entry, metadata, landmark_count=68):
     # Priority matters. For MERL-RAV, coordinate-valid includes visible plus externally
     # occluded estimated points, and excludes only true no-coordinate self-occlusion.
     for key in (
@@ -149,24 +156,24 @@ def _landmark_mask_from_entry(entry, metadata):
         "source_valid_mask",
         "valid_mask",
     ):
-        mask = _as_bool_landmark_mask(entry.get(key))
+        mask = _as_bool_landmark_mask(entry.get(key), landmark_count)
         if mask is not None:
             return mask
-        mask = _as_bool_landmark_mask(metadata.get(key))
+        mask = _as_bool_landmark_mask(metadata.get(key), landmark_count)
         if mask is not None:
             return mask
 
     # Lower priority: visibility often means score-visible only, which would drop
     # externally occluded but coordinate-valid MERL-RAV points.
     for key in ("visibility", "landmark_score_visibility_mask", "score_visibility_mask"):
-        mask = _as_bool_landmark_mask(entry.get(key))
+        mask = _as_bool_landmark_mask(entry.get(key), landmark_count)
         if mask is not None:
             return mask
-        mask = _as_bool_landmark_mask(metadata.get(key))
+        mask = _as_bool_landmark_mask(metadata.get(key), landmark_count)
         if mask is not None:
             return mask
 
-    return np.ones((68,), dtype=np.float32)
+    return np.ones((int(landmark_count),), dtype=np.float32)
 
 
 class LandmarkDataset(Dataset):
@@ -191,6 +198,7 @@ class LandmarkDataset(Dataset):
         eval_mode="random_hash",
         heldout_datasets=None,
         include_metadata=False,
+        schema_aware_training=False,
     ):
         super(LandmarkDataset, self).__init__()
         if perturbation:
@@ -203,6 +211,7 @@ class LandmarkDataset(Dataset):
         self.eval_mode = eval_mode
         self.heldout_datasets = normalize_heldout_datasets(heldout_datasets)
         self.include_metadata = bool(include_metadata)
+        self.schema_aware_training = bool(schema_aware_training)
         self.heatmap_size = int(heatmap_size or 0)
         self.samples = self._load_manifest(self.manifest_path, split, self.eval_mode, self.heldout_datasets)
         if not self.samples:
@@ -229,7 +238,7 @@ class LandmarkDataset(Dataset):
         use_split_filter = bool(declared_splits)
 
         samples = []
-        skipped_non_68 = 0
+        skipped_non_trainable_schema = 0
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 continue
@@ -255,11 +264,24 @@ class LandmarkDataset(Dataset):
                 landmarks = np.load(landmarks_path)
             except OSError:
                 raise FileNotFoundError(f"could not read landmarks for manifest entry {index}: {landmarks_path}")
-            if getattr(landmarks, "ndim", 0) != 2 or int(landmarks.shape[0]) != 68 or int(landmarks.shape[1]) < 2:
-                skipped_non_68 += 1
+            try:
+                raw_schema = str(metadata.get("source_schema") or entry.get("source_schema") or "")
+                detected_schema = infer_schema(np.asarray(landmarks)[:, :2])
+                declared_schema = canonicalize_schema(raw_schema) if raw_schema else detected_schema
+                schema = declared_schema if landmarks.shape[:2] == (68, 2) and declared_schema == "2d_68" else detected_schema
+                if declared_schema != detected_schema and detected_schema != "2d_68":
+                    schema = declared_schema
+                landmarks = normalize_landmark_array(landmarks[:, :2], schema=schema)
+                head_name = head_name_for_schema(schema)
+            except ValueError:
+                skipped_non_trainable_schema += 1
                 continue
 
-            landmark_mask = _landmark_mask_from_entry(entry, metadata)
+            if not self.schema_aware_training and schema != "2d_68":
+                skipped_non_trainable_schema += 1
+                continue
+
+            landmark_mask = _landmark_mask_from_entry(entry, metadata, landmarks.shape[0])
             conditions = _coerce_conditions(entry, metadata)
             samples.append(
                 {
@@ -269,7 +291,8 @@ class LandmarkDataset(Dataset):
                     "dataset": str(entry.get("dataset") or metadata.get("dataset") or ""),
                     "condition": str(entry.get("condition") or entry.get("scenario") or ""),
                     "conditions": conditions,
-                    "source_schema": str(metadata.get("source_schema") or entry.get("source_schema") or ""),
+                    "source_schema": schema,
+                    "head_name": head_name,
                     "source": source,
                     "metadata": metadata,
                     "face_bbox": entry.get("face_bbox", metadata.get("face_bbox", entry.get("bbox", metadata.get("bbox")))),
@@ -278,8 +301,9 @@ class LandmarkDataset(Dataset):
                 }
             )
 
-        if skipped_non_68:
-            print(f"FS68Manifest skipped {skipped_non_68} non-68-point sample(s) from {manifest_path}")
+        if skipped_non_trainable_schema:
+            reason = "non-trainable" if self.schema_aware_training else "non-68-point"
+            print(f"FS68Manifest skipped {skipped_non_trainable_schema} {reason} sample(s) from {manifest_path}")
         return samples
 
     def __len__(self):
@@ -359,7 +383,10 @@ class LandmarkDataset(Dataset):
             lmk = np.array(transformed["keypoints"], dtype=np.float32)
 
             if np.random.random() < 0.5:
-                flip_index = np.asarray(flip_points("300W"), dtype=np.int64)
+                if self.schema_aware_training:
+                    flip_index = flip_map_for_schema(sample["source_schema"])
+                else:
+                    flip_index = np.asarray(flip_points("300W"), dtype=np.int64)
                 img = cv2.flip(img, 1)
                 lmk = lmk[flip_index, :]
                 landmark_mask = landmark_mask[flip_index]
@@ -376,6 +403,29 @@ class LandmarkDataset(Dataset):
             heatmap = heatmap * landmark_mask_t.reshape(-1, 1, 1)
             denom = torch.sum(heatmap, dim=(1, 2), keepdim=True).clamp_min(1e-6)
             heatmap = torch.where(landmark_mask_t.reshape(-1, 1, 1) > 0.0, heatmap / denom, heatmap)
+            if self.schema_aware_training:
+                metadata = dict(sample.get("metadata", {}))
+                metadata.update(
+                    {
+                        "sample_id": sample.get("sample_id", ""),
+                        "dataset": sample.get("dataset", ""),
+                        "condition": sample.get("condition", ""),
+                        "conditions": list(sample.get("conditions", ())),
+                        "source_schema": sample.get("source_schema", ""),
+                        "head_name": sample.get("head_name", ""),
+                        "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
+                    }
+                )
+                return {
+                    "image": img,
+                    "target": lmk,
+                    "heatmap": heatmap,
+                    "sample_weight": torch.tensor(sample["sample_weight"], dtype=torch.float32),
+                    "landmark_mask": landmark_mask_t,
+                    "schema": sample["source_schema"],
+                    "head_name": sample["head_name"],
+                    "metadata": metadata,
+                }
             return img, lmk, heatmap, torch.tensor(sample["sample_weight"], dtype=torch.float32), landmark_mask_t
 
         if self.include_metadata:
