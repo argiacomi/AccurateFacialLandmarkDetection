@@ -4,12 +4,14 @@ import types
 
 import cv2
 import numpy as np
+import torch
 
 augmentation_stub = types.ModuleType("ImageAugmentation")
 augmentation_stub.GetAugTransform = lambda: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 from DatasetFS68Manifest import LandmarkDataset
+from TrainHeatmapStageFP16 import _schema_aware_collate
 from lib.landmarks.core.schema import flip_map_for_schema, head_name_for_schema
 
 
@@ -83,3 +85,30 @@ def test_fs68_legacy_loader_skips_profile39(tmp_path):
         assert "no 68-point samples found" in str(err)
     else:
         raise AssertionError("legacy loader should skip profile39 samples")
+
+
+def test_schema_aware_collate_extracts_optional_auxiliary_labels():
+    item = {
+        "image": torch.zeros(3, 256, 256),
+        "target": torch.zeros(39, 2),
+        "heatmap": torch.zeros(39, 8, 8),
+        "landmark_mask": torch.ones(39),
+        "sample_weight": torch.tensor(3.0),
+        "schema": "multipie_profile_39",
+        "head_name": "profile39",
+        "metadata": {
+            "dataset": "multipie",
+            "condition": "profile",
+            "conditions": ["profile", "left"],
+            "source_schema": "multipie_profile_39",
+            "hard_negative_bucket": "profile",
+            "attributes": {"occlusion": 1, "blur": 0},
+        },
+    }
+
+    batch = _schema_aware_collate([item])
+
+    assert batch["aux_labels"]["occlusion"].tolist() == [1]
+    assert batch["aux_labels"]["blur_quality"].tolist() == [0]
+    assert batch["aux_labels"]["profile_side"].tolist() == [1]
+    assert batch["aux_labels"]["illumination_quality"].tolist() == [-1]

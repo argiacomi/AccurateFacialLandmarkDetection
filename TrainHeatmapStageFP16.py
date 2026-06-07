@@ -42,6 +42,19 @@ from lib.landmarks.training.domain_balanced_sampler import (
 
 
 FS68_DATASET_NAME = "FS68Manifest"
+AUXILIARY_CLASS_NAMES = {
+    "pose_bucket": ("frontal", "profile", "profile_left", "profile_right"),
+    "occlusion": ("no_occlusion", "occlusion"),
+    "visibility": ("all_visible", "partially_visible"),
+    "blur_quality": ("clear", "blurred"),
+    "illumination_quality": ("normal", "challenging"),
+    "profile_side": ("not_profile", "left", "right"),
+    "landmark_confidence": ("normal", "low"),
+}
+AUXILIARY_CLASS_INDEX = {
+    name: {label: index for index, label in enumerate(labels)}
+    for name, labels in AUXILIARY_CLASS_NAMES.items()
+}
 
 
 def setup_seed(seed=0):
@@ -104,7 +117,11 @@ def _unpack_train_batch(batch, device):
             heads[head_name]["sample_weight"] = heads[head_name]["sample_weight"] / heads[head_name][
                 "sample_weight"
             ].mean().clamp_min(1e-6)
-        return data, heads
+        aux_labels = {
+            task: labels.to(device)
+            for task, labels in batch.get("aux_labels", {}).items()
+        }
+        return data, heads, aux_labels
 
     if len(batch) == 5:
         data, target, heatmap, sample_weight, landmark_mask = batch
@@ -165,6 +182,7 @@ def _schema_aware_collate(batch):
             "metadata": payload["metadata"],
         }
     mix = {"bucket": {}, "dataset": {}, "schema": {}}
+    aux_labels = {name: [] for name in AUXILIARY_CLASS_NAMES}
     for item in batch:
         metadata = item.get("metadata", {})
         bucket = str(metadata.get("hard_negative_bucket") or metadata.get("condition") or "unknown")
@@ -173,7 +191,74 @@ def _schema_aware_collate(batch):
         mix["bucket"][bucket] = mix["bucket"].get(bucket, 0) + 1
         mix["dataset"][dataset] = mix["dataset"].get(dataset, 0) + 1
         mix["schema"][schema] = mix["schema"].get(schema, 0) + 1
-    return {"image": images, "heads": heads, "mix": mix}
+        for task in aux_labels:
+            aux_labels[task].append(_auxiliary_label(task, metadata, item))
+    return {
+        "image": images,
+        "heads": heads,
+        "mix": mix,
+        "aux_labels": {task: torch.as_tensor(values, dtype=torch.long) for task, values in aux_labels.items()},
+    }
+
+
+def _auxiliary_label(task, metadata, item):
+    attributes = metadata.get("attributes") if isinstance(metadata.get("attributes"), dict) else {}
+    conditions = metadata.get("conditions") or ()
+    if isinstance(conditions, str):
+        conditions = (conditions,)
+    condition_labels = {str(value).strip().lower().replace("-", "_") for value in conditions}
+    condition = str(metadata.get("condition") or "").strip().lower().replace("-", "_")
+    if condition:
+        condition_labels.add(condition)
+
+    label = None
+    if task == "pose_bucket":
+        raw = str(metadata.get("pose_bucket") or metadata.get("pose") or "").strip().lower().replace("-", "_")
+        if raw in {"profile_left", "large_yaw_left", "left_profile"}:
+            label = "profile_left"
+        elif raw in {"profile_right", "large_yaw_right", "right_profile"}:
+            label = "profile_right"
+        elif raw in {"profile", "large_yaw", "1"} or attributes.get("pose"):
+            label = "profile"
+        elif raw in {"frontal", "normal", "0"} or "frontal" in condition_labels or "anchor" in condition_labels:
+            label = "frontal"
+    elif task == "occlusion":
+        raw = metadata.get("occlusion", attributes.get("occlusion"))
+        if raw is not None:
+            label = "occlusion" if bool(raw) and str(raw).lower() not in {"0", "false", "none"} else "no_occlusion"
+        elif any("occlusion" in value or "occlud" in value for value in condition_labels):
+            label = "occlusion"
+        else:
+            label = "no_occlusion"
+    elif task == "visibility":
+        mask = item.get("landmark_mask")
+        if mask is not None:
+            label = "all_visible" if bool(torch.as_tensor(mask).float().min().item() > 0.5) else "partially_visible"
+    elif task == "blur_quality":
+        raw = metadata.get("blur", attributes.get("blur"))
+        if raw is not None:
+            label = "blurred" if bool(raw) and str(raw).lower() not in {"0", "false", "none"} else "clear"
+    elif task == "illumination_quality":
+        raw = metadata.get("illumination", attributes.get("illumination"))
+        if raw is not None:
+            label = "challenging" if bool(raw) and str(raw).lower() not in {"0", "false", "none"} else "normal"
+    elif task == "profile_side":
+        raw = str(metadata.get("profile_side") or metadata.get("side") or "").strip().lower()
+        if raw in {"left", "right"}:
+            label = raw
+        elif any("left" in value for value in condition_labels):
+            label = "left"
+        elif any("right" in value for value in condition_labels):
+            label = "right"
+        elif not any(value in condition_labels for value in ("profile", "large_yaw", "profile_pose")):
+            label = "not_profile"
+    elif task == "landmark_confidence":
+        weight = float(item.get("sample_weight", torch.tensor(1.0)).item())
+        label = "low" if weight > 2.0 else "normal"
+
+    if label is None:
+        return -1
+    return AUXILIARY_CLASS_INDEX[task].get(label, -1)
 
 
 def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
@@ -185,10 +270,11 @@ def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.0
     return per_sample.mean()
 
 
-def _schema_head_loss(stage_pred, heads, heatmap_loss_func, args):
+def _schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
     loss = torch.tensor(0.0, device=next(iter(heads.values()))["target"].device)
     loss_loc = torch.tensor(0.0, device=loss.device)
     loss_heatmap = torch.tensor(0.0, device=loss.device)
+    loss_aux = torch.tensor(0.0, device=loss.device)
     for head_name, payload in heads.items():
         pred_loc, pred_heatmap = stage_pred[head_name]
         indices = payload["indices"]
@@ -218,7 +304,18 @@ def _schema_head_loss(stage_pred, heads, heatmap_loss_func, args):
         projected = pred_98[:, torch.as_tensor(MAP_98_TO_68, device=pred_98.device), :]
         loss = loss + float(args.schema_consistency_weight) * F.smooth_l1_loss(pred_68, projected.detach(), beta=0.001)
 
-    return loss, loss_loc, loss_heatmap
+    aux_outputs = stage_pred.get("_aux", {}) if isinstance(stage_pred, dict) else {}
+    if args.auxiliary_loss_weight > 0 and aux_outputs:
+        for task, logits in aux_outputs.items():
+            labels = aux_labels.get(task)
+            if labels is None:
+                continue
+            valid = labels >= 0
+            if bool(valid.any()):
+                loss_aux = loss_aux + F.cross_entropy(logits[valid], labels[valid]) * float(args.auxiliary_loss_weight)
+        loss = loss + loss_aux
+
+    return loss, loss_loc, loss_heatmap, loss_aux
 
 
 def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
@@ -413,6 +510,13 @@ def main():
     )
     parser.add_argument("--dataset-targets", default="", help="Comma-separated dataset target weights.")
     parser.add_argument("--schema-targets", default="", help="Comma-separated schema target weights.")
+    parser.add_argument(
+        "--auxiliary-heads",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable optional pose/quality/visibility auxiliary heads for schema-aware FS68 training.",
+    )
+    parser.add_argument("--auxiliary-loss-weight", type=float, default=0.1)
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument("--find_unused_parameters", action="store_true", help="Enable only if the model forward pass can skip trainable parameters")
@@ -503,6 +607,9 @@ def main():
             schema_heads={"landmarks_68": 68, "landmarks_98": 98, "profile39": 39}
             if schema_aware_training
             else None,
+            auxiliary_heads={name: len(labels) for name, labels in AUXILIARY_CLASS_NAMES.items()}
+            if schema_aware_training and args.auxiliary_heads
+            else None,
         ).cuda()
         # net = VitAttnStage(
         #     nstack=args.nstack,
@@ -552,25 +659,28 @@ def main():
                 optimizer.zero_grad()
                 schema_batch = isinstance(batch, dict)
                 if schema_batch:
-                    data, schema_heads = _unpack_train_batch(batch, device)
+                    data, schema_heads, aux_labels = _unpack_train_batch(batch, device)
                 else:
                     data, target, heatmap, sample_weight, landmark_mask = _unpack_train_batch(batch, device)
                 loss = 0
                 loss_loc = torch.tensor(0.0, device=device)
                 loss_heatmap = torch.tensor(0.0, device=device)
+                loss_aux = torch.tensor(0.0, device=device)
                 # if True:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     pred_info = net(data)
                     for i in range(len(pred_info)):
                         if schema_batch:
-                            stage_loss, stage_loc, stage_heatmap = _schema_head_loss(
+                            stage_loss, stage_loc, stage_heatmap, stage_aux = _schema_head_loss(
                                 pred_info[i],
                                 schema_heads,
+                                aux_labels,
                                 heatmap_loss_func,
                                 args,
                             )
                             loss_loc = stage_loc
                             loss_heatmap = stage_heatmap
+                            loss_aux = stage_aux
                             loss = loss + stage_loss * weights[i]
                         else:
                             pred_loc, pred_heatmap = pred_info[i]
@@ -598,7 +708,7 @@ def main():
                 if batch_idx % 20 == 0 and dist.get_rank() == 0:
                     mix_text = f" mix: {batch.get('mix')}" if isinstance(batch, dict) and "mix" in batch else ""
                     print(
-                        f"train epoch {epoch} batch_idx {batch_idx} rank {dist.get_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()}{mix_text}"
+                        f"train epoch {epoch} batch_idx {batch_idx} rank {dist.get_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} loss_aux: {loss_aux.item()}{mix_text}"
                     )
 
             if dist.get_rank() == 0 and (epoch + 1) % args.save_n_epoch == 0:

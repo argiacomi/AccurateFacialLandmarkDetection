@@ -1246,6 +1246,7 @@ class VitAttnStage(nn.Module):
         # backbone_net=Vit
         num_dvit_per_pred_blk=2,
         schema_heads=None,
+        auxiliary_heads=None,
     ):
         super(VitAttnStage, self).__init__()
         # assert heatmap_size == 32
@@ -1256,6 +1257,7 @@ class VitAttnStage(nn.Module):
         self.multi_schema = bool(self.schema_heads)
         if self.multi_schema:
             self.schema_heads.setdefault("landmarks_68", lmk_num)
+        self.auxiliary_heads = dict(auxiliary_heads or {})
 
         stages = []
         output_layers = []
@@ -1287,6 +1289,9 @@ class VitAttnStage(nn.Module):
         self.schema_output_layers = nn.ModuleDict(
             {name: nn.ModuleList(layers) for name, layers in schema_output_layers.items()}
         )
+        self.auxiliary_output_layers = nn.ModuleDict(
+            {name: nn.Linear(max_depth, int(classes)) for name, classes in self.auxiliary_heads.items()}
+        )
         self.merge = nn.ModuleList(merge)
 
         row_loc, col_loc = self.make_grid("cpu", size=heatmap_size)
@@ -1316,6 +1321,9 @@ class VitAttnStage(nn.Module):
         for name, layers in self.schema_output_layers.items():
             head_hm = layers[stage_index](feature)
             out[name] = (self.GetCoord(head_hm), head_hm)
+        if self.auxiliary_output_layers:
+            pooled = F.adaptive_avg_pool2d(feature, 1).flatten(1)
+            out["_aux"] = {name: layer(pooled) for name, layer in self.auxiliary_output_layers.items()}
         return out
     
     def forward_res(self, img):
