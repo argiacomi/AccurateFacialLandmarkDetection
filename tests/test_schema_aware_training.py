@@ -15,23 +15,26 @@ from TrainHeatmapStageFP16 import _schema_aware_collate
 from lib.landmarks.core.schema import flip_map_for_schema, head_name_for_schema
 
 
-def _write_manifest(tmp_path, points, *, schema):
+def _write_manifest(tmp_path, points, *, schema, extra_sample=None):
     image = np.full((256, 256, 3), 127, dtype=np.uint8)
     image_path = tmp_path / "image.jpg"
     landmark_path = tmp_path / "points.npy"
     cv2.imwrite(str(image_path), image)
     np.save(landmark_path, points.astype(np.float32))
+    sample = {
+        "sample_id": "sample",
+        "dataset": "multipie",
+        "split": "train",
+        "image": str(image_path),
+        "landmarks": str(landmark_path),
+        "source_schema": schema,
+        "metadata": {"source_schema": schema, "hard_negative_bucket": "profile"},
+    }
+    if extra_sample:
+        sample.update(extra_sample)
     manifest = {
         "samples": [
-            {
-                "sample_id": "sample",
-                "dataset": "multipie",
-                "split": "train",
-                "image": str(image_path),
-                "landmarks": str(landmark_path),
-                "source_schema": schema,
-                "metadata": {"source_schema": schema, "hard_negative_bucket": "profile"},
-            }
+            sample
         ]
     }
     manifest_path = tmp_path / "manifest.json"
@@ -112,3 +115,26 @@ def test_schema_aware_collate_extracts_optional_auxiliary_labels():
     assert batch["aux_labels"]["blur_quality"].tolist() == [0]
     assert batch["aux_labels"]["profile_side"].tolist() == [1]
     assert batch["aux_labels"]["illumination_quality"].tolist() == [-1]
+
+
+def test_fs68_eval_metadata_preserves_optional_visibility_targets(tmp_path):
+    points = np.stack([np.linspace(32, 224, 68), np.linspace(40, 216, 68)], axis=1)
+    visibility = [1, 0, "visible", "occluded", None, "unknown", *([1] * 62)]
+    manifest_path = _write_manifest(
+        tmp_path,
+        points,
+        schema="2d_68",
+        extra_sample={"visibility": visibility},
+    )
+
+    dataset = LandmarkDataset(
+        manifest_path=str(manifest_path),
+        split="train",
+        preload=False,
+        aug=False,
+        heatmap_size=0,
+        include_metadata=True,
+    )
+
+    _, _, _, metadata = dataset[0]
+    assert metadata["visibility_target"][:6] == [1, 0, 1, 0, -1, -1]

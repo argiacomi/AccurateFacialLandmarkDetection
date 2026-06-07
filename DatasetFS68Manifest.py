@@ -181,6 +181,74 @@ def _landmark_mask_from_entry(entry, metadata, landmark_count=68):
     return np.ones((int(landmark_count),), dtype=np.float32)
 
 
+def _as_visibility_target(value, landmark_count):
+    if value is None:
+        return None
+    count = int(landmark_count)
+    visible_labels = {"visible", "vis", "v", "1", "true", "yes"}
+    occluded_labels = {
+        "hidden",
+        "invisible",
+        "occluded",
+        "self_occluded",
+        "selfoccluded",
+        "self_occlusion",
+        "externally_occluded",
+        "external_occlusion",
+        "not_visible",
+        "0",
+        "false",
+        "no",
+    }
+    if isinstance(value, dict):
+        raw = [value.get(str(i), value.get(i, None)) for i in range(count)]
+    else:
+        raw = value.tolist() if isinstance(value, np.ndarray) else value
+    if not isinstance(raw, (list, tuple)) or len(raw) != count:
+        return None
+
+    out = []
+    known = 0
+    for item in raw:
+        if item is None:
+            out.append(-1)
+            continue
+        if isinstance(item, str):
+            label = _normalize_label(item)
+            if label in visible_labels:
+                out.append(1)
+                known += 1
+            elif label in occluded_labels or "occlud" in label:
+                out.append(0)
+                known += 1
+            else:
+                out.append(-1)
+        else:
+            out.append(1 if bool(item) else 0)
+            known += 1
+    if known == 0:
+        return None
+    return np.asarray(out, dtype=np.int64)
+
+
+def _visibility_target_from_entry(entry, metadata, landmark_count):
+    for key in (
+        "visibility_target",
+        "visibility",
+        "landmark_visibility",
+        "visibility_mask",
+        "landmark_score_visibility_mask",
+        "score_visibility_mask",
+    ):
+        target = _as_visibility_target(entry.get(key), landmark_count)
+        if target is not None:
+            return target
+        target = _as_visibility_target(metadata.get(key), landmark_count)
+        if target is not None:
+            return target
+    return None
+
+
 class LandmarkDataset(Dataset):
     """Faceswap-compatible 68-point landmark manifest dataset.
 
@@ -296,6 +364,7 @@ class LandmarkDataset(Dataset):
                 continue
 
             landmark_mask = _landmark_mask_from_entry(entry, metadata, landmarks.shape[0])
+            visibility_target = _visibility_target_from_entry(entry, metadata, landmarks.shape[0])
             conditions = _coerce_conditions(entry, metadata)
             samples.append(
                 {
@@ -311,6 +380,7 @@ class LandmarkDataset(Dataset):
                     "metadata": metadata,
                     "face_bbox": entry.get("face_bbox", metadata.get("face_bbox", entry.get("bbox", metadata.get("bbox")))),
                     "bbox_format": entry.get("bbox_format", metadata.get("bbox_format", "")),
+                    "visibility_target": visibility_target,
                     "sample_weight": _weight_from_entry(entry, metadata, conditions),
                     "landmark_mask": landmark_mask,
                 }
@@ -430,6 +500,9 @@ class LandmarkDataset(Dataset):
                         "head_name": sample.get("head_name", ""),
                         "face_bbox": sample.get("face_bbox"),
                         "bbox_format": sample.get("bbox_format", ""),
+                        "visibility_target": sample.get("visibility_target").tolist()
+                        if sample.get("visibility_target") is not None
+                        else None,
                         "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                     }
                 )
@@ -459,6 +532,9 @@ class LandmarkDataset(Dataset):
                     "source": sample.get("source", {}),
                     "face_bbox": sample.get("face_bbox"),
                     "bbox_format": sample.get("bbox_format", ""),
+                    "visibility_target": sample.get("visibility_target").tolist()
+                    if sample.get("visibility_target") is not None
+                    else None,
                     "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                 }
             )

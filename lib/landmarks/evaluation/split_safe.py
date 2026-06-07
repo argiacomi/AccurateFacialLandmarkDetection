@@ -407,6 +407,99 @@ def record_for_sample(meta: T.Mapping[str, T.Any], nme: float) -> dict[str, T.An
     }
 
 
+def _sigmoid_if_logits(values: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return values.astype(np.float32)
+    if float(np.nanmin(values)) < 0.0 or float(np.nanmax(values)) > 1.0:
+        return (1.0 / (1.0 + np.exp(-values))).astype(np.float32)
+    return values.astype(np.float32)
+
+
+def _average_precision(labels: np.ndarray, scores: np.ndarray) -> float | None:
+    positives = int(np.sum(labels == 1))
+    if positives == 0:
+        return None
+    order = np.argsort(-scores)
+    ranked = labels[order]
+    tp = np.cumsum(ranked == 1)
+    ranks = np.arange(1, ranked.size + 1)
+    precision = tp / ranks
+    return float(np.sum(precision[ranked == 1]) / positives)
+
+
+def _f1_at_threshold(labels: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> float | None:
+    if labels.size == 0:
+        return None
+    pred = scores >= threshold
+    truth = labels == 1
+    tp = int(np.sum(pred & truth))
+    fp = int(np.sum(pred & ~truth))
+    fn = int(np.sum(~pred & truth))
+    denom = (2 * tp) + fp + fn
+    if denom == 0:
+        return None
+    return float((2 * tp) / denom)
+
+
+def _roc_auc(labels: np.ndarray, scores: np.ndarray) -> float | None:
+    pos_scores = scores[labels == 1]
+    neg_scores = scores[labels == 0]
+    if pos_scores.size == 0 or neg_scores.size == 0:
+        return None
+    comparisons = (pos_scores[:, None] > neg_scores[None, :]).astype(np.float32)
+    comparisons += 0.5 * (pos_scores[:, None] == neg_scores[None, :]).astype(np.float32)
+    return float(np.mean(comparisons))
+
+
+def visibility_metrics_for_records(records: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, T.Any]:
+    labels: list[int] = []
+    scores: list[float] = []
+    prediction_skipped = 0
+    for record in records:
+        targets = record.get("visibility_targets")
+        record_scores = record.get("visibility_scores")
+        if not isinstance(targets, (list, tuple)):
+            continue
+        if not isinstance(record_scores, (list, tuple)):
+            prediction_skipped += sum(1 for value in targets if int(value) in (0, 1))
+            continue
+        for target, score in zip(targets, record_scores):
+            target_i = int(target)
+            if target_i not in (0, 1):
+                continue
+            try:
+                score_f = float(score)
+            except (TypeError, ValueError):
+                prediction_skipped += 1
+                continue
+            if not np.isfinite(score_f):
+                prediction_skipped += 1
+                continue
+            labels.append(target_i)
+            scores.append(score_f)
+
+    if not labels:
+        return {
+            "visibility_sample_count": 0,
+            "visibility_label_count": 0,
+            "visibility_prediction_skipped_count": int(prediction_skipped),
+            "visibility_AP": None,
+            "visibility_F1@0.5": None,
+            "visibility_ROC_AUC": None,
+        }
+
+    label_arr = np.asarray(labels, dtype=np.int64)
+    score_arr = _sigmoid_if_logits(np.asarray(scores, dtype=np.float32))
+    return {
+        "visibility_sample_count": int(sum(1 for record in records if record.get("visible_landmark_count") is not None)),
+        "visibility_label_count": int(label_arr.size),
+        "visibility_prediction_skipped_count": int(prediction_skipped),
+        "visibility_AP": _average_precision(label_arr, score_arr),
+        "visibility_F1@0.5": _f1_at_threshold(label_arr, score_arr, threshold=0.5),
+        "visibility_ROC_AUC": _roc_auc(label_arr, score_arr),
+    }
+
+
 def _nme_ci95(values: np.ndarray) -> dict[str, float | None]:
     if values.size < 2:
         return {"low": None, "high": None}
@@ -416,11 +509,20 @@ def _nme_ci95(values: np.ndarray) -> dict[str, float | None]:
 
 
 def metrics_for_nmes(values: T.Sequence[float], *, threshold: float = 0.10) -> dict[str, T.Any]:
-    arr = np.asarray([float(value) for value in values if np.isfinite(value)], dtype=np.float32)
+    finite_values = []
+    for value in values:
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value_f):
+            finite_values.append(value_f)
+    arr = np.asarray(finite_values, dtype=np.float32)
     if arr.size == 0:
         return {
             "sample_count": 0,
             "nme": None,
+            "NME_all": None,
             "nme_percent": None,
             "fr": None,
             "fr_percent": None,
@@ -433,6 +535,7 @@ def metrics_for_nmes(values: T.Sequence[float], *, threshold: float = 0.10) -> d
     return {
         "sample_count": int(arr.size),
         "nme": float(nme),
+        "NME_all": float(nme),
         "nme_percent": float(nme * 100.0),
         "fr": float(fr),
         "fr_percent": float(fr * 100.0),
@@ -445,9 +548,36 @@ def metrics_for_nmes(values: T.Sequence[float], *, threshold: float = 0.10) -> d
     }
 
 
+def metrics_for_records(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold: float = 0.10) -> dict[str, T.Any]:
+    metrics = metrics_for_nmes([record.get("nme", float("nan")) for record in records], threshold=threshold)
+    visible = metrics_for_nmes(
+        [record.get("nme_visible", float("nan")) for record in records],
+        threshold=threshold,
+    )
+    occluded = metrics_for_nmes(
+        [record.get("nme_occluded", float("nan")) for record in records],
+        threshold=threshold,
+    )
+    metrics.update(
+        {
+            "NME_visible": visible["nme"],
+            "NME_occluded": occluded["nme"],
+            "visible_sample_count": visible["sample_count"],
+            "occluded_sample_count": occluded["sample_count"],
+            "visible_landmark_count": int(sum(int(record.get("visible_landmark_count") or 0) for record in records)),
+            "occluded_landmark_count": int(sum(int(record.get("occluded_landmark_count") or 0) for record in records)),
+            "visibility_label_skipped_count": int(
+                sum(int(record.get("visibility_label_skipped_count") or 0) for record in records)
+            ),
+        }
+    )
+    metrics.update(visibility_metrics_for_records(records))
+    return metrics
+
+
 def build_slice_report(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold: float = 0.10) -> dict[str, T.Any]:
     valid = [record for record in records if np.isfinite(float(record.get("nme", float("nan"))))]
-    report: dict[str, T.Any] = {"overall": metrics_for_nmes([record["nme"] for record in valid], threshold=threshold)}
+    report: dict[str, T.Any] = {"overall": metrics_for_records(valid, threshold=threshold)}
     for slice_name in (
         "by_dataset",
         "by_schema",
@@ -463,8 +593,11 @@ def build_slice_report(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold:
             label = str(record.get(slice_name) or "unknown")
             groups.setdefault(label, []).append(float(record["nme"]))
         report[slice_name] = {
-            label: metrics_for_nmes(values, threshold=threshold)
-            for label, values in sorted(groups.items())
+            label: metrics_for_records(
+                [record for record in valid if str(record.get(slice_name) or "unknown") == label],
+                threshold=threshold,
+            )
+            for label in sorted(groups)
         }
     return report
 
@@ -499,10 +632,22 @@ def write_eval_csv(path: str | Path, payload: T.Mapping[str, T.Any]) -> None:
         "label",
         "sample_count",
         "nme",
+        "NME_all",
+        "NME_visible",
+        "NME_occluded",
         "nme_percent",
         "fr",
         "fr_percent",
         "auc",
+        "visible_landmark_count",
+        "occluded_landmark_count",
+        "visibility_sample_count",
+        "visibility_label_count",
+        "visibility_label_skipped_count",
+        "visibility_prediction_skipped_count",
+        "visibility_AP",
+        "visibility_F1@0.5",
+        "visibility_ROC_AUC",
         "nme_ci95_low",
         "nme_ci95_high",
     ]
@@ -529,6 +674,11 @@ def write_eval_records_csv(path: str | Path, records: T.Sequence[T.Mapping[str, 
         "dataset",
         "schema",
         "nme",
+        "nme_visible",
+        "nme_occluded",
+        "visible_landmark_count",
+        "occluded_landmark_count",
+        "visibility_label_skipped_count",
         "pose_bucket",
         "hard_negative_bucket",
         "occlusion",
@@ -550,10 +700,22 @@ def _csv_row(model_key: str, slice_name: str, label: str, metrics: T.Mapping[str
         "label": label,
         "sample_count": metrics.get("sample_count"),
         "nme": metrics.get("nme"),
+        "NME_all": metrics.get("NME_all"),
+        "NME_visible": metrics.get("NME_visible"),
+        "NME_occluded": metrics.get("NME_occluded"),
         "nme_percent": metrics.get("nme_percent"),
         "fr": metrics.get("fr"),
         "fr_percent": metrics.get("fr_percent"),
         "auc": metrics.get("auc"),
+        "visible_landmark_count": metrics.get("visible_landmark_count"),
+        "occluded_landmark_count": metrics.get("occluded_landmark_count"),
+        "visibility_sample_count": metrics.get("visibility_sample_count"),
+        "visibility_label_count": metrics.get("visibility_label_count"),
+        "visibility_label_skipped_count": metrics.get("visibility_label_skipped_count"),
+        "visibility_prediction_skipped_count": metrics.get("visibility_prediction_skipped_count"),
+        "visibility_AP": metrics.get("visibility_AP"),
+        "visibility_F1@0.5": metrics.get("visibility_F1@0.5"),
+        "visibility_ROC_AUC": metrics.get("visibility_ROC_AUC"),
         "nme_ci95_low": ci.get("low") if isinstance(ci, T.Mapping) else None,
         "nme_ci95_high": ci.get("high") if isinstance(ci, T.Mapping) else None,
     }

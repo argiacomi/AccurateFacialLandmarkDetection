@@ -1,3 +1,5 @@
+import csv
+
 import pytest
 
 from lib.landmarks.evaluation.split_safe import (
@@ -7,6 +9,7 @@ from lib.landmarks.evaluation.split_safe import (
     slice_labels,
     stable_random_hash_split,
     validate_no_train_test_leakage,
+    write_eval_csv,
     write_eval_records_jsonl,
 )
 
@@ -189,6 +192,89 @@ def test_slice_report_includes_required_metrics_and_ci():
     assert overall["auc"] is not None
     assert overall["nme_ci95"]["low"] is not None
     assert report["by_dataset"]["wflw"]["sample_count"] == 2
+
+
+def test_slice_report_includes_visible_occluded_and_visibility_metrics():
+    report = build_slice_report(
+        [
+            {
+                "nme": 0.03,
+                "nme_visible": 0.02,
+                "nme_occluded": 0.05,
+                "visible_landmark_count": 2,
+                "occluded_landmark_count": 1,
+                "visibility_label_skipped_count": 1,
+                "visibility_targets": [1, 1, 0, -1],
+                "visibility_scores": [0.95, 0.8, 0.1, 0.4],
+                "by_dataset": "wflw",
+                "by_schema": "2d_68",
+                "by_hard_negative_bucket": "profile",
+                "by_pose_bucket": "profile_left",
+                "by_occlusion": "occlusion",
+                "by_profile_side": "left",
+                "by_face_size": "medium",
+                "by_production_source": "unknown",
+            },
+            {
+                "nme": 0.06,
+                "nme_visible": 0.04,
+                "nme_occluded": None,
+                "visible_landmark_count": 1,
+                "occluded_landmark_count": 0,
+                "visibility_label_skipped_count": 2,
+                "by_dataset": "cofw",
+                "by_schema": "2d_68",
+                "by_hard_negative_bucket": "occlusion",
+                "by_pose_bucket": "frontal",
+                "by_occlusion": "occlusion",
+                "by_profile_side": "not_profile",
+                "by_face_size": "large",
+                "by_production_source": "unknown",
+            },
+        ]
+    )
+
+    overall = report["overall"]
+    assert overall["NME_all"] == pytest.approx(0.045)
+    assert overall["NME_visible"] == pytest.approx(0.03)
+    assert overall["NME_occluded"] == pytest.approx(0.05)
+    assert overall["visible_landmark_count"] == 3
+    assert overall["occluded_landmark_count"] == 1
+    assert overall["visibility_label_skipped_count"] == 3
+    assert overall["visibility_AP"] == pytest.approx(1.0)
+    assert overall["visibility_F1@0.5"] == pytest.approx(1.0)
+    assert overall["visibility_ROC_AUC"] == pytest.approx(1.0)
+    assert report["by_dataset"]["wflw"]["NME_occluded"] == pytest.approx(0.05)
+
+
+def test_eval_csv_includes_visibility_summary_fields(tmp_path):
+    report = build_slice_report(
+        [
+            {
+                "nme": 0.03,
+                "nme_visible": 0.02,
+                "nme_occluded": 0.05,
+                "visible_landmark_count": 1,
+                "occluded_landmark_count": 1,
+                "visibility_label_skipped_count": 1,
+                "visibility_targets": [1, 0, -1],
+                "visibility_scores": [0.9, 0.2, 0.5],
+                "by_dataset": "wflw",
+            }
+        ]
+    )
+    path = tmp_path / "summary.csv"
+
+    write_eval_csv(path, {"model": report})
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    overall = next(row for row in rows if row["slice"] == "overall")
+    assert float(overall["NME_visible"]) == pytest.approx(0.02)
+    assert float(overall["NME_occluded"]) == pytest.approx(0.05)
+    assert overall["visibility_label_count"] == "2"
+    assert overall["visibility_label_skipped_count"] == "1"
+    assert overall["visibility_prediction_skipped_count"] == "0"
 
 
 @pytest.mark.parametrize(

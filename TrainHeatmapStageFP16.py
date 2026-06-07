@@ -416,6 +416,94 @@ def _masked_nme_values(pred_keypoints, keypoints, landmark_mask):
     return np.asarray(values, dtype=np.float32)
 
 
+def _normalizer_for_masked_target(target_i, mask_i):
+    valid = target_i[mask_i]
+    if valid.shape[0] <= 1:
+        return None
+    span = np.max(valid, axis=0) - np.min(valid, axis=0)
+    span_norm = float(max(span[0], span[1]))
+    eye_norm = None
+    if mask_i.shape[0] > 45 and mask_i[36] and mask_i[45]:
+        eye_norm = float(np.linalg.norm(target_i[36] - target_i[45]))
+    if (
+        eye_norm is not None
+        and np.isfinite(eye_norm)
+        and eye_norm > 0.05
+        and np.isfinite(span_norm)
+        and span_norm > 1e-6
+        and eye_norm >= 0.15 * span_norm
+    ):
+        return eye_norm
+    if np.isfinite(span_norm) and span_norm > 1e-6:
+        return span_norm
+    return None
+
+
+def _visibility_target_from_meta(meta, expected_count):
+    raw = meta.get("visibility_target") if isinstance(meta, dict) else None
+    if raw is None:
+        return np.full((expected_count,), -1, dtype=np.int64)
+    arr = np.asarray(raw, dtype=np.int64).reshape(-1)
+    if arr.size != expected_count:
+        return np.full((expected_count,), -1, dtype=np.int64)
+    return arr
+
+
+def _visibility_logits_from_stage(stage_pred):
+    if not isinstance(stage_pred, dict):
+        return None
+    for key in ("visibility_logits", "landmarks_68_visibility_logits", "visibility_68_logits"):
+        value = stage_pred.get(key)
+        if torch.is_tensor(value):
+            return value
+    landmarks_68 = stage_pred.get("landmarks_68")
+    if isinstance(landmarks_68, (list, tuple)) and len(landmarks_68) >= 3 and torch.is_tensor(landmarks_68[2]):
+        return landmarks_68[2]
+    return None
+
+
+def _visibility_aware_records(pred_keypoints, keypoints, landmark_mask, metadata, visibility_logits=None):
+    pred = pred_keypoints.detach().float().cpu().numpy()
+    target = keypoints.detach().float().cpu().numpy()
+    mask = landmark_mask.detach().float().cpu().numpy() > 0.5
+    logits = None
+    if visibility_logits is not None:
+        logits = visibility_logits.detach().float().cpu().numpy()
+
+    records = []
+    for index, (pred_i, target_i, mask_i, meta) in enumerate(zip(pred, target, mask, metadata)):
+        meta = meta if isinstance(meta, dict) else {}
+        normalizer = _normalizer_for_masked_target(target_i, mask_i)
+        if normalizer is None:
+            continue
+        point_errors = np.full((target_i.shape[0],), np.nan, dtype=np.float32)
+        point_errors[mask_i] = np.linalg.norm(target_i[mask_i] - pred_i[mask_i], axis=1) / float(normalizer)
+        nme = float(np.nanmean(point_errors[mask_i]))
+
+        visibility_target = _visibility_target_from_meta(meta, target_i.shape[0])
+        visible_mask = mask_i & (visibility_target == 1)
+        occluded_mask = mask_i & (visibility_target == 0)
+        unknown_mask = mask_i & ~np.isin(visibility_target, (0, 1))
+
+        record = record_for_sample(meta, nme)
+        record["visible_landmark_count"] = int(np.sum(visible_mask))
+        record["occluded_landmark_count"] = int(np.sum(occluded_mask))
+        record["visibility_label_skipped_count"] = int(np.sum(unknown_mask))
+        record["nme_visible"] = float(np.nanmean(point_errors[visible_mask])) if np.any(visible_mask) else None
+        record["nme_occluded"] = float(np.nanmean(point_errors[occluded_mask])) if np.any(occluded_mask) else None
+        record["visibility_targets"] = [
+            int(value) if mask_i[pos] else -1
+            for pos, value in enumerate(visibility_target.tolist())
+        ]
+        if logits is not None and index < logits.shape[0] and logits.shape[1] == target_i.shape[0]:
+            record["visibility_scores"] = [
+                float(value) if mask_i[pos] else float("nan")
+                for pos, value in enumerate(logits[index].tolist())
+            ]
+        records.append(record)
+    return records
+
+
 def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
     values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
     return values[np.isfinite(values)]
@@ -429,13 +517,17 @@ def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=
         data = data.to(device)
         keypoints = target.to(device)
         landmark_mask = landmark_mask.to(device)
-        pred_keypoints, heatmap = _landmarks_68_prediction(model(data)[-1])
-        nme_values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
-        for nme, meta in zip(nme_values, metadata):
-            if not np.isfinite(float(nme)):
-                continue
-            meta = meta if isinstance(meta, dict) else {}
-            records.append(record_for_sample(meta, float(nme)))
+        stage_pred = model(data)[-1]
+        pred_keypoints, heatmap = _landmarks_68_prediction(stage_pred)
+        records.extend(
+            _visibility_aware_records(
+                pred_keypoints,
+                keypoints,
+                landmark_mask,
+                metadata,
+                visibility_logits=_visibility_logits_from_stage(stage_pred),
+            )
+        )
     report = build_slice_report(records)
     if include_records:
         report["records"] = records
