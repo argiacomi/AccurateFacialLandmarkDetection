@@ -198,6 +198,83 @@ def _load_resume_model_state(net, state_dict, args) -> None:
         )
 
 
+def _merge_count_dict(target: dict, source: dict) -> None:
+    for key, value in source.items():
+        target[key] = int(target.get(key, 0)) + int(value)
+
+
+def _aggregate_sampler_diagnostics(local_diagnostics):
+    """Aggregate domain-balanced sampler diagnostics across DDP ranks.
+
+    `DomainBalancedBatchSampler.last_epoch_diagnostics` is rank-local. For useful
+    epoch-level reporting, gather diagnostics from every rank and sum actual mix
+    counts and fallback counts before rank 0 logs runtime metrics.
+    """
+
+    if not (dist.is_available() and dist.is_initialized()):
+        return local_diagnostics
+
+    world_size = distributed_world_size()
+    gathered = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered, local_diagnostics or {})
+
+    if not is_rank_zero():
+        return local_diagnostics
+
+    requested_targets = {}
+    actual_mix = {"bucket": {}, "dataset": {}, "schema": {}}
+    fallback_counts = {}
+    missing_targets = {"bucket": set(), "dataset": set(), "schema": set()}
+    rank_diagnostics = []
+
+    for rank, diagnostics in enumerate(gathered):
+        if not isinstance(diagnostics, dict):
+            continue
+
+        if not requested_targets:
+            requested_targets = dict(diagnostics.get("requested_targets", {}))
+
+        for category, counts in dict(diagnostics.get("actual_mix", {})).items():
+            actual_mix.setdefault(category, {})
+            if isinstance(counts, dict):
+                _merge_count_dict(actual_mix[category], counts)
+
+        counts = diagnostics.get("fallback_counts", {})
+        if isinstance(counts, dict):
+            _merge_count_dict(fallback_counts, counts)
+
+        missing = diagnostics.get("missing_targets", {})
+        if isinstance(missing, dict):
+            for category, values in missing.items():
+                missing_targets.setdefault(category, set())
+                for value in values or ():
+                    missing_targets[category].add(str(value))
+
+        rank_diagnostics.append(
+            {
+                "rank": int(diagnostics.get("rank", rank)),
+                "batches_per_rank": int(diagnostics.get("batches_per_rank", 0)),
+            }
+        )
+
+    return {
+        "requested_targets": requested_targets,
+        "actual_mix": actual_mix,
+        "fallback_counts": fallback_counts,
+        "missing_targets": {
+            category: sorted(values)
+            for category, values in missing_targets.items()
+        },
+        "rank": "all",
+        "world_size": int(world_size),
+        "batches_per_rank": max(
+            (item["batches_per_rank"] for item in rank_diagnostics),
+            default=0,
+        ),
+        "rank_diagnostics": rank_diagnostics,
+    }
+
+
 def main():
     parser = build_heatmap_stage_arg_parser()
     args = parser.parse_args()
@@ -342,7 +419,7 @@ def main():
                         args,
                         {
                             "event": "distributed_eval_wait",
-                            "epoch": int(epoch),
+                            "epoch": int(start_epoch),
                             "distributed_eval_wait_seconds": round(max(waits), 6),
                             "distributed_eval_wait_seconds_by_rank": {
                                 str(rank): round(wait, 6)
@@ -549,20 +626,23 @@ def main():
                         )
                 batch_fetch_start_time = time.time()
 
-            if is_rank_zero() and hasattr(train_sampler, "last_epoch_diagnostics"):
-                sampler_diagnostics = train_sampler.last_epoch_diagnostics
-                print(
-                    f"domain-balanced sampler epoch {epoch}: {sampler_diagnostics}",
-                    flush=True,
+            if hasattr(train_sampler, "last_epoch_diagnostics"):
+                sampler_diagnostics = _aggregate_sampler_diagnostics(
+                    train_sampler.last_epoch_diagnostics
                 )
-                append_runtime_metrics(
-                    args,
-                    {
-                        "event": "domain_balanced_sampler_epoch",
-                        "epoch": int(epoch),
-                        **sampler_diagnostics,
-                    },
-                )
+                if is_rank_zero():
+                    print(
+                        f"domain-balanced sampler epoch {epoch}: {sampler_diagnostics}",
+                        flush=True,
+                    )
+                    append_runtime_metrics(
+                        args,
+                        {
+                            "event": "domain_balanced_sampler_epoch",
+                            "epoch": int(epoch),
+                            **sampler_diagnostics,
+                        },
+                    )
 
             if (
                 args.save_legacy_epoch_state_dict

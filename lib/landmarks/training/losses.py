@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -22,14 +24,43 @@ def weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.00
 
 def _schema_head_weight_map(raw):
     weights = {}
-    for item in str(raw or "").split(","):
-        if not item.strip() or "=" not in item:
+    raw = str(raw or "").strip()
+    if not raw:
+        return weights
+
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
             continue
+        if "=" not in item:
+            raise ValueError(
+                f"schema head loss weight item {item!r} must be formatted as head=value"
+            )
+
         name, value = item.split("=", 1)
+        name = name.strip()
+        raw_value = value.strip()
+
+        if not name:
+            raise ValueError(
+                f"schema head loss weight item {item!r} has an empty head name"
+            )
+
         try:
-            weights[name.strip()] = float(value)
-        except ValueError:
-            continue
+            amount = float(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"schema head loss weight for {name!r} has invalid value {raw_value!r}"
+            ) from exc
+
+        if not math.isfinite(amount) or amount < 0.0:
+            raise ValueError(
+                f"schema head loss weight for {name!r} must be a finite non-negative value, "
+                f"got {raw_value!r}"
+            )
+
+        weights[name] = amount
+
     return weights
 
 
