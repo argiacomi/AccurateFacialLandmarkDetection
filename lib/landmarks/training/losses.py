@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from lib.landmarks.core.schema import MAP_98_TO_68
 
 
-def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
+def weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
     per_point = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(
         dim=2
     )
@@ -19,7 +19,7 @@ def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.0
         return (per_sample * sample_weight).mean()
     return per_sample.mean()
 
-def _schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
+def schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
     loss = torch.tensor(0.0, device=next(iter(heads.values()))["target"].device)
     loss_loc = torch.tensor(0.0, device=loss.device)
     loss_heatmap = torch.tensor(0.0, device=loss.device)
@@ -35,7 +35,7 @@ def _schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
         landmark_mask = payload["landmark_mask"]
         B, C, H, W = pred_heatmap.shape
         head_loc = (
-            _weighted_smooth_l1(
+            weighted_smooth_l1(
                 pred_loc, target, sample_weight, landmark_mask, beta=0.001
             )
             * args.locw
@@ -47,7 +47,7 @@ def _schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
             heatmap_loss_func(
                 pred_prob,
                 heatmap,
-                batch_weights=_heatmap_batch_weight(
+                batch_weights=heatmap_batch_weight(
                     sample_weight, pred_heatmap, landmark_mask
                 ),
             )
@@ -86,7 +86,7 @@ def _schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
 
     return loss, loss_loc, loss_heatmap, loss_aux
 
-def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
+def heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
     if sample_weight is None and landmark_mask is None:
         return None
     weights = torch.ones(
@@ -101,3 +101,15 @@ def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
             pred_heatmap.dtype
         ).reshape(-1, 1)
     return weights.reshape(pred_heatmap.shape[0], pred_heatmap.shape[1], 1, 1)
+
+# Public trainer loss API.
+__all__ = [
+    "weighted_smooth_l1",
+    "schema_head_loss",
+    "heatmap_batch_weight",
+]
+
+# Legacy private aliases kept for TrainHeatmapStageFP16.py and older tests/tools.
+_weighted_smooth_l1 = weighted_smooth_l1
+_schema_head_loss = schema_head_loss
+_heatmap_batch_weight = heatmap_batch_weight

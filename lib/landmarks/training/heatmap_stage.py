@@ -60,10 +60,10 @@ from lib.landmarks.training.checkpointing import (
 )
 from lib.landmarks.training.data import (
     AUXILIARY_CLASS_NAMES,
-    _build_dataset,
-    _landmark_count_for_dataset,
-    _schema_aware_collate,
-    _unpack_train_batch,
+    build_dataset,
+    landmark_count_for_dataset,
+    schema_aware_collate,
+    unpack_train_batch,
 )
 from lib.landmarks.training.domain_balanced_sampler import (
     DEFAULT_BUCKET_TARGETS,
@@ -71,56 +71,34 @@ from lib.landmarks.training.domain_balanced_sampler import (
     parse_target_spec,
 )
 from lib.landmarks.training.evaluator import (
-    _eval_collate,
-    _eval_report_json_path,
-    _evaluate_landmark_model,
-    _print_eval_summary,
-    _records_from_report,
+    eval_collate,
+    eval_report_json_path,
+    evaluate_landmark_model,
+    print_eval_summary,
+    records_from_report,
 )
 from lib.landmarks.training.losses import (
-    _heatmap_batch_weight,
-    _schema_head_loss,
-    _weighted_smooth_l1,
+    heatmap_batch_weight,
+    schema_head_loss,
+    weighted_smooth_l1,
 )
-from lib.landmarks.training.model_factory import build_cdvit_model as _build_cdvit_model
+from lib.landmarks.training.model_factory import build_cdvit_model
 from lib.landmarks.training.profiling import (
-    accumulate_timing as _accumulate_timing,
-)
-from lib.landmarks.training.profiling import (
-    append_runtime_metrics as _append_runtime_metrics,
-)
-from lib.landmarks.training.profiling import (
-    cuda_peak_memory_mb as _cuda_peak_memory_mb,
-)
-from lib.landmarks.training.profiling import (
-    elapsed_timing as _elapsed_timing,
-)
-from lib.landmarks.training.profiling import (
-    empty_epoch_timing as _empty_epoch_timing,
-)
-from lib.landmarks.training.profiling import (
-    finalize_epoch_timing as _finalize_epoch_timing,
-)
-from lib.landmarks.training.profiling import (
-    start_timing as _start_timing,
-)
-from lib.landmarks.training.profiling import (
-    time_call as _time_call,
+    accumulate_timing,
+    append_runtime_metrics,
+    cuda_peak_memory_mb,
+    elapsed_timing,
+    empty_epoch_timing,
+    finalize_epoch_timing,
+    start_timing,
+    time_call,
 )
 from lib.landmarks.training.runtime import (
-    dataloader_kwargs as _dataloader_kwargs,
-)
-from lib.landmarks.training.runtime import (
-    maybe_limit_eval_dataset as _maybe_limit_eval_dataset,
-)
-from lib.landmarks.training.runtime import (
-    normalize_runtime_args as _normalize_runtime_args,
-)
-from lib.landmarks.training.runtime import (
-    set_dataset_runtime_epoch as _set_dataset_runtime_epoch,
-)
-from lib.landmarks.training.runtime import (
-    should_run_interval as _should_run_interval,
+    dataloader_kwargs,
+    maybe_limit_eval_dataset,
+    normalize_runtime_args,
+    set_dataset_runtime_epoch,
+    should_run_interval,
 )
 from lib.landmarks.training.seed import setup_seed
 from loss import AWingLoss
@@ -131,6 +109,35 @@ from loss import AWingLoss
 LEGACY_FS68_DATASET_NAME = LEGACY_MANIFEST_DATA_NAME
 MULTI_SCHEMA_MANIFEST_DATASET_NAME = CANONICAL_MANIFEST_DATA_NAME
 FS68_DATASET_NAME = LEGACY_FS68_DATASET_NAME
+
+# Legacy private helper aliases kept for TrainHeatmapStageFP16.py and older tests/tools.
+_landmark_count_for_dataset = landmark_count_for_dataset
+_build_dataset = build_dataset
+_schema_aware_collate = schema_aware_collate
+_unpack_train_batch = unpack_train_batch
+_eval_collate = eval_collate
+_eval_report_json_path = eval_report_json_path
+_evaluate_landmark_model = evaluate_landmark_model
+_print_eval_summary = print_eval_summary
+_records_from_report = records_from_report
+_weighted_smooth_l1 = weighted_smooth_l1
+_schema_head_loss = schema_head_loss
+_heatmap_batch_weight = heatmap_batch_weight
+_build_cdvit_model = build_cdvit_model
+_dataloader_kwargs = dataloader_kwargs
+_maybe_limit_eval_dataset = maybe_limit_eval_dataset
+_normalize_runtime_args = normalize_runtime_args
+_set_dataset_runtime_epoch = set_dataset_runtime_epoch
+_should_run_interval = should_run_interval
+_accumulate_timing = accumulate_timing
+_append_runtime_metrics = append_runtime_metrics
+_cuda_peak_memory_mb = cuda_peak_memory_mb
+_elapsed_timing = elapsed_timing
+_empty_epoch_timing = empty_epoch_timing
+_finalize_epoch_timing = finalize_epoch_timing
+_start_timing = start_timing
+_time_call = time_call
+
 
 
 # Runtime, profiling, and checkpoint-compat helpers live in lib.landmarks.training.*.
@@ -356,9 +363,9 @@ def main():
         args.split_policy = "declared"
     if args.ignore_declared_splits:
         args.split_policy = "random_hash"
-    args = _normalize_runtime_args(args)
+    args = normalize_runtime_args(args)
     setup_seed(args.seed, deterministic=args.deterministic)
-    lmk_num = _landmark_count_for_dataset(args)
+    lmk_num = landmark_count_for_dataset(args)
     if "LOCAL_RANK" in os.environ and os.environ["LOCAL_RANK"] is not None:
         print(os.environ["LOCAL_RANK"])
         args.local_rank = int(os.environ["LOCAL_RANK"])
@@ -375,7 +382,7 @@ def main():
             is_schema_aware_manifest_dataset(args.data_name)
             and args.schema_aware_training
         )
-        train_dataset = _build_dataset(
+        train_dataset = build_dataset(
             args,
             "train",
             aug=True,
@@ -383,7 +390,7 @@ def main():
             schema_aware_training=schema_aware_training,
         )
         print("----------------------len(train_dataset)", len(train_dataset))
-        test_dataset = _build_dataset(
+        test_dataset = build_dataset(
             args,
             "test",
             aug=False,
@@ -393,14 +400,14 @@ def main():
         )
         if is_schema_aware_manifest_dataset(args.data_name):
             validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
-        eval_dataset = _maybe_limit_eval_dataset(
+        eval_dataset = maybe_limit_eval_dataset(
             test_dataset, args.eval_max_samples, args.seed
         )
         test_dataloader = torch.utils.data.DataLoader(
             eval_dataset,
             batch_size=args.eval_batch_size,
-            collate_fn=_eval_collate,
-            **_dataloader_kwargs(args, eval_loader=True),
+            collate_fn=eval_collate,
+            **dataloader_kwargs(args, eval_loader=True),
         )
         full_test_dataloader = test_dataloader
         if int(args.eval_max_samples or 0) > 0 and len(eval_dataset) < len(
@@ -409,8 +416,8 @@ def main():
             full_test_dataloader = torch.utils.data.DataLoader(
                 test_dataset,
                 batch_size=args.eval_batch_size,
-                collate_fn=_eval_collate,
-                **_dataloader_kwargs(args, eval_loader=True),
+                collate_fn=eval_collate,
+                **dataloader_kwargs(args, eval_loader=True),
             )
         if args.domain_balanced_sampling and is_schema_aware_manifest_dataset(
             args.data_name
@@ -430,8 +437,8 @@ def main():
             train_dataloader = torch.utils.data.DataLoader(
                 train_dataset,
                 batch_sampler=train_sampler,
-                collate_fn=_schema_aware_collate if schema_aware_training else None,
-                **_dataloader_kwargs(args),
+                collate_fn=schema_aware_collate if schema_aware_training else None,
+                **dataloader_kwargs(args),
             )
         else:
             train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -441,10 +448,10 @@ def main():
                 train_dataset,
                 batch_size=args.batch_size,
                 sampler=train_sampler,
-                collate_fn=_schema_aware_collate if schema_aware_training else None,
-                **_dataloader_kwargs(args),
+                collate_fn=schema_aware_collate if schema_aware_training else None,
+                **dataloader_kwargs(args),
             )
-        net = _build_cdvit_model(
+        net = build_cdvit_model(
             args,
             lmk_num,
             schema_aware_training=schema_aware_training,
@@ -533,11 +540,11 @@ def main():
                 ema.train()
             if dist.get_rank() == 0:
                 epoch_start_time = time.time()
-                epoch_timing = _empty_epoch_timing()
+                epoch_timing = empty_epoch_timing()
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats(device)
             train_sampler.set_epoch(epoch)
-            _set_dataset_runtime_epoch(train_dataset, epoch, args)
+            set_dataset_runtime_epoch(train_dataset, epoch, args)
             if (
                 args.persistent_workers
                 and epoch == start_epoch
@@ -551,31 +558,31 @@ def main():
             batch_fetch_start_time = time.time()
             for batch_idx, batch in enumerate(train_dataloader):
                 if dist.get_rank() == 0:
-                    _accumulate_timing(
+                    accumulate_timing(
                         epoch_timing, "data_wait_seconds", batch_fetch_start_time
                     )
                 optimizer.zero_grad(set_to_none=True)
                 schema_batch = isinstance(batch, dict)
-                transfer_start_time = _start_timing(
+                transfer_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 if schema_batch:
-                    data, schema_heads, aux_labels = _unpack_train_batch(
+                    data, schema_heads, aux_labels = unpack_train_batch(
                         batch, device, non_blocking=args.pin_memory
                     )
                 else:
                     data, target, heatmap, sample_weight, landmark_mask = (
-                        _unpack_train_batch(batch, device, non_blocking=args.pin_memory)
+                        unpack_train_batch(batch, device, non_blocking=args.pin_memory)
                     )
                 if dist.get_rank() == 0:
-                    _accumulate_timing(
+                    accumulate_timing(
                         epoch_timing,
                         "device_transfer_seconds",
                         transfer_start_time,
                         device=device,
                         synchronize=args.synchronize_runtime_timing,
                     )
-                forward_loss_start_time = _start_timing(
+                forward_loss_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 loss = 0
@@ -588,7 +595,7 @@ def main():
                     for i in range(len(pred_info)):
                         if schema_batch:
                             stage_loss, stage_loc, stage_heatmap, stage_aux = (
-                                _schema_head_loss(
+                                schema_head_loss(
                                     pred_info[i],
                                     schema_heads,
                                     aux_labels,
@@ -605,7 +612,7 @@ def main():
                             B, C, H, W = pred_heatmap.shape
                             # loss_loc = vertex_loss_func(pred_heatmap, target)
                             loss_loc = (
-                                _weighted_smooth_l1(
+                                weighted_smooth_l1(
                                     pred_loc,
                                     target,
                                     sample_weight,
@@ -621,7 +628,7 @@ def main():
                                 heatmap_loss_func(
                                     pred_prob,
                                     heatmap,
-                                    batch_weights=_heatmap_batch_weight(
+                                    batch_weights=heatmap_batch_weight(
                                         sample_weight, pred_heatmap, landmark_mask
                                     ),
                                 )
@@ -630,7 +637,7 @@ def main():
                             # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
                             loss = loss + (loss_loc + loss_heatmap) * weights[i]
                 if dist.get_rank() == 0:
-                    _accumulate_timing(
+                    accumulate_timing(
                         epoch_timing,
                         "forward_loss_seconds",
                         forward_loss_start_time,
@@ -638,12 +645,12 @@ def main():
                         synchronize=args.synchronize_runtime_timing,
                     )
 
-                backward_start_time = _start_timing(
+                backward_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 scaler.scale(loss).backward()
                 if dist.get_rank() == 0:
-                    _accumulate_timing(
+                    accumulate_timing(
                         epoch_timing,
                         "backward_seconds",
                         backward_start_time,
@@ -651,12 +658,12 @@ def main():
                         synchronize=args.synchronize_runtime_timing,
                     )
 
-                optimizer_step_start_time = _start_timing(
+                optimizer_step_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 scaler.step(optimizer)
                 if dist.get_rank() == 0:
-                    _accumulate_timing(
+                    accumulate_timing(
                         epoch_timing,
                         "optimizer_step_seconds",
                         optimizer_step_start_time,
@@ -664,12 +671,12 @@ def main():
                         synchronize=args.synchronize_runtime_timing,
                     )
 
-                scaler_update_start_time = _start_timing(
+                scaler_update_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 scaler.update()
                 if dist.get_rank() == 0:
-                    _accumulate_timing(
+                    accumulate_timing(
                         epoch_timing,
                         "scaler_update_seconds",
                         scaler_update_start_time,
@@ -706,7 +713,7 @@ def main():
             ):
                 if not os.path.exists(args.ckpt_folder):
                     os.mkdir(args.ckpt_folder)
-                _time_call(
+                time_call(
                     epoch_timing,
                     "checkpoint_seconds",
                     torch.save,
@@ -730,7 +737,7 @@ def main():
 
             if dist.get_rank() == 0:
                 if args.save_n_epoch > 0 and (epoch + 1) % args.save_n_epoch == 0:
-                    _time_call(
+                    time_call(
                         epoch_timing,
                         "checkpoint_seconds",
                         _save_training_checkpoint,
@@ -747,13 +754,13 @@ def main():
                     )
                 duration = time.time() - epoch_start_time
                 samples_per_second = float(global_train_samples) / max(duration, 1e-9)
-                peak_memory_mb = _cuda_peak_memory_mb(device)
+                peak_memory_mb = cuda_peak_memory_mb(device)
                 print(
                     f"#epoch runtime epoch={epoch} duration={duration:.3f}s "
                     f"samples_per_second={samples_per_second:.3f} "
                     f"peak_cuda_memory_mb={peak_memory_mb}"
                 )
-                _append_runtime_metrics(
+                append_runtime_metrics(
                     args,
                     {
                         "epoch": int(epoch),
@@ -767,10 +774,10 @@ def main():
                 )
 
                 final_epoch = int(args.epoch) - 1
-                should_eval_model = _should_run_interval(
+                should_eval_model = should_run_interval(
                     args.eval_every, epoch, final_epoch
                 )
-                run_full_eval = _should_run_interval(
+                run_full_eval = should_run_interval(
                     args.full_eval_every, epoch, final_epoch
                 )
                 limited_eval = eval_dataset is not test_dataset
@@ -796,7 +803,7 @@ def main():
                     args.eval_records_jsonl
                     or args.eval_records_csv
                     or args.eval_report_csv
-                    or _should_run_interval(
+                    or should_run_interval(
                         args.eval_slice_reports_every, epoch, final_epoch
                     )
                 )
@@ -807,11 +814,11 @@ def main():
                     )
 
                 if should_eval_model:
-                    eval_start_time = _start_timing(
+                    eval_start_time = start_timing(
                         device=device, synchronize=args.synchronize_runtime_timing
                     )
                     with torch.no_grad():
-                        model_report = _evaluate_landmark_model(
+                        model_report = evaluate_landmark_model(
                             net.module,
                             eval_loader,
                             device,
@@ -821,7 +828,7 @@ def main():
                             non_blocking=args.pin_memory,
                             build_records=should_build_eval_records,
                         )
-                    eval_seconds = _elapsed_timing(
+                    eval_seconds = elapsed_timing(
                         eval_start_time,
                         device=device,
                         synchronize=args.synchronize_runtime_timing,
@@ -835,14 +842,14 @@ def main():
                         best_record.append((epoch, best_nme * 100))
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
-                        _time_call(
+                        time_call(
                             epoch_timing,
                             "checkpoint_seconds",
                             torch.save,
                             net.module.state_dict(),
                             os.path.join(args.ckpt_folder, "best_model"),
                         )
-                        _time_call(
+                        time_call(
                             epoch_timing,
                             "checkpoint_seconds",
                             _save_training_checkpoint,
@@ -857,9 +864,9 @@ def main():
                             best_record,
                             args,
                         )
-                    _print_eval_summary(f"test {eval_scope}", model_report)
+                    print_eval_summary(f"test {eval_scope}", model_report)
                     print("BEST NME %: {}".format(best_nme * 100))
-                    _append_runtime_metrics(
+                    append_runtime_metrics(
                         args,
                         {
                             "epoch": int(epoch),
@@ -878,21 +885,21 @@ def main():
                 should_eval_ema = (
                     ema is not None
                     and should_eval_model
-                    and _should_run_interval(args.eval_ema_every, epoch, final_epoch)
+                    and should_run_interval(args.eval_ema_every, epoch, final_epoch)
                 )
                 if should_eval_ema:
-                    ema_eval_start_time = _start_timing(
+                    ema_eval_start_time = start_timing(
                         device=device, synchronize=args.synchronize_runtime_timing
                     )
                     with torch.no_grad():
-                        ema_report = _evaluate_landmark_model(
+                        ema_report = evaluate_landmark_model(
                             ema,
                             eval_loader,
                             device,
                             non_blocking=args.pin_memory,
                             build_records=should_build_eval_records,
                         )
-                    _accumulate_timing(
+                    accumulate_timing(
                         epoch_timing,
                         "ema_eval_seconds",
                         ema_eval_start_time,
@@ -905,14 +912,14 @@ def main():
                         best_record.append((epoch, "ema", best_nme * 100))
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
-                        _time_call(
+                        time_call(
                             epoch_timing,
                             "checkpoint_seconds",
                             torch.save,
                             ema.model.state_dict(),
                             os.path.join(args.ckpt_folder, "best_model"),
                         )
-                        _time_call(
+                        time_call(
                             epoch_timing,
                             "checkpoint_seconds",
                             _save_training_checkpoint,
@@ -927,7 +934,7 @@ def main():
                             best_record,
                             args,
                         )
-                    _print_eval_summary(f"test ema {eval_scope}", ema_report)
+                    print_eval_summary(f"test ema {eval_scope}", ema_report)
                     print(best_record)
                 elif ema is not None and should_eval_model:
                     print(
@@ -935,7 +942,7 @@ def main():
                     )
 
                 if model_report is not None:
-                    records = _records_from_report(model_report)
+                    records = records_from_report(model_report)
                     compact_model_report = {
                         key: value
                         for key, value in model_report.items()
@@ -950,7 +957,7 @@ def main():
                     }
                     if ema_report is not None:
                         eval_payload["ema"] = ema_report
-                    write_eval_json(_eval_report_json_path(args), eval_payload)
+                    write_eval_json(eval_report_json_path(args), eval_payload)
                     if args.eval_report_csv:
                         write_eval_csv(args.eval_report_csv, eval_payload)
                     if args.eval_records_jsonl:
@@ -959,7 +966,7 @@ def main():
                         write_eval_records_csv(args.eval_records_csv, records)
                 # Save last checkpoint after eval so best_nme and best_record are current.
                 if args.save_last_checkpoint:
-                    _time_call(
+                    time_call(
                         epoch_timing,
                         "checkpoint_seconds",
                         _save_training_checkpoint,
@@ -975,11 +982,11 @@ def main():
                         args,
                     )
 
-                final_epoch_timing = _finalize_epoch_timing(
+                final_epoch_timing = finalize_epoch_timing(
                     epoch_timing,
                     epoch_wall_seconds=time.time() - epoch_start_time,
                 )
-                _append_runtime_metrics(
+                append_runtime_metrics(
                     args,
                     {
                         "event": "epoch_timing",

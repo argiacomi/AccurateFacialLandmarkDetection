@@ -11,11 +11,9 @@ from __future__ import annotations
 from lib.landmarks.training import heatmap_stage as _heatmap_stage_impl
 
 # BEGIN LEGACY_PRIVATE_HELPER_EXPORTS
-# Keep legacy private imports available from TrainHeatmapStageFP16.py after
-# moving the implementation to lib.landmarks.training.heatmap_stage.
-#
-# Tests and older scripts import these names directly from the historical entry
-# point. Defining them here also preserves object identity checks such as
+# Prefer public imports from lib.landmarks.training.* for new code. These
+# aliases preserve the historical TrainHeatmapStageFP16.py private-helper
+# surface for older tests/tools and object-identity checks such as
 # train._dataloader_kwargs(...)["worker_init_fn"] is train._seed_worker.
 from lib.landmarks.training.runtime import (
     dataloader_kwargs as _dataloader_kwargs,

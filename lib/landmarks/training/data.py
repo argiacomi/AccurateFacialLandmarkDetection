@@ -23,28 +23,28 @@ AUXILIARY_CLASS_INDEX = {
     for name, labels in AUXILIARY_CLASS_NAMES.items()
 }
 
-def _is_schema_aware_manifest_dataset(data_name):
+def is_schema_aware_manifest_dataset_name(data_name):
     return is_schema_aware_manifest_dataset(data_name)
 
-def _landmark_count_for_dataset(args):
+def landmark_count_for_dataset(args):
     if args.data_name == "WFLW":
         return 98
     if args.data_name == "COFW":
         return 29
     if args.data_name == "300W":
         return 68
-    if _is_schema_aware_manifest_dataset(args.data_name):
+    if is_schema_aware_manifest_dataset_name(args.data_name):
         return int(args.lmk_num)
     raise ValueError(f"unknown data_name: {args.data_name}")
 
-def _manifest_for_split(args, split):
+def manifest_for_split(args, split):
     if split == "train":
         return args.train_manifest or args.manifest or args.root_folder
     if split == "test":
         return args.test_manifest or args.manifest or args.root_folder
     return args.manifest or args.root_folder
 
-def _build_dataset(
+def build_dataset(
     args,
     split,
     aug,
@@ -53,8 +53,8 @@ def _build_dataset(
     schema_aware_training=False,
 ):
     manifest_path = (
-        _manifest_for_split(args, split)
-        if _is_schema_aware_manifest_dataset(args.data_name)
+        manifest_for_split(args, split)
+        if is_schema_aware_manifest_dataset_name(args.data_name)
         else ""
     )
     return GetDataset(
@@ -66,19 +66,19 @@ def _build_dataset(
         heatmap_size=heatmap_size,
         manifest_path=manifest_path,
         eval_mode=args.eval_mode
-        if _is_schema_aware_manifest_dataset(args.data_name)
+        if is_schema_aware_manifest_dataset_name(args.data_name)
         else "random_hash",
         heldout_datasets=args.heldout_dataset
-        if _is_schema_aware_manifest_dataset(args.data_name)
+        if is_schema_aware_manifest_dataset_name(args.data_name)
         else None,
         include_metadata=include_metadata,
         schema_aware_training=schema_aware_training,
         split_policy=args.split_policy
-        if _is_schema_aware_manifest_dataset(args.data_name)
+        if is_schema_aware_manifest_dataset_name(args.data_name)
         else "declared_or_random_hash",
     )
 
-def _unpack_train_batch(batch, device, non_blocking=False):
+def unpack_train_batch(batch, device, non_blocking=False):
     if isinstance(batch, dict):
         data = batch["image"].to(device, non_blocking=non_blocking)
         heads = {}
@@ -125,7 +125,7 @@ def _unpack_train_batch(batch, device, non_blocking=False):
         landmark_mask = landmark_mask.to(device, non_blocking=non_blocking).float()
     return data, target, heatmap, sample_weight, landmark_mask
 
-def _schema_aware_collate(batch):
+def schema_aware_collate(batch):
     images = default_collate([item["image"] for item in batch])
     grouped = {}
     for index, item in enumerate(batch):
@@ -173,7 +173,7 @@ def _schema_aware_collate(batch):
         mix["dataset"][dataset] = mix["dataset"].get(dataset, 0) + 1
         mix["schema"][schema] = mix["schema"].get(schema, 0) + 1
         for task in aux_labels:
-            aux_labels[task].append(_auxiliary_label(task, metadata, item))
+            aux_labels[task].append(auxiliary_label(task, metadata, item))
     return {
         "image": images,
         "heads": heads,
@@ -184,7 +184,7 @@ def _schema_aware_collate(batch):
         },
     }
 
-def _auxiliary_label(task, metadata, item):
+def auxiliary_label(task, metadata, item):
     attributes = (
         metadata.get("attributes")
         if isinstance(metadata.get("attributes"), dict)
@@ -282,3 +282,25 @@ def _auxiliary_label(task, metadata, item):
     if label is None:
         return -1
     return AUXILIARY_CLASS_INDEX[task].get(label, -1)
+
+# Public trainer data API.
+__all__ = [
+    "AUXILIARY_CLASS_NAMES",
+    "AUXILIARY_CLASS_INDEX",
+    "is_schema_aware_manifest_dataset_name",
+    "landmark_count_for_dataset",
+    "manifest_for_split",
+    "build_dataset",
+    "unpack_train_batch",
+    "schema_aware_collate",
+    "auxiliary_label",
+]
+
+# Legacy private aliases kept for TrainHeatmapStageFP16.py and older tests/tools.
+_is_schema_aware_manifest_dataset = is_schema_aware_manifest_dataset_name
+_landmark_count_for_dataset = landmark_count_for_dataset
+_manifest_for_split = manifest_for_split
+_build_dataset = build_dataset
+_unpack_train_batch = unpack_train_batch
+_schema_aware_collate = schema_aware_collate
+_auxiliary_label = auxiliary_label

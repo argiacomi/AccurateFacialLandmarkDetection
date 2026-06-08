@@ -16,7 +16,7 @@ from lib.landmarks.evaluation.split_safe import (
 )
 
 
-def _eval_collate(batch):
+def eval_collate(batch):
     if batch and len(batch[0]) >= 4 and isinstance(batch[0][3], dict):
         data = default_collate([item[0] for item in batch])
         metadata = [item[3] for item in batch]
@@ -64,7 +64,7 @@ def _eval_collate(batch):
         }
     return default_collate(batch)
 
-def _unpack_eval_batch(batch):
+def unpack_eval_batch(batch):
     data = batch[0]
     target = batch[1]
     if len(batch) >= 3:
@@ -257,7 +257,7 @@ def _append_finite_nmes(target, values):
         return
     target.extend(float(value) for value in arr[np.isfinite(arr)])
 
-def _evaluate_landmark_model(
+def evaluate_landmark_model(
     model,
     test_dataloader,
     device,
@@ -284,7 +284,7 @@ def _evaluate_landmark_model(
             stage_pred = model(data)[-1]
             for head_name, payload in batch["heads"].items():
                 indices = payload["indices"].to(device, non_blocking=non_blocking)
-                pred_keypoints, heatmap = _landmark_prediction_for_head(
+                pred_keypoints, heatmap = landmark_prediction_for_head(
                     stage_pred, head_name
                 )
                 pred_keypoints = pred_keypoints.index_select(0, indices)
@@ -311,12 +311,12 @@ def _evaluate_landmark_model(
                     )
             continue
 
-        data, target, landmark_mask, metadata = _unpack_eval_batch(batch)
+        data, target, landmark_mask, metadata = unpack_eval_batch(batch)
         data = data.to(device, non_blocking=non_blocking)
         keypoints = target.to(device, non_blocking=non_blocking)
         landmark_mask = landmark_mask.to(device, non_blocking=non_blocking)
         stage_pred = model(data)[-1]
-        pred_keypoints, heatmap = _landmark_prediction_for_head(
+        pred_keypoints, heatmap = landmark_prediction_for_head(
             stage_pred, "landmarks_68"
         )
 
@@ -349,14 +349,14 @@ def _evaluate_landmark_model(
         "record_mode": "overall_only",
     }
 
-def _records_from_report(report):
+def records_from_report(report):
     records = report.get("records", [])
     return records if isinstance(records, list) else []
 
-def _landmarks_68_prediction(stage_pred):
-    return _landmark_prediction_for_head(stage_pred, "landmarks_68")
+def landmarks_68_prediction(stage_pred):
+    return landmark_prediction_for_head(stage_pred, "landmarks_68")
 
-def _landmark_prediction_for_head(stage_pred, head_name):
+def landmark_prediction_for_head(stage_pred, head_name):
     if isinstance(stage_pred, dict):
         if head_name not in stage_pred:
             available = ", ".join(
@@ -372,7 +372,7 @@ def _landmark_prediction_for_head(stage_pred, head_name):
         )
     return stage_pred
 
-def _print_eval_summary(title, report):
+def print_eval_summary(title, report):
     metrics = report["overall"]
     print(f"\n------------ {title} ------------")
     if metrics["sample_count"] == 0:
@@ -384,7 +384,29 @@ def _print_eval_summary(title, report):
     print("FR_{}% : {}".format(0.10, metrics["fr_percent"]))
     print("AUC_{}: {}".format(0.10, metrics["auc"]))
 
-def _eval_report_json_path(args):
+def eval_report_json_path(args):
     if args.eval_report_json:
         return args.eval_report_json
     return os.path.join(args.ckpt_folder, "eval_report.json")
+
+# Public trainer evaluation API.
+__all__ = [
+    "eval_collate",
+    "unpack_eval_batch",
+    "evaluate_landmark_model",
+    "records_from_report",
+    "landmarks_68_prediction",
+    "landmark_prediction_for_head",
+    "print_eval_summary",
+    "eval_report_json_path",
+]
+
+# Legacy private aliases kept for TrainHeatmapStageFP16.py and older tests/tools.
+_eval_collate = eval_collate
+_unpack_eval_batch = unpack_eval_batch
+_evaluate_landmark_model = evaluate_landmark_model
+_records_from_report = records_from_report
+_landmarks_68_prediction = landmarks_68_prediction
+_landmark_prediction_for_head = landmark_prediction_for_head
+_print_eval_summary = print_eval_summary
+_eval_report_json_path = eval_report_json_path
