@@ -27,6 +27,11 @@ from lib.landmarks.core.schema import (
     MAP_98_TO_68,
     head_name_for_schema,
 )
+from lib.landmarks.core.manifest_aliases import (
+    CANONICAL_MANIFEST_DATA_NAME,
+    LEGACY_MANIFEST_DATA_NAME,
+    is_schema_aware_manifest_dataset,
+)
 from lib.landmarks.evaluation.split_safe import (
     EVAL_MODES,
     SPLIT_POLICIES,
@@ -48,20 +53,13 @@ from lib.landmarks.training.domain_balanced_sampler import (
 # from torch.cuda.amp import autocast as autocast
 
 
-LEGACY_FS68_DATASET_NAME = "FS68Manifest"
-MULTI_SCHEMA_MANIFEST_DATASET_NAME = "MultiSchemaLandmarkManifest"
+LEGACY_FS68_DATASET_NAME = LEGACY_MANIFEST_DATA_NAME
+MULTI_SCHEMA_MANIFEST_DATASET_NAME = CANONICAL_MANIFEST_DATA_NAME
 FS68_DATASET_NAME = LEGACY_FS68_DATASET_NAME
-
-SCHEMA_AWARE_MANIFEST_DATASET_NAMES = {
-    LEGACY_FS68_DATASET_NAME,
-    "LandmarkManifest",
-    "SchemaAwareManifest",
-    MULTI_SCHEMA_MANIFEST_DATASET_NAME,
-}
 
 
 def _is_schema_aware_manifest_dataset(data_name):
-    return data_name in SCHEMA_AWARE_MANIFEST_DATASET_NAMES
+    return is_schema_aware_manifest_dataset(data_name)
 
 
 AUXILIARY_CLASS_NAMES = {
@@ -824,13 +822,13 @@ def main():
         "--train_manifest",
         type=str,
         default="",
-        help="faceswap-compatible train manifest for FS68Manifest",
+        help="schema-aware train manifest",
     )
     parser.add_argument(
         "--test_manifest",
         type=str,
         default="",
-        help="faceswap-compatible test manifest for FS68Manifest",
+        help="schema-aware test manifest",
     )
     parser.add_argument("--eval-mode", choices=EVAL_MODES, default="random_hash")
     parser.add_argument(
@@ -877,7 +875,7 @@ def main():
         "--schema-aware-training",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="For FS68Manifest, train schema-specific 68/98/profile39 heads from mixed-schema manifests.",
+        help="For schema-aware manifest aliases, train schema-specific heads from mixed-schema manifests.",
     )
     parser.add_argument("--schema-consistency-weight", type=float, default=0.05)
     parser.add_argument("--domain-balanced-sampling", action="store_true")
@@ -896,7 +894,7 @@ def main():
         "--auxiliary-heads",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable optional pose/quality/visibility auxiliary heads for schema-aware FS68 training.",
+        help="Enable optional pose/quality/visibility auxiliary heads for schema-aware manifest training.",
     )
     parser.add_argument("--auxiliary-loss-weight", type=float, default=0.1)
     parser.add_argument("--data_name", type=str, default="WFLW")

@@ -6,6 +6,11 @@ import cv2
 import numpy as np
 import pytest
 
+from lib.landmarks.core.manifest_aliases import (
+    LEGACY_MANIFEST_DATA_NAME,
+    MANIFEST_DATA_NAME_ALIASES,
+)
+
 augmentation_stub = types.ModuleType("ImageAugmentation")
 augmentation_stub.GetAugTransform = lambda: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
@@ -15,12 +20,7 @@ from DatasetMultiSchemaLandmarkManifest import LandmarkDataset as MultiSchemaDat
 from DatasetFS68Manifest import LandmarkDataset as LegacyFS68Dataset
 
 
-MANIFEST_ALIASES = [
-    "FS68Manifest",
-    "LandmarkManifest",
-    "SchemaAwareManifest",
-    "MultiSchemaLandmarkManifest",
-]
+MANIFEST_ALIASES = list(MANIFEST_DATA_NAME_ALIASES)
 
 
 @pytest.fixture()
@@ -98,3 +98,10 @@ def test_unknown_dataset_name_still_fails(manifest_68):
             aug=False,
             manifest_path=str(manifest_68),
         )
+
+
+def test_pipeline_default_train_data_name_remains_legacy_compatibility_alias():
+    from tools.landmarks.run_cdvit_manifest_training_pipeline import _build_arg_parser
+
+    args = _build_arg_parser().parse_args([])
+    assert args.train_data_name == LEGACY_MANIFEST_DATA_NAME

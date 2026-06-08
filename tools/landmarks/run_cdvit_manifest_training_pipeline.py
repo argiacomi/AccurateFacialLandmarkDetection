@@ -23,6 +23,12 @@ import typing as T
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lib.landmarks.core.manifest_aliases import (
+    CANONICAL_MANIFEST_DATA_NAME,
+    LEGACY_MANIFEST_DATA_NAME,
+    MANIFEST_DATA_NAME_ALIASES,
+)
+
 
 CDVIT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
@@ -32,14 +38,6 @@ PROGRESS_LOG_NAME = "pipeline_progress.jsonl"
 TRAIN_COMMAND_NAME = "train_command.json"
 VALIDATION_REPORT_NAME = "cdvit_manifest_validation.json"
 PRODUCTION_DATASET = "production_validated"
-LEGACY_MANIFEST_DATA_NAME = "FS68Manifest"
-CANONICAL_MANIFEST_DATA_NAME = "MultiSchemaLandmarkManifest"
-MANIFEST_DATA_NAME_ALIASES = (
-    LEGACY_MANIFEST_DATA_NAME,
-    "LandmarkManifest",
-    "SchemaAwareManifest",
-    CANONICAL_MANIFEST_DATA_NAME,
-)
 
 STAGES: tuple[str, ...] = (
     "build_dataset_manifests",
@@ -731,9 +729,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--torchrun-executable", default="torchrun")
     parser.add_argument(
         "--train-data-name",
-        default=CANONICAL_MANIFEST_DATA_NAME,
+        default=LEGACY_MANIFEST_DATA_NAME,
         choices=MANIFEST_DATA_NAME_ALIASES,
-        help="Schema-aware manifest data_name. FS68Manifest remains a compatibility alias.",
+        help="Manifest data_name. FS68Manifest remains the compatibility default; pass MultiSchemaLandmarkManifest to use the canonical alias.",
     )
     parser.add_argument("--nproc-per-node", type=int, default=2)
     parser.add_argument("--ckpt-folder", type=Path, default=None)

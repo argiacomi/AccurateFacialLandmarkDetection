@@ -4,17 +4,8 @@ from Dataset import LandmarkDataset as DWFLW
 from DatasetMultiSchemaLandmarkManifest import (
     LandmarkDataset as DMultiSchemaLandmarkManifest,
 )
+from lib.landmarks.core.manifest_aliases import IsSchemaAwareManifestDataset
 
-SCHEMA_AWARE_MANIFEST_DATASET_NAMES = {
-    "FS68Manifest",
-    "LandmarkManifest",
-    "SchemaAwareManifest",
-    "MultiSchemaLandmarkManifest",
-}
-
-
-def IsSchemaAwareManifestDataset(name):
-    return name in SCHEMA_AWARE_MANIFEST_DATASET_NAMES
 
 
 def GetDataset(
