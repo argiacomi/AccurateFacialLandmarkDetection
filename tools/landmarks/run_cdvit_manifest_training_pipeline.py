@@ -23,6 +23,10 @@ import typing as T
 from dataclasses import dataclass, field
 from pathlib import Path
 
+CDVIT_ROOT = Path(__file__).resolve().parents[2]
+if str(CDVIT_ROOT) not in sys.path:
+    sys.path.insert(0, str(CDVIT_ROOT))
+
 from lib.landmarks.core.manifest_aliases import (
     CANONICAL_MANIFEST_DATA_NAME,
     LEGACY_MANIFEST_DATA_NAME,
@@ -30,7 +34,6 @@ from lib.landmarks.core.manifest_aliases import (
 )
 
 
-CDVIT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
 DEFAULT_DATASETS = "wflw,cofw,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
 MINED_MANIFEST_NAME = "manifest.json"

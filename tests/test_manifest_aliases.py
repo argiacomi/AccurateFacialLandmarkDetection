@@ -1,6 +1,8 @@
 import json
+import subprocess
 import sys
 import types
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,9 +18,8 @@ augmentation_stub.GetAugTransform = lambda: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 from DatasetAll import GetDataset, IsSchemaAwareManifestDataset
-from DatasetMultiSchemaLandmarkManifest import LandmarkDataset as MultiSchemaDataset
 from DatasetFS68Manifest import LandmarkDataset as LegacyFS68Dataset
-
+from DatasetMultiSchemaLandmarkManifest import LandmarkDataset as MultiSchemaDataset
 
 MANIFEST_ALIASES = list(MANIFEST_DATA_NAME_ALIASES)
 
@@ -105,3 +106,22 @@ def test_pipeline_default_train_data_name_remains_legacy_compatibility_alias():
 
     args = _build_arg_parser().parse_args([])
     assert args.train_data_name == LEGACY_MANIFEST_DATA_NAME
+
+
+def test_pipeline_script_help_runs_directly():
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/landmarks/run_cdvit_manifest_training_pipeline.py",
+            "--help",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--train-data-name" in result.stdout
+
