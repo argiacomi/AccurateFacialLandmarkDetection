@@ -1,7 +1,20 @@
 from DatasetCOFW import LandmarkDataset as DCOFW
 from Dataset300W import LandmarkDataset as D300W
 from Dataset import LandmarkDataset as DWFLW
-from DatasetFS68Manifest import LandmarkDataset as DFS68Manifest
+from DatasetMultiSchemaLandmarkManifest import (
+    LandmarkDataset as DMultiSchemaLandmarkManifest,
+)
+
+SCHEMA_AWARE_MANIFEST_DATASET_NAMES = {
+    "FS68Manifest",
+    "LandmarkManifest",
+    "SchemaAwareManifest",
+    "MultiSchemaLandmarkManifest",
+}
+
+
+def IsSchemaAwareManifestDataset(name):
+    return name in SCHEMA_AWARE_MANIFEST_DATASET_NAMES
 
 
 def GetDataset(
@@ -46,8 +59,8 @@ def GetDataset(
             perturbation=perturbation,
             heatmap_size=heatmap_size,
         )
-    if name == "FS68Manifest":
-        return DFS68Manifest(
+    if IsSchemaAwareManifestDataset(name):
+        return DMultiSchemaLandmarkManifest(
             manifest_path=manifest_path or data_root,
             split=split,
             preload=preload,

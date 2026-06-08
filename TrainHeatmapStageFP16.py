@@ -6,11 +6,11 @@ import torch.distributed as dist
 from DatasetAll import GetDataset
 from torch.optim.lr_scheduler import StepLR
 from Net import VitAttnStage, HeadingNet
-import torch.nn as nn
 from torch.utils.data._utils.collate import default_collate
-from Hourglass import Hourglass
+
 # from Vit import Vit
 from Attention import SA2SA1_2
+
 # from Attention import  SA2SA1_twins
 # from UNet2 import UNet
 import torch.nn.functional as F
@@ -22,13 +22,16 @@ from EMA import EMA
 import math
 from torch.nn.attention import sdpa_kernel, SDPBackend
 import random
-from lib.landmarks.core.schema import DEFAULT_SCHEMA_HEADS, MAP_98_TO_68, head_name_for_schema
+from lib.landmarks.core.schema import (
+    DEFAULT_SCHEMA_HEADS,
+    MAP_98_TO_68,
+    head_name_for_schema,
+)
 from lib.landmarks.evaluation.split_safe import (
     EVAL_MODES,
     SPLIT_POLICIES,
     build_slice_report,
     record_for_sample,
-    slice_labels,
     validate_no_train_test_leakage,
     write_eval_csv,
     write_eval_json,
@@ -45,7 +48,22 @@ from lib.landmarks.training.domain_balanced_sampler import (
 # from torch.cuda.amp import autocast as autocast
 
 
-FS68_DATASET_NAME = "FS68Manifest"
+LEGACY_FS68_DATASET_NAME = "FS68Manifest"
+MULTI_SCHEMA_MANIFEST_DATASET_NAME = "MultiSchemaLandmarkManifest"
+FS68_DATASET_NAME = LEGACY_FS68_DATASET_NAME
+
+SCHEMA_AWARE_MANIFEST_DATASET_NAMES = {
+    LEGACY_FS68_DATASET_NAME,
+    "LandmarkManifest",
+    "SchemaAwareManifest",
+    MULTI_SCHEMA_MANIFEST_DATASET_NAME,
+}
+
+
+def _is_schema_aware_manifest_dataset(data_name):
+    return data_name in SCHEMA_AWARE_MANIFEST_DATASET_NAMES
+
+
 AUXILIARY_CLASS_NAMES = {
     "pose_bucket": ("frontal", "profile", "profile_left", "profile_right"),
     "occlusion": ("no_occlusion", "occlusion"),
@@ -76,7 +94,7 @@ def _landmark_count_for_dataset(args):
         return 29
     if args.data_name == "300W":
         return 68
-    if args.data_name == FS68_DATASET_NAME:
+    if _is_schema_aware_manifest_dataset(args.data_name):
         return int(args.lmk_num)
     raise ValueError(f"unknown data_name: {args.data_name}")
 
@@ -89,8 +107,19 @@ def _manifest_for_split(args, split):
     return args.manifest or args.root_folder
 
 
-def _build_dataset(args, split, aug, heatmap_size=0, include_metadata=False, schema_aware_training=False):
-    manifest_path = _manifest_for_split(args, split) if args.data_name == FS68_DATASET_NAME else ""
+def _build_dataset(
+    args,
+    split,
+    aug,
+    heatmap_size=0,
+    include_metadata=False,
+    schema_aware_training=False,
+):
+    manifest_path = (
+        _manifest_for_split(args, split)
+        if _is_schema_aware_manifest_dataset(args.data_name)
+        else ""
+    )
     return GetDataset(
         args.data_name,
         args.root_folder,
@@ -99,11 +128,17 @@ def _build_dataset(args, split, aug, heatmap_size=0, include_metadata=False, sch
         aug=aug,
         heatmap_size=heatmap_size,
         manifest_path=manifest_path,
-        eval_mode=args.eval_mode if args.data_name == FS68_DATASET_NAME else "random_hash",
-        heldout_datasets=args.heldout_dataset if args.data_name == FS68_DATASET_NAME else None,
+        eval_mode=args.eval_mode
+        if _is_schema_aware_manifest_dataset(args.data_name)
+        else "random_hash",
+        heldout_datasets=args.heldout_dataset
+        if _is_schema_aware_manifest_dataset(args.data_name)
+        else None,
         include_metadata=include_metadata,
         schema_aware_training=schema_aware_training,
-        split_policy=args.split_policy if args.data_name == FS68_DATASET_NAME else "declared_or_random_hash",
+        split_policy=args.split_policy
+        if _is_schema_aware_manifest_dataset(args.data_name)
+        else "declared_or_random_hash",
     )
 
 
@@ -119,9 +154,9 @@ def _unpack_train_batch(batch, device):
                 "landmark_mask": payload["landmark_mask"].to(device).float(),
                 "sample_weight": payload["sample_weight"].to(device).float(),
             }
-            heads[head_name]["sample_weight"] = heads[head_name]["sample_weight"] / heads[head_name][
+            heads[head_name]["sample_weight"] = heads[head_name][
                 "sample_weight"
-            ].mean().clamp_min(1e-6)
+            ] / heads[head_name]["sample_weight"].mean().clamp_min(1e-6)
         aux_labels = {
             task: labels.to(device)
             for task, labels in batch.get("aux_labels", {}).items()
@@ -138,7 +173,9 @@ def _unpack_train_batch(batch, device):
         sample_weight = None
         landmark_mask = None
     else:
-        raise ValueError(f"expected train batch with 3, 4, or 5 items, got {len(batch)}")
+        raise ValueError(
+            f"expected train batch with 3, 4, or 5 items, got {len(batch)}"
+        )
 
     data = data.to(device)
     target = target.to(device).float()
@@ -190,7 +227,11 @@ def _schema_aware_collate(batch):
     aux_labels = {name: [] for name in AUXILIARY_CLASS_NAMES}
     for item in batch:
         metadata = item.get("metadata", {})
-        bucket = str(metadata.get("hard_negative_bucket") or metadata.get("condition") or "unknown")
+        bucket = str(
+            metadata.get("hard_negative_bucket")
+            or metadata.get("condition")
+            or "unknown"
+        )
         dataset = str(metadata.get("dataset") or "unknown")
         schema = str(item.get("schema") or metadata.get("source_schema") or "unknown")
         mix["bucket"][bucket] = mix["bucket"].get(bucket, 0) + 1
@@ -202,60 +243,103 @@ def _schema_aware_collate(batch):
         "image": images,
         "heads": heads,
         "mix": mix,
-        "aux_labels": {task: torch.as_tensor(values, dtype=torch.long) for task, values in aux_labels.items()},
+        "aux_labels": {
+            task: torch.as_tensor(values, dtype=torch.long)
+            for task, values in aux_labels.items()
+        },
     }
 
 
 def _auxiliary_label(task, metadata, item):
-    attributes = metadata.get("attributes") if isinstance(metadata.get("attributes"), dict) else {}
+    attributes = (
+        metadata.get("attributes")
+        if isinstance(metadata.get("attributes"), dict)
+        else {}
+    )
     conditions = metadata.get("conditions") or ()
     if isinstance(conditions, str):
         conditions = (conditions,)
-    condition_labels = {str(value).strip().lower().replace("-", "_") for value in conditions}
+    condition_labels = {
+        str(value).strip().lower().replace("-", "_") for value in conditions
+    }
     condition = str(metadata.get("condition") or "").strip().lower().replace("-", "_")
     if condition:
         condition_labels.add(condition)
 
     label = None
     if task == "pose_bucket":
-        raw = str(metadata.get("pose_bucket") or metadata.get("pose") or "").strip().lower().replace("-", "_")
+        raw = (
+            str(metadata.get("pose_bucket") or metadata.get("pose") or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
         if raw in {"profile_left", "large_yaw_left", "left_profile"}:
             label = "profile_left"
         elif raw in {"profile_right", "large_yaw_right", "right_profile"}:
             label = "profile_right"
         elif raw in {"profile", "large_yaw", "1"} or attributes.get("pose"):
             label = "profile"
-        elif raw in {"frontal", "normal", "0"} or "frontal" in condition_labels or "anchor" in condition_labels:
+        elif (
+            raw in {"frontal", "normal", "0"}
+            or "frontal" in condition_labels
+            or "anchor" in condition_labels
+        ):
             label = "frontal"
     elif task == "occlusion":
         raw = metadata.get("occlusion", attributes.get("occlusion"))
         if raw is not None:
-            label = "occlusion" if bool(raw) and str(raw).lower() not in {"0", "false", "none"} else "no_occlusion"
-        elif any("occlusion" in value or "occlud" in value for value in condition_labels):
+            label = (
+                "occlusion"
+                if bool(raw) and str(raw).lower() not in {"0", "false", "none"}
+                else "no_occlusion"
+            )
+        elif any(
+            "occlusion" in value or "occlud" in value for value in condition_labels
+        ):
             label = "occlusion"
         else:
             label = "no_occlusion"
     elif task == "visibility":
         mask = item.get("landmark_mask")
         if mask is not None:
-            label = "all_visible" if bool(torch.as_tensor(mask).float().min().item() > 0.5) else "partially_visible"
+            label = (
+                "all_visible"
+                if bool(torch.as_tensor(mask).float().min().item() > 0.5)
+                else "partially_visible"
+            )
     elif task == "blur_quality":
         raw = metadata.get("blur", attributes.get("blur"))
         if raw is not None:
-            label = "blurred" if bool(raw) and str(raw).lower() not in {"0", "false", "none"} else "clear"
+            label = (
+                "blurred"
+                if bool(raw) and str(raw).lower() not in {"0", "false", "none"}
+                else "clear"
+            )
     elif task == "illumination_quality":
         raw = metadata.get("illumination", attributes.get("illumination"))
         if raw is not None:
-            label = "challenging" if bool(raw) and str(raw).lower() not in {"0", "false", "none"} else "normal"
+            label = (
+                "challenging"
+                if bool(raw) and str(raw).lower() not in {"0", "false", "none"}
+                else "normal"
+            )
     elif task == "profile_side":
-        raw = str(metadata.get("profile_side") or metadata.get("side") or "").strip().lower()
+        raw = (
+            str(metadata.get("profile_side") or metadata.get("side") or "")
+            .strip()
+            .lower()
+        )
         if raw in {"left", "right"}:
             label = raw
         elif any("left" in value for value in condition_labels):
             label = "left"
         elif any("right" in value for value in condition_labels):
             label = "right"
-        elif not any(value in condition_labels for value in ("profile", "large_yaw", "profile_pose")):
+        elif not any(
+            value in condition_labels
+            for value in ("profile", "large_yaw", "profile_pose")
+        ):
             label = "not_profile"
     elif task == "landmark_confidence":
         weight = float(item.get("sample_weight", torch.tensor(1.0)).item())
@@ -267,9 +351,13 @@ def _auxiliary_label(task, metadata, item):
 
 
 def _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
-    per_point = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(dim=2)
+    per_point = F.smooth_l1_loss(pred_loc, target, beta=beta, reduction="none").mean(
+        dim=2
+    )
     landmark_mask = landmark_mask.to(per_point.device).float()
-    per_sample = (per_point * landmark_mask).sum(dim=1) / landmark_mask.sum(dim=1).clamp_min(1.0)
+    per_sample = (per_point * landmark_mask).sum(dim=1) / landmark_mask.sum(
+        dim=1
+    ).clamp_min(1.0)
     if sample_weight is not None:
         return (per_sample * sample_weight).mean()
     return per_sample.mean()
@@ -290,24 +378,42 @@ def _schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
         sample_weight = payload["sample_weight"]
         landmark_mask = payload["landmark_mask"]
         B, C, H, W = pred_heatmap.shape
-        head_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001) * args.locw
-        pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W))
-        head_heatmap = heatmap_loss_func(
-            pred_prob,
-            heatmap,
-            batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask),
-        ) * args.hw
+        head_loc = (
+            _weighted_smooth_l1(
+                pred_loc, target, sample_weight, landmark_mask, beta=0.001
+            )
+            * args.locw
+        )
+        pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape(
+            (B, C, H, W)
+        )
+        head_heatmap = (
+            heatmap_loss_func(
+                pred_prob,
+                heatmap,
+                batch_weights=_heatmap_batch_weight(
+                    sample_weight, pred_heatmap, landmark_mask
+                ),
+            )
+            * args.hw
+        )
         loss = loss + head_loc + head_heatmap
         loss_loc = loss_loc + head_loc.detach()
         loss_heatmap = loss_heatmap + head_heatmap.detach()
 
-    if args.schema_consistency_weight > 0 and "landmarks_98" in heads and "landmarks_68" in stage_pred:
+    if (
+        args.schema_consistency_weight > 0
+        and "landmarks_98" in heads
+        and "landmarks_68" in stage_pred
+    ):
         payload = heads["landmarks_98"]
         indices = payload["indices"]
         pred_98 = stage_pred["landmarks_98"][0].index_select(0, indices)
         pred_68 = stage_pred["landmarks_68"][0].index_select(0, indices)
         projected = pred_98[:, torch.as_tensor(MAP_98_TO_68, device=pred_98.device), :]
-        loss = loss + float(args.schema_consistency_weight) * F.smooth_l1_loss(pred_68, projected.detach(), beta=0.001)
+        loss = loss + float(args.schema_consistency_weight) * F.smooth_l1_loss(
+            pred_68, projected.detach(), beta=0.001
+        )
 
     aux_outputs = stage_pred.get("_aux", {}) if isinstance(stage_pred, dict) else {}
     if args.auxiliary_loss_weight > 0 and aux_outputs:
@@ -317,7 +423,9 @@ def _schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
                 continue
             valid = labels >= 0
             if bool(valid.any()):
-                loss_aux = loss_aux + F.cross_entropy(logits[valid], labels[valid]) * float(args.auxiliary_loss_weight)
+                loss_aux = loss_aux + F.cross_entropy(
+                    logits[valid], labels[valid]
+                ) * float(args.auxiliary_loss_weight)
         loss = loss + loss_aux
 
     return loss, loss_loc, loss_heatmap, loss_aux
@@ -334,7 +442,9 @@ def _heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
     if landmark_mask is not None:
         weights = weights * landmark_mask.to(pred_heatmap.device).to(pred_heatmap.dtype)
     if sample_weight is not None:
-        weights = weights * sample_weight.to(pred_heatmap.device).to(pred_heatmap.dtype).reshape(-1, 1)
+        weights = weights * sample_weight.to(pred_heatmap.device).to(
+            pred_heatmap.dtype
+        ).reshape(-1, 1)
     return weights.reshape(pred_heatmap.shape[0], pred_heatmap.shape[1], 1, 1)
 
 
@@ -362,7 +472,10 @@ def _eval_collate(batch):
 
         grouped = {}
         for index, (item, head_name) in enumerate(zip(batch, head_names)):
-            grouped.setdefault(head_name, {"indices": [], "target": [], "landmark_mask": [], "metadata": []})
+            grouped.setdefault(
+                head_name,
+                {"indices": [], "target": [], "landmark_mask": [], "metadata": []},
+            )
             grouped[head_name]["indices"].append(index)
             grouped[head_name]["target"].append(item[1])
             grouped[head_name]["landmark_mask"].append(item[2])
@@ -498,12 +611,18 @@ def _visibility_logits_from_stage(stage_pred, head_name="landmarks_68"):
         if torch.is_tensor(value):
             return value
     head_payload = stage_pred.get(head_name)
-    if isinstance(head_payload, (list, tuple)) and len(head_payload) >= 3 and torch.is_tensor(head_payload[2]):
+    if (
+        isinstance(head_payload, (list, tuple))
+        and len(head_payload) >= 3
+        and torch.is_tensor(head_payload[2])
+    ):
         return head_payload[2]
     return None
 
 
-def _visibility_aware_records(pred_keypoints, keypoints, landmark_mask, metadata, visibility_logits=None):
+def _visibility_aware_records(
+    pred_keypoints, keypoints, landmark_mask, metadata, visibility_logits=None
+):
     pred = pred_keypoints.detach().float().cpu().numpy()
     target = keypoints.detach().float().cpu().numpy()
     mask = landmark_mask.detach().float().cpu().numpy() > 0.5
@@ -512,13 +631,17 @@ def _visibility_aware_records(pred_keypoints, keypoints, landmark_mask, metadata
         logits = visibility_logits.detach().float().cpu().numpy()
 
     records = []
-    for index, (pred_i, target_i, mask_i, meta) in enumerate(zip(pred, target, mask, metadata)):
+    for index, (pred_i, target_i, mask_i, meta) in enumerate(
+        zip(pred, target, mask, metadata)
+    ):
         meta = meta if isinstance(meta, dict) else {}
         normalizer = _normalizer_for_masked_target(target_i, mask_i)
         if normalizer is None:
             continue
         point_errors = np.full((target_i.shape[0],), np.nan, dtype=np.float32)
-        point_errors[mask_i] = np.linalg.norm(target_i[mask_i] - pred_i[mask_i], axis=1) / float(normalizer)
+        point_errors[mask_i] = np.linalg.norm(
+            target_i[mask_i] - pred_i[mask_i], axis=1
+        ) / float(normalizer)
         nme = float(np.nanmean(point_errors[mask_i]))
 
         visibility_target = _visibility_target_from_meta(meta, target_i.shape[0])
@@ -528,17 +651,31 @@ def _visibility_aware_records(pred_keypoints, keypoints, landmark_mask, metadata
 
         record = record_for_sample(meta, nme)
         record["evaluation_head"] = str(meta.get("head_name") or "")
-        record["visibility_target_source"] = str(meta.get("visibility_target_source") or "")
+        record["visibility_target_source"] = str(
+            meta.get("visibility_target_source") or ""
+        )
         record["visible_landmark_count"] = int(np.sum(visible_mask))
         record["occluded_landmark_count"] = int(np.sum(occluded_mask))
         record["visibility_label_skipped_count"] = int(np.sum(unknown_mask))
-        record["nme_visible"] = float(np.nanmean(point_errors[visible_mask])) if np.any(visible_mask) else None
-        record["nme_occluded"] = float(np.nanmean(point_errors[occluded_mask])) if np.any(occluded_mask) else None
+        record["nme_visible"] = (
+            float(np.nanmean(point_errors[visible_mask]))
+            if np.any(visible_mask)
+            else None
+        )
+        record["nme_occluded"] = (
+            float(np.nanmean(point_errors[occluded_mask]))
+            if np.any(occluded_mask)
+            else None
+        )
         record["visibility_targets"] = [
             int(value) if mask_i[pos] else -1
             for pos, value in enumerate(visibility_target.tolist())
         ]
-        if logits is not None and index < logits.shape[0] and logits.shape[1] == target_i.shape[0]:
+        if (
+            logits is not None
+            and index < logits.shape[0]
+            and logits.shape[1] == target_i.shape[0]
+        ):
             record["visibility_scores"] = [
                 float(value) if mask_i[pos] else float("nan")
                 for pos, value in enumerate(logits[index].tolist())
@@ -561,7 +698,9 @@ def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=
             stage_pred = model(data)[-1]
             for head_name, payload in batch["heads"].items():
                 indices = payload["indices"].to(device)
-                pred_keypoints, heatmap = _landmark_prediction_for_head(stage_pred, head_name)
+                pred_keypoints, heatmap = _landmark_prediction_for_head(
+                    stage_pred, head_name
+                )
                 pred_keypoints = pred_keypoints.index_select(0, indices)
                 keypoints = payload["target"].to(device)
                 landmark_mask = payload["landmark_mask"].to(device)
@@ -584,14 +723,18 @@ def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=
         keypoints = target.to(device)
         landmark_mask = landmark_mask.to(device)
         stage_pred = model(data)[-1]
-        pred_keypoints, heatmap = _landmark_prediction_for_head(stage_pred, "landmarks_68")
+        pred_keypoints, heatmap = _landmark_prediction_for_head(
+            stage_pred, "landmarks_68"
+        )
         records.extend(
             _visibility_aware_records(
                 pred_keypoints,
                 keypoints,
                 landmark_mask,
                 metadata,
-                visibility_logits=_visibility_logits_from_stage(stage_pred, "landmarks_68"),
+                visibility_logits=_visibility_logits_from_stage(
+                    stage_pred, "landmarks_68"
+                ),
             )
         )
     report = build_slice_report(records)
@@ -612,11 +755,17 @@ def _landmarks_68_prediction(stage_pred):
 def _landmark_prediction_for_head(stage_pred, head_name):
     if isinstance(stage_pred, dict):
         if head_name not in stage_pred:
-            available = ", ".join(sorted(key for key in stage_pred if not key.startswith("_")))
-            raise ValueError(f"model output does not include evaluation head '{head_name}' (available: {available})")
+            available = ", ".join(
+                sorted(key for key in stage_pred if not key.startswith("_"))
+            )
+            raise ValueError(
+                f"model output does not include evaluation head '{head_name}' (available: {available})"
+            )
         return stage_pred[head_name]
     if head_name != "landmarks_68":
-        raise ValueError(f"legacy model output can only evaluate landmarks_68, not '{head_name}'")
+        raise ValueError(
+            f"legacy model output can only evaluate landmarks_68, not '{head_name}'"
+        )
     return stage_pred
 
 
@@ -659,24 +808,71 @@ def main():
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--max_depth", type=int, default="256")
     parser.add_argument("--mul", type=float, default="1.2")
-    parser.add_argument("--lmk_num", type=int, default="68", help="landmark count for FS68Manifest")
-    parser.add_argument("--manifest", type=str, default="", help="faceswap-compatible manifest for FS68Manifest train/test")
-    parser.add_argument("--train_manifest", type=str, default="", help="faceswap-compatible train manifest for FS68Manifest")
-    parser.add_argument("--test_manifest", type=str, default="", help="faceswap-compatible test manifest for FS68Manifest")
+    parser.add_argument(
+        "--lmk_num",
+        type=int,
+        default="68",
+        help="fallback landmark count for schema-aware manifest aliases",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default="",
+        help="schema-aware landmark manifest for train/test",
+    )
+    parser.add_argument(
+        "--train_manifest",
+        type=str,
+        default="",
+        help="faceswap-compatible train manifest for FS68Manifest",
+    )
+    parser.add_argument(
+        "--test_manifest",
+        type=str,
+        default="",
+        help="faceswap-compatible test manifest for FS68Manifest",
+    )
     parser.add_argument("--eval-mode", choices=EVAL_MODES, default="random_hash")
-    parser.add_argument("--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash")
-    parser.add_argument("--respect-declared-splits", action="store_true", help="Alias for --split-policy declared.")
-    parser.add_argument("--ignore-declared-splits", action="store_true", help="Alias for --split-policy random_hash.")
+    parser.add_argument(
+        "--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash"
+    )
+    parser.add_argument(
+        "--respect-declared-splits",
+        action="store_true",
+        help="Alias for --split-policy declared.",
+    )
+    parser.add_argument(
+        "--ignore-declared-splits",
+        action="store_true",
+        help="Alias for --split-policy random_hash.",
+    )
     parser.add_argument(
         "--heldout-dataset",
         action="append",
         default=[],
         help="Dataset label to hold out. by_dataset accepts one or more; leave_one_dataset_out requires exactly one.",
     )
-    parser.add_argument("--eval-report-json", type=str, default="", help="Evaluation JSON path. Defaults to <ckpt_folder>/eval_report.json")
-    parser.add_argument("--eval-report-csv", type=str, default="", help="Optional evaluation CSV path")
-    parser.add_argument("--eval-records-jsonl", type=str, default="", help="Optional per-sample evaluation records JSONL path")
-    parser.add_argument("--eval-records-csv", type=str, default="", help="Optional per-sample evaluation records CSV path")
+    parser.add_argument(
+        "--eval-report-json",
+        type=str,
+        default="",
+        help="Evaluation JSON path. Defaults to <ckpt_folder>/eval_report.json",
+    )
+    parser.add_argument(
+        "--eval-report-csv", type=str, default="", help="Optional evaluation CSV path"
+    )
+    parser.add_argument(
+        "--eval-records-jsonl",
+        type=str,
+        default="",
+        help="Optional per-sample evaluation records JSONL path",
+    )
+    parser.add_argument(
+        "--eval-records-csv",
+        type=str,
+        default="",
+        help="Optional per-sample evaluation records CSV path",
+    )
     parser.add_argument(
         "--schema-aware-training",
         action=argparse.BooleanOptionalAction,
@@ -690,8 +886,12 @@ def main():
         default="anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
         help="Comma-separated hard bucket target weights for domain-balanced sampling.",
     )
-    parser.add_argument("--dataset-targets", default="", help="Comma-separated dataset target weights.")
-    parser.add_argument("--schema-targets", default="", help="Comma-separated schema target weights.")
+    parser.add_argument(
+        "--dataset-targets", default="", help="Comma-separated dataset target weights."
+    )
+    parser.add_argument(
+        "--schema-targets", default="", help="Comma-separated schema target weights."
+    )
     parser.add_argument(
         "--auxiliary-heads",
         action=argparse.BooleanOptionalAction,
@@ -701,10 +901,16 @@ def main():
     parser.add_argument("--auxiliary-loss-weight", type=float, default=0.1)
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
-    parser.add_argument("--find_unused_parameters", action="store_true", help="Enable only if the model forward pass can skip trainable parameters")
+    parser.add_argument(
+        "--find_unused_parameters",
+        action="store_true",
+        help="Enable only if the model forward pass can skip trainable parameters",
+    )
     args = parser.parse_args()
     if args.respect_declared_splits and args.ignore_declared_splits:
-        parser.error("pass only one of --respect-declared-splits or --ignore-declared-splits")
+        parser.error(
+            "pass only one of --respect-declared-splits or --ignore-declared-splits"
+        )
     if args.respect_declared_splits:
         args.split_policy = "declared"
     if args.ignore_declared_splits:
@@ -723,7 +929,10 @@ def main():
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         # if True:
 
-        schema_aware_training = args.data_name == FS68_DATASET_NAME and args.schema_aware_training
+        schema_aware_training = (
+            _is_schema_aware_manifest_dataset(args.data_name)
+            and args.schema_aware_training
+        )
         train_dataset = _build_dataset(
             args,
             "train",
@@ -731,7 +940,7 @@ def main():
             heatmap_size=args.heatmap_size,
             schema_aware_training=schema_aware_training,
         )
-        print('----------------------len(train_dataset)', len(train_dataset))
+        print("----------------------len(train_dataset)", len(train_dataset))
         test_dataset = _build_dataset(
             args,
             "test",
@@ -740,13 +949,19 @@ def main():
             include_metadata=True,
             schema_aware_training=schema_aware_training,
         )
-        if args.data_name == FS68_DATASET_NAME:
+        if _is_schema_aware_manifest_dataset(args.data_name):
             validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
-        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8, collate_fn=_eval_collate)
-        if args.domain_balanced_sampling and args.data_name == FS68_DATASET_NAME:
+        test_dataloader = torch.utils.data.DataLoader(
+            test_dataset, batch_size=8, collate_fn=_eval_collate
+        )
+        if args.domain_balanced_sampling and _is_schema_aware_manifest_dataset(
+            args.data_name
+        ):
             train_sampler = DomainBalancedBatchSampler(
                 train_dataset.samples,
-                bucket_targets=parse_target_spec(args.bucket_targets, DEFAULT_BUCKET_TARGETS),
+                bucket_targets=parse_target_spec(
+                    args.bucket_targets, DEFAULT_BUCKET_TARGETS
+                ),
                 dataset_targets=parse_target_spec(args.dataset_targets),
                 schema_targets=parse_target_spec(args.schema_targets),
                 batch_size=args.batch_size,
@@ -761,7 +976,9 @@ def main():
                 collate_fn=_schema_aware_collate if schema_aware_training else None,
             )
         else:
-            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+            train_sampler = torch.utils.data.distributed.DistributedSampler(
+                train_dataset
+            )
             train_dataloader = torch.utils.data.DataLoader(
                 train_dataset,
                 batch_size=args.batch_size,
@@ -772,21 +989,30 @@ def main():
         # net = NetAttnStage(
         #     args.lmk_num, Attn=lambda:SA2SA1_2(args.heatmap_size, args.max_depth), nstack=args.nstack, heatmap_size=args.heatmap_size, max_depth=args.max_depth
         # ).cuda()
-        assert args.heatmap_size==8 or args.heatmap_size==16 or args.heatmap_size==32 or args.heatmap_size==64
-        win_size=2
-        if args.heatmap_size==8:
-            backbone_net=lambda max_depth: HeadingNet([32, 64,128,128, max_depth])
-            win_size=1
-        elif args.heatmap_size==16:
-            backbone_net=lambda max_depth: HeadingNet([32, 64,128, max_depth])
-            win_size=1
-        if args.heatmap_size==32:
-            backbone_net=lambda max_depth: HeadingNet([32, 64, max_depth])
-            win_size=2
-        if args.heatmap_size==64:
-            backbone_net=lambda max_depth: HeadingNet([32,  max_depth])
-            win_size=2
-            
+        assert (
+            args.heatmap_size == 8
+            or args.heatmap_size == 16
+            or args.heatmap_size == 32
+            or args.heatmap_size == 64
+        )
+        win_size = 2
+        if args.heatmap_size == 8:
+            def backbone_net(max_depth):
+                return HeadingNet([32, 64, 128, 128, max_depth])
+            win_size = 1
+        elif args.heatmap_size == 16:
+            def backbone_net(max_depth):
+                return HeadingNet([32, 64, 128, max_depth])
+            win_size = 1
+        if args.heatmap_size == 32:
+            def backbone_net(max_depth):
+                return HeadingNet([32, 64, max_depth])
+            win_size = 2
+        if args.heatmap_size == 64:
+            def backbone_net(max_depth):
+                return HeadingNet([32, max_depth])
+            win_size = 2
+
         net = VitAttnStage(
             lmk_num=lmk_num,
             nstack=args.nstack,
@@ -800,7 +1026,9 @@ def main():
             max_depth=args.max_depth,
             backbone_net=backbone_net,
             schema_heads=DEFAULT_SCHEMA_HEADS if schema_aware_training else None,
-            auxiliary_heads={name: len(labels) for name, labels in AUXILIARY_CLASS_NAMES.items()}
+            auxiliary_heads={
+                name: len(labels) for name, labels in AUXILIARY_CLASS_NAMES.items()
+            }
             if schema_aware_training and args.auxiliary_heads
             else None,
         ).cuda()
@@ -854,7 +1082,9 @@ def main():
                 if schema_batch:
                     data, schema_heads, aux_labels = _unpack_train_batch(batch, device)
                 else:
-                    data, target, heatmap, sample_weight, landmark_mask = _unpack_train_batch(batch, device)
+                    data, target, heatmap, sample_weight, landmark_mask = (
+                        _unpack_train_batch(batch, device)
+                    )
                 loss = 0
                 loss_loc = torch.tensor(0.0, device=device)
                 loss_heatmap = torch.tensor(0.0, device=device)
@@ -864,12 +1094,14 @@ def main():
                     pred_info = net(data)
                     for i in range(len(pred_info)):
                         if schema_batch:
-                            stage_loss, stage_loc, stage_heatmap, stage_aux = _schema_head_loss(
-                                pred_info[i],
-                                schema_heads,
-                                aux_labels,
-                                heatmap_loss_func,
-                                args,
+                            stage_loss, stage_loc, stage_heatmap, stage_aux = (
+                                _schema_head_loss(
+                                    pred_info[i],
+                                    schema_heads,
+                                    aux_labels,
+                                    heatmap_loss_func,
+                                    args,
+                                )
                             )
                             loss_loc = stage_loc
                             loss_heatmap = stage_heatmap
@@ -879,27 +1111,47 @@ def main():
                             pred_loc, pred_heatmap = pred_info[i]
                             B, C, H, W = pred_heatmap.shape
                             # loss_loc = vertex_loss_func(pred_heatmap, target)
-                            loss_loc = _weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001) * args.locw
-                            pred_prob = F.softmax(pred_heatmap.reshape((B, C, -1)), dim=2).reshape((B, C, H, W))
-                            loss_heatmap = heatmap_loss_func(
-                                pred_prob,
-                                heatmap,
-                                batch_weights=_heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask),
-                            ) * args.hw  # for awing loss
+                            loss_loc = (
+                                _weighted_smooth_l1(
+                                    pred_loc,
+                                    target,
+                                    sample_weight,
+                                    landmark_mask,
+                                    beta=0.001,
+                                )
+                                * args.locw
+                            )
+                            pred_prob = F.softmax(
+                                pred_heatmap.reshape((B, C, -1)), dim=2
+                            ).reshape((B, C, H, W))
+                            loss_heatmap = (
+                                heatmap_loss_func(
+                                    pred_prob,
+                                    heatmap,
+                                    batch_weights=_heatmap_batch_weight(
+                                        sample_weight, pred_heatmap, landmark_mask
+                                    ),
+                                )
+                                * args.hw
+                            )  # for awing loss
                             # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
                             loss = loss + (loss_loc + loss_heatmap) * weights[i]
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
 
-#                 loss.backward()
-#                 optimizer.step()
+                #                 loss.backward()
+                #                 optimizer.step()
 
                 if dist.get_rank() == 0:
                     ema.update_parameters(net.module)
                 n += data.shape[0]
                 if batch_idx % 20 == 0 and dist.get_rank() == 0:
-                    mix_text = f" mix: {batch.get('mix')}" if isinstance(batch, dict) and "mix" in batch else ""
+                    mix_text = (
+                        f" mix: {batch.get('mix')}"
+                        if isinstance(batch, dict) and "mix" in batch
+                        else ""
+                    )
                     print(
                         f"train epoch {epoch} batch_idx {batch_idx} rank {dist.get_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} loss_aux: {loss_aux.item()}{mix_text}"
                     )
@@ -907,7 +1159,10 @@ def main():
             if dist.get_rank() == 0 and (epoch + 1) % args.save_n_epoch == 0:
                 if not os.path.exists(args.ckpt_folder):
                     os.mkdir(args.ckpt_folder)
-                torch.save(net.module.state_dict(), os.path.join(args.ckpt_folder, ("epoch_%d") % (epoch,)))
+                torch.save(
+                    net.module.state_dict(),
+                    os.path.join(args.ckpt_folder, ("epoch_%d") % (epoch,)),
+                )
 
             scheduler.step()
 
@@ -919,14 +1174,19 @@ def main():
                         net.module,
                         test_dataloader,
                         device,
-                        include_records=bool(args.eval_records_jsonl or args.eval_records_csv),
+                        include_records=bool(
+                            args.eval_records_jsonl or args.eval_records_csv
+                        ),
                     )
                     nme = model_report["overall"]["nme"]
                     if nme is not None and best_nme > nme:
                         best_nme = nme
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
-                        torch.save(net.module.state_dict(), os.path.join(args.ckpt_folder, "best_model"))
+                        torch.save(
+                            net.module.state_dict(),
+                            os.path.join(args.ckpt_folder, "best_model"),
+                        )
                         best_record.append((epoch, best_nme * 100))
                     _print_eval_summary("test", model_report)
                     print("BEST NME %: {}".format(best_nme * 100))
@@ -938,14 +1198,19 @@ def main():
                         best_nme = nme
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
-                        torch.save(ema.model.state_dict(), os.path.join(args.ckpt_folder, "best_model"))
+                        torch.save(
+                            ema.model.state_dict(),
+                            os.path.join(args.ckpt_folder, "best_model"),
+                        )
                         best_record.append((epoch, "ema", best_nme * 100))
                     _print_eval_summary("test ema", ema_report)
                     # print("BEST NME %: {}".format(best_nme * 100))
                     print(best_record)
                     records = _records_from_report(model_report)
                     compact_model_report = {
-                        key: value for key, value in model_report.items() if key != "records"
+                        key: value
+                        for key, value in model_report.items()
+                        if key != "records"
                     }
                     eval_payload = {
                         "epoch": epoch,
