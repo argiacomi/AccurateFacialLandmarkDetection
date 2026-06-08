@@ -265,6 +265,7 @@ def evaluate_landmark_model(
     include_records=False,
     non_blocking=False,
     build_records=True,
+    show_progress=True,
 ):
     """Evaluate landmarks with optional per-sample slice-report records.
 
@@ -278,7 +279,8 @@ def evaluate_landmark_model(
     records = []
     nme_values = []
 
-    for batch_idx, batch in enumerate(tqdm(test_dataloader)):
+    iterator = tqdm(test_dataloader) if show_progress else test_dataloader
+    for batch_idx, batch in enumerate(iterator):
         if isinstance(batch, dict) and "heads" in batch:
             data = batch["image"].to(device, non_blocking=non_blocking)
             stage_pred = model(data)[-1]

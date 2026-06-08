@@ -28,7 +28,6 @@ import torch.distributed as dist
 # from Attention import  SA2SA1_twins
 # from UNet2 import UNet
 import torch.nn.functional as F
-import torch.utils.data.distributed
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.optim.lr_scheduler import StepLR
 
@@ -41,7 +40,6 @@ from lib.landmarks.core.manifest_aliases import (
 from lib.landmarks.evaluation.split_safe import (
     EVAL_MODES,
     SPLIT_POLICIES,
-    validate_no_train_test_leakage,
     write_eval_csv,
     write_eval_json,
     write_eval_records_csv,
@@ -58,6 +56,12 @@ from lib.landmarks.training.checkpointing import (
     _torch_load_training_checkpoint,
     _write_training_complete_sentinel,
 )
+from lib.landmarks.training.eval_schedule import (
+    build_eval_schedule,
+)
+from lib.landmarks.training.loaders import (
+    build_training_loaders,
+)
 from lib.landmarks.training.data import (
     AUXILIARY_CLASS_NAMES,
     build_dataset,
@@ -65,18 +69,15 @@ from lib.landmarks.training.data import (
     schema_aware_collate,
     unpack_train_batch,
 )
-from lib.landmarks.training.domain_balanced_sampler import (
-    DEFAULT_BUCKET_TARGETS,
-    DomainBalancedBatchSampler,
-    parse_target_spec,
-)
+from lib.landmarks.training.eval_schedule import build_eval_schedule
 from lib.landmarks.training.evaluator import (
-    eval_collate,
     eval_report_json_path,
     evaluate_landmark_model,
     print_eval_summary,
     records_from_report,
+    eval_collate,
 )
+from lib.landmarks.training.loaders import build_training_loaders
 from lib.landmarks.training.losses import (
     heatmap_batch_weight,
     schema_head_loss,
@@ -137,6 +138,8 @@ _empty_epoch_timing = empty_epoch_timing
 _finalize_epoch_timing = finalize_epoch_timing
 _start_timing = start_timing
 _time_call = time_call
+_build_training_loaders = build_training_loaders
+_build_eval_schedule = build_eval_schedule
 
 
 
@@ -204,6 +207,22 @@ def main():
             "Default 1 preserves direct trainer behavior; pipeline runs "
             "override this to a larger value for throughput."
         ),
+    )
+    parser.add_argument(
+        "--eval-ema-scope",
+        choices=("same", "full-only", "final-only", "off"),
+        default="same",
+        help=(
+            "Controls when EMA evaluation runs after --eval-ema-every is due. "
+            "same preserves legacy behavior; full-only skips EMA on sampled evals; "
+            "final-only runs EMA only on the final epoch; off disables EMA eval."
+        ),
+    )
+    parser.add_argument(
+        "--eval-progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show tqdm progress bars during evaluation.",
     )
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument(
@@ -382,75 +401,20 @@ def main():
             is_schema_aware_manifest_dataset(args.data_name)
             and args.schema_aware_training
         )
-        train_dataset = build_dataset(
+        loaders = build_training_loaders(
             args,
-            "train",
-            aug=True,
-            heatmap_size=args.heatmap_size,
             schema_aware_training=schema_aware_training,
+            rank=dist.get_rank(),
+            world_size=dist.get_world_size(),
         )
+        train_dataset = loaders.train_dataset
+        test_dataset = loaders.test_dataset
+        eval_dataset = loaders.eval_dataset
+        train_sampler = loaders.train_sampler
+        train_dataloader = loaders.train_dataloader
+        test_dataloader = loaders.test_dataloader
+        full_test_dataloader = loaders.full_test_dataloader
         print("----------------------len(train_dataset)", len(train_dataset))
-        test_dataset = build_dataset(
-            args,
-            "test",
-            aug=False,
-            heatmap_size=0,
-            include_metadata=True,
-            schema_aware_training=schema_aware_training,
-        )
-        if is_schema_aware_manifest_dataset(args.data_name):
-            validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
-        eval_dataset = maybe_limit_eval_dataset(
-            test_dataset, args.eval_max_samples, args.seed
-        )
-        test_dataloader = torch.utils.data.DataLoader(
-            eval_dataset,
-            batch_size=args.eval_batch_size,
-            collate_fn=eval_collate,
-            **dataloader_kwargs(args, eval_loader=True),
-        )
-        full_test_dataloader = test_dataloader
-        if int(args.eval_max_samples or 0) > 0 and len(eval_dataset) < len(
-            test_dataset
-        ):
-            full_test_dataloader = torch.utils.data.DataLoader(
-                test_dataset,
-                batch_size=args.eval_batch_size,
-                collate_fn=eval_collate,
-                **dataloader_kwargs(args, eval_loader=True),
-            )
-        if args.domain_balanced_sampling and is_schema_aware_manifest_dataset(
-            args.data_name
-        ):
-            train_sampler = DomainBalancedBatchSampler(
-                train_dataset.samples,
-                bucket_targets=parse_target_spec(
-                    args.bucket_targets, DEFAULT_BUCKET_TARGETS
-                ),
-                dataset_targets=parse_target_spec(args.dataset_targets),
-                schema_targets=parse_target_spec(args.schema_targets),
-                batch_size=args.batch_size,
-                seed=args.seed,
-                rank=dist.get_rank(),
-                world_size=dist.get_world_size(),
-            )
-            train_dataloader = torch.utils.data.DataLoader(
-                train_dataset,
-                batch_sampler=train_sampler,
-                collate_fn=schema_aware_collate if schema_aware_training else None,
-                **dataloader_kwargs(args),
-            )
-        else:
-            train_sampler = torch.utils.data.distributed.DistributedSampler(
-                train_dataset
-            )
-            train_dataloader = torch.utils.data.DataLoader(
-                train_dataset,
-                batch_size=args.batch_size,
-                sampler=train_sampler,
-                collate_fn=schema_aware_collate if schema_aware_training else None,
-                **dataloader_kwargs(args),
-            )
         net = build_cdvit_model(
             args,
             lmk_num,
@@ -774,39 +738,29 @@ def main():
                 )
 
                 final_epoch = int(args.epoch) - 1
-                should_eval_model = should_run_interval(
-                    args.eval_every, epoch, final_epoch
+                eval_schedule = build_eval_schedule(
+                    args,
+                    epoch,
+                    final_epoch,
+                    limited_eval=eval_dataset is not test_dataset,
+                    has_ema=ema is not None,
                 )
-                run_full_eval = should_run_interval(
-                    args.full_eval_every, epoch, final_epoch
+                should_eval_model = eval_schedule.should_eval_model
+                eval_loader = (
+                    full_test_dataloader
+                    if eval_schedule.run_full_eval
+                    else test_dataloader
                 )
-                limited_eval = eval_dataset is not test_dataset
-                if (
-                    limited_eval
-                    and should_eval_model
-                    and epoch >= final_epoch
-                    and not run_full_eval
-                ):
+                eval_scope = eval_schedule.eval_scope
+                is_full_eval = eval_schedule.is_full_eval
+                should_build_eval_records = eval_schedule.should_build_records
+                if eval_schedule.forced_final_full_eval:
                     print(
                         "running full final eval so best_model and best_checkpoint are selected "
                         "from the full validation set"
                     )
-                    run_full_eval = True
-                eval_loader = full_test_dataloader if run_full_eval else test_dataloader
-                eval_scope = (
-                    "full" if (run_full_eval or not limited_eval) else "sampled"
-                )
-                is_full_eval = eval_scope == "full"
                 model_report = None
                 ema_report = None
-                should_build_eval_records = bool(
-                    args.eval_records_jsonl
-                    or args.eval_records_csv
-                    or args.eval_report_csv
-                    or should_run_interval(
-                        args.eval_slice_reports_every, epoch, final_epoch
-                    )
-                )
                 if should_eval_model and not should_build_eval_records:
                     print(
                         f"running fast overall-only eval at epoch {epoch}; "
@@ -817,7 +771,7 @@ def main():
                     eval_start_time = start_timing(
                         device=device, synchronize=args.synchronize_runtime_timing
                     )
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         model_report = evaluate_landmark_model(
                             net.module,
                             eval_loader,
@@ -827,6 +781,7 @@ def main():
                             ),
                             non_blocking=args.pin_memory,
                             build_records=should_build_eval_records,
+                            show_progress=args.eval_progress,
                         )
                     eval_seconds = elapsed_timing(
                         eval_start_time,
@@ -882,22 +837,19 @@ def main():
                         f"skipping model eval at epoch {epoch}; --eval-every={args.eval_every}"
                     )
 
-                should_eval_ema = (
-                    ema is not None
-                    and should_eval_model
-                    and should_run_interval(args.eval_ema_every, epoch, final_epoch)
-                )
+                should_eval_ema = eval_schedule.should_eval_ema
                 if should_eval_ema:
                     ema_eval_start_time = start_timing(
                         device=device, synchronize=args.synchronize_runtime_timing
                     )
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         ema_report = evaluate_landmark_model(
                             ema,
                             eval_loader,
                             device,
                             non_blocking=args.pin_memory,
                             build_records=should_build_eval_records,
+                            show_progress=args.eval_progress,
                         )
                     accumulate_timing(
                         epoch_timing,
@@ -937,9 +889,8 @@ def main():
                     print_eval_summary(f"test ema {eval_scope}", ema_report)
                     print(best_record)
                 elif ema is not None and should_eval_model:
-                    print(
-                        f"skipping EMA eval at epoch {epoch}; --eval-ema-every={args.eval_ema_every}"
-                    )
+                    reason = eval_schedule.ema_skip_reason or f"--eval-ema-every={args.eval_ema_every}"
+                    print(f"skipping EMA eval at epoch {epoch}; {reason}")
 
                 if model_report is not None:
                     records = records_from_report(model_report)

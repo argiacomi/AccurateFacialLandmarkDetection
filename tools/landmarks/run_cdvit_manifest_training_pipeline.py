@@ -774,6 +774,8 @@ def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths)
             "eval_every": int(args.eval_every),
             "full_eval_every": int(args.full_eval_every),
             "eval_ema_every": int(args.eval_ema_every),
+            "eval_ema_scope": str(args.eval_ema_scope),
+            "eval_progress": bool(args.eval_progress),
             "eval_max_samples": int(args.eval_max_samples),
             "eval_slice_reports_every": int(args.eval_slice_reports_every),
         },
@@ -1082,6 +1084,8 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
     argv.extend(["--eval-every", str(args.eval_every)])
     argv.extend(["--full-eval-every", str(args.full_eval_every)])
     argv.extend(["--eval-ema-every", str(args.eval_ema_every)])
+    argv.extend(["--eval-ema-scope", str(args.eval_ema_scope)])
+    argv.append("--eval-progress" if args.eval_progress else "--no-eval-progress")
     argv.extend(["--eval-max-samples", str(args.eval_max_samples)])
     argv.extend(["--eval-slice-reports-every", str(args.eval_slice_reports_every)])
     argv.extend(["--log-every", str(args.log_every)])
@@ -1568,6 +1572,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--full-eval-every", type=int, default=25)
     parser.add_argument("--eval-ema-every", "--eval-on-ema-every", dest="eval_ema_every", type=int, default=5)
+    parser.add_argument(
+        "--eval-ema-scope",
+        choices=("same", "full-only", "final-only", "off"),
+        default="full-only",
+        help=(
+            "When EMA eval cadence is due, run EMA eval on the same evals as the model, "
+            "full evals only, the final epoch only, or never. Pipeline default skips "
+            "EMA on sampled evals to reduce routine validation cost."
+        ),
+    )
+    parser.add_argument(
+        "--eval-progress",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Forward eval progress bars to TrainHeatmapStageFP16.py. Disabled by default for pipeline logs.",
+    )
     parser.add_argument("--eval-max-samples", type=int, default=2048)
     parser.add_argument(
         "--eval-slice-reports-every",
