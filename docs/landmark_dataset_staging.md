@@ -72,9 +72,7 @@ folders because those identifiers are preserved for leakage checks.
 | WFLW-V        | frame annotations | Google Drive file id `1YSJdgIb-vToJIAV04PGh_U7nX6dxVSjt`                                    | `python tools/landmarks/build_quality_dataset.py --dataset wflw-v --source-dir <root> --output-dir runs/landmarks/build_wflw_v --frame-stride 5`                                      |
 
 Use `tools/landmarks/download_landmark_datasets.py --list --dataset all` to
-inspect configured sources. Google Drive downloads require
-`--include-google-drive` and `gdown`; otherwise the downloader writes manual
-staging notes.
+inspect configured sources.
 
 HELEN dense and JD-landmark are annotation layers over the 300W image cache.
 HELEN expects `annotations.json` from the linked S3 source and resolves images

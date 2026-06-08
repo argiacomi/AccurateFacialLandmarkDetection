@@ -11,7 +11,6 @@
 #   PYTHON=python3
 #   DATA_ROOT=data/landmarks
 #   QUALITY_ROOT=runs/landmarks/quality_datasets
-#   INCLUDE_GOOGLE_DRIVE=1          # default: 1, needed for WFLW images/AFLW/Menpo/MultiPIE
 #   INCLUDE_300W_ALTERNATES=0       # default: 0, set 1 to also fetch official iBUG split parts
 #   CONTINUE_ON_ERROR=0             # default: 0, set 1 for partial bring-up
 #   MERL_RAV_IMAGE_MODE=absolute    # absolute|symlink|copy
@@ -32,7 +31,6 @@ set -Eeuo pipefail
 PYTHON="${PYTHON:-python3}"
 DATA_ROOT="${DATA_ROOT:-data/landmarks}"
 QUALITY_ROOT="${QUALITY_ROOT:-runs/landmarks/quality_datasets}"
-INCLUDE_GOOGLE_DRIVE="${INCLUDE_GOOGLE_DRIVE:-1}"
 INCLUDE_300W_ALTERNATES="${INCLUDE_300W_ALTERNATES:-0}"
 CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-0}"
 MERL_RAV_IMAGE_MODE="${MERL_RAV_IMAGE_MODE:-absolute}"
@@ -99,9 +97,6 @@ download_args=(
   --extract
 )
 
-if [[ "${INCLUDE_GOOGLE_DRIVE}" == "1" ]]; then
-  download_args+=(--include-google-drive)
-fi
 if [[ "${INCLUDE_300W_ALTERNATES}" == "1" ]]; then
   download_args+=(--include-alternates)
 fi

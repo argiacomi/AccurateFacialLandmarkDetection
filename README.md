@@ -65,7 +65,6 @@ python tools/landmarks/download_landmark_datasets.py \
   --output-root data/landmarks \
   --dataset all \
   --extract \
-  --include-google-drive \
   --keep-going
 ```
 

@@ -257,7 +257,6 @@ def test_jd_landmark_registry_entries_without_network(tmp_path):
     jd_assets = [s for s in downloader.SOURCES if s.dataset == "jd-landmark"]
     args = argparse.Namespace(
         output_root=data_root,
-        include_google_drive=False,
         extract=False,
         force=False,
         skip_checksum=True,
@@ -337,7 +336,6 @@ def _prepare_args(**overrides) -> argparse.Namespace:
         image_root=None,
         manifest_mode="replace",
         allow_overlap=False,
-        include_google_drive=False,
         write_overlays=False,
         audit_overlay_limit=50,
         frame_stride=1,

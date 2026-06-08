@@ -116,7 +116,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         name="WFLW images",
         filename="WFLW_images.zip",
         google_drive_file_id="1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC",
-        note="Official WFLW images. Requires --include-google-drive and gdown.",
+        note="Official WFLW images.",
     ),
     SourceAsset(
         dataset="cofw",
@@ -173,7 +173,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         google_drive_file_id="12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm",
         google_drive_view_url="https://drive.google.com/open?id=12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm",
         required_for_builder=False,
-        note="JD-landmark Test Dataset 1 (landmark/picture/rect). Requires --include-google-drive and gdown.",
+        note="JD-landmark Test Dataset 1 (landmark/picture/rect).",
     ),
     SourceAsset(
         dataset="jd-landmark",
@@ -211,7 +211,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="FFL2.zip",
         google_drive_file_id="16fiVoBaTtOevQa4mH34rWggfkNKNEL2A",
         google_drive_view_url="https://drive.google.com/file/d/16fiVoBaTtOevQa4mH34rWggfkNKNEL2A/view",
-        note="FFL2 106-point source. Requires --include-google-drive and gdown or manual download.",
+        note="FFL2 106-point source.",
     ),
     SourceAsset(
         dataset="fll3",
@@ -219,7 +219,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="FLL3.zip",
         google_drive_file_id="1F_UnmpRnUnNS3Wk3V6CkJiIUYmG5Wjdr",
         google_drive_view_url="https://drive.google.com/file/d/1F_UnmpRnUnNS3Wk3V6CkJiIUYmG5Wjdr/view",
-        note="FLL3 106-point source. Requires --include-google-drive and gdown or manual download.",
+        note="FLL3 106-point source.",
     ),
     SourceAsset(
         dataset="xm2vts",
@@ -306,7 +306,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="AFLW.zip",
         google_drive_file_id="1uSx5hTxkxm48a3No0xm26DeJKpIooqrx",
         google_drive_view_url="https://drive.google.com/file/d/1uSx5hTxkxm48a3No0xm26DeJKpIooqrx/view",
-        note="Native AFLW package used by MERL-RAV native mode. Requires --include-google-drive.",
+        note="Native AFLW package used by MERL-RAV native mode.",
     ),
     SourceAsset(
         dataset="merl-rav",
@@ -329,7 +329,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="Menpo2D.zip",
         google_drive_file_id="1CUqs0n135lye6J6RM5FQXT_DIT45dKvP",
         google_drive_view_url="https://drive.google.com/file/d/1CUqs0n135lye6J6RM5FQXT_DIT45dKvP/view",
-        note="MenpoBenchmark Menpo2D package. Requires --include-google-drive and gdown.",
+        note="MenpoBenchmark Menpo2D package.",
     ),
     SourceAsset(
         dataset="multipie",
@@ -337,7 +337,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="MultiPIE.zip",
         google_drive_file_id="18JFjBTAZqthpORmEf2LuT14IuMYNyD_h",
         google_drive_view_url="https://drive.google.com/file/d/18JFjBTAZqthpORmEf2LuT14IuMYNyD_h/view",
-        note="MenpoBenchmark MultiPIE package. Requires --include-google-drive and gdown.",
+        note="MenpoBenchmark MultiPIE package.",
     ),
 )
 
@@ -580,7 +580,7 @@ def _write_manual_steps(asset: SourceAsset, dataset_dir: Path) -> Path:
     dataset_dir.mkdir(parents=True, exist_ok=True)
     path = dataset_dir / asset.filename
     steps = asset.manual_steps or (
-        f"Install gdown and rerun with --include-google-drive, or manually download Google Drive file id {asset.google_drive_file_id}.",
+        f"Manually download Google Drive file id {asset.google_drive_file_id}.",
         f"Save it as {dataset_dir / 'archives' / asset.filename}.",
     )
     lines = [f"# {asset.name}", "", asset.note or "Manual setup required.", ""]
@@ -620,15 +620,6 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
     if asset.is_manual:
         path = _write_manual_steps(asset, dataset_dir)
         result.update(status="manual", path=str(path), checksum_status="not_applicable")
-        return result
-
-    if asset.google_drive_file_id and not args.include_google_drive:
-        path = _write_manual_steps(asset, dataset_dir)
-        result.update(
-            status="manual_google_drive",
-            path=str(path),
-            checksum_status="not_applicable",
-        )
         return result
 
     destination = archive_dir / asset.filename
@@ -833,7 +824,6 @@ def download_datasets(
     datasets: T.Sequence[str] | None,
     *,
     output_root: Path,
-    include_google_drive: bool = False,
     extract: bool = True,
     force: bool = False,
     skip_checksum: bool = False,
@@ -848,7 +838,6 @@ def download_datasets(
     sources = _selected_sources(datasets, include_alternates=include_alternates)
     args = argparse.Namespace(
         output_root=output_root,
-        include_google_drive=include_google_drive,
         extract=extract,
         force=force,
         skip_checksum=skip_checksum,
@@ -875,8 +864,9 @@ def _parser() -> argparse.ArgumentParser:
         help="One or more datasets, space- and/or comma-separated (e.g. --datasets wflw-v 300vw,cofw-original). Use 'all' for everything.",
     )
     parser.add_argument("--extract", action="store_true", help="Extract downloaded archives after download.")
-    parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
-    parser.add_argument("--include-google-drive", action="store_true", help="Download Google Drive assets with gdown when available.")
+    parser.add_argument(
+        "--force", action="store_true", help="Redownload/re-extract existing files."
+    )
     parser.add_argument("--include-alternates", action="store_true", help="Include alternate source URLs, currently the official 300W split archive parts.")
     parser.add_argument("--skip-checksum", action="store_true", help="Skip stored SHA256/SHA1 verification.")
     parser.add_argument("--keep-going", action="store_true", help="Continue after a failed download.")

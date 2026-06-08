@@ -18,7 +18,6 @@ Example::
 
     python tools/landmarks/prepare_landmark_dataset.py \
       --datasets wflw-v \
-      --include-google-drive \
       --write-overlays
 """
 
@@ -200,7 +199,6 @@ def prepare(args: argparse.Namespace) -> int:
         _, registry = downloader.download_datasets(
             download_targets,
             output_root=data_root,
-            include_google_drive=args.include_google_drive,
             extract=True,
             force=args.force,
             skip_checksum=args.skip_checksum,
@@ -311,8 +309,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image-root", default=None, help="Override image root (defaults to the 300W cache for annotation-layer datasets).")
     parser.add_argument("--manifest-mode", choices=("replace", "merge"), default="replace", help="Replace (fresh) or merge into an existing combined manifest.")
-    parser.add_argument("--allow-overlap", action="store_true", help="Keep duplicate image paths across datasets.")
-    parser.add_argument("--include-google-drive", action="store_true", help="Download Google Drive assets with gdown when available.")
+    parser.add_argument(
+        "--allow-overlap",
+        action="store_true",
+        help="Keep duplicate image paths across datasets.",
+    )
     parser.add_argument("--write-overlays", action="store_true", help="Write visual landmark overlay audit images.")
     parser.add_argument("--audit-overlay-limit", type=int, default=50)
     parser.add_argument("--frame-stride", type=int, default=1, help="Frame stride for video datasets.")
