@@ -63,6 +63,8 @@ class SourceAsset:
     alternate: bool = False
     note: str = ""
     manual_steps: tuple[str, ...] = field(default_factory=tuple)
+    alternate_filenames: tuple[str, ...] = field(default_factory=tuple)
+    shared_with: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def is_manual(self) -> bool:
@@ -116,6 +118,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         name="WFLW images",
         filename="WFLW_images.tar.gz",
         google_drive_file_id="1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC",
+        alternate_filenames=("WFLW_images.zip", "WFLW_images.tgz"),
         note="Official WFLW images.",
     ),
     SourceAsset(
@@ -124,7 +127,8 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="COFW_color.zip",
         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
         required_for_builder=False,
-        note="cofw68 color image archive. Pair with cofw6868 annotations/JSON for manifest building.",
+        shared_with=("cofw29",),
+        note="cofw68 color image archive (shared with cofw29). Pair with cofw68 annotations/JSON for manifest building.",
     ),
     SourceAsset(
         dataset="cofw68",
@@ -135,10 +139,11 @@ SOURCES: tuple[SourceAsset, ...] = (
     ),
     SourceAsset(
         dataset="cofw29",
-        name="cofw68 original color images",
+        name="cofw29 original color images",
         filename="COFW_color.zip",
         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
-        note="Original cofw68 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
+        shared_with=("cofw68",),
+        note="Original COFW 29-point color source (shared with cofw68). Preserve 29-point labels and visibility/occlusion metadata.",
     ),
     SourceAsset(
         dataset="helen",
@@ -565,10 +570,63 @@ def _write_manual_steps(asset: SourceAsset, dataset_dir: Path) -> Path:
     return path
 
 
+def _looks_like_archive(name: T.Any) -> bool:
+    lowered = str(name).lower()
+    return any(lowered.endswith(suffix) for suffix in ARCHIVE_SUFFIXES)
+
+
+def _validate_archive(path: Path) -> None:
+    """Reject files that carry an archive extension but are not valid archives."""
+    if not _looks_like_archive(path):
+        return
+    if zipfile.is_zipfile(path) or tarfile.is_tarfile(path):
+        return
+    raise ValueError(
+        f"{Path(path).name} has an archive extension but is not a valid zip/tar archive; "
+        "the source may have returned an HTML error page, login page, or download-denied response."
+    )
+
+
+def _archive_is_usable(path: Path, asset: SourceAsset) -> bool:
+    """True if an existing file can be reused (valid archive when it looks like one)."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    if _looks_like_archive(path):
+        return zipfile.is_zipfile(path) or tarfile.is_tarfile(path)
+    return True
+
+
+def _archive_candidate_names(asset: SourceAsset) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((asset.filename, *asset.alternate_filenames)))
+
+
+def _find_reusable_archive(asset: SourceAsset, output_root: Path) -> tuple[Path, str] | None:
+    """Find an existing compatible archive to reuse instead of downloading.
+
+    Checks the dataset's own archive directory (configured and alternate
+    filenames), then any datasets that share the same underlying archive.
+    Returns ``(path, status)`` with status ``"reused"`` (same dataset) or
+    ``"reused_shared"`` (a dataset listed in ``shared_with``). Invalid archives
+    (e.g. saved HTML error pages) are skipped so they are never reused.
+    """
+    output_root = Path(output_root)
+    own_dir = output_root / asset.dataset / "archives"
+    for name in _archive_candidate_names(asset):
+        candidate = own_dir / name
+        if _archive_is_usable(candidate, asset):
+            return candidate, "reused"
+    for other in asset.shared_with:
+        other_dir = output_root / other / "archives"
+        for name in _archive_candidate_names(asset):
+            candidate = other_dir / name
+            if _archive_is_usable(candidate, asset):
+                return candidate, "reused_shared"
+    return None
+
+
 def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.Any]:
     dataset_dir = Path(args.output_root) / asset.dataset
     archive_dir = dataset_dir / "archives"
-    extract_dir = dataset_dir / "extracted" / Path(asset.filename).name
     result: dict[str, T.Any] = {
         "dataset": asset.dataset,
         "name": asset.name,
@@ -595,25 +653,42 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
 
     destination = archive_dir / asset.filename
     try:
-        if asset.google_drive_file_id:
-            path = _download_google_drive(asset.google_drive_file_id, destination, force=args.force)
+        reuse = None if args.force else _find_reusable_archive(asset, args.output_root)
+        if reuse is not None:
+            path, status = reuse
+            print(f"Reusing existing archive {path} for {asset.name}")
+            result["reused_from"] = str(path)
+            checksum_status = "reused"
         else:
-            assert asset.url is not None
-            path = _download_url(asset.url, destination, force=args.force)
-        if not args.skip_checksum:
-            _verify(path, sha256=asset.sha256, sha1=asset.sha1)
-            checksum_status = "verified" if (asset.sha256 or asset.sha1) else "none"
-        else:
-            checksum_status = "skipped"
+            status = "downloaded"
+            if asset.google_drive_file_id:
+                path = _download_google_drive(asset.google_drive_file_id, destination, force=args.force)
+            else:
+                assert asset.url is not None
+                path = _download_url(asset.url, destination, force=args.force)
+            # Reject HTML error/login pages saved with an archive extension before
+            # extraction, and never leave them where a later run would reuse them.
+            try:
+                _validate_archive(path)
+            except ValueError:
+                if Path(path).exists():
+                    Path(path).unlink()
+                raise
+            if args.skip_checksum:
+                checksum_status = "skipped"
+            else:
+                _verify(path, sha256=asset.sha256, sha1=asset.sha1)
+                checksum_status = "verified" if (asset.sha256 or asset.sha1) else "none"
         result.update(
-            status="downloaded",
+            status=status,
             archive=str(path),
             sha256=_sha256_file(path),
             sha1=_sha1_file(path),
             checksum_status=checksum_status,
         )
         if args.extract and asset.extract:
-            extracted = _extract_archive(path, extract_dir, force=args.force)
+            extract_target = dataset_dir / "extracted" / Path(path).name
+            extracted = _extract_archive(path, extract_target, force=args.force)
             result["extracted"] = str(extracted)
     except Exception as err:  # noqa: BLE001
         result.update(status="error", error=str(err))
@@ -633,6 +708,7 @@ def _write_summary(results: list[dict[str, T.Any]], output_root: Path) -> Path:
 
 REGISTRY_VERSION = 1
 MANUAL_STATUSES = frozenset({"manual", "manual_google_drive"})
+REUSED_STATUSES = frozenset({"reused", "reused_shared"})
 
 
 def registry_path(output_root: Path) -> Path:
@@ -666,6 +742,8 @@ def build_registry(results: list[dict[str, T.Any]], output_root: Path) -> dict[s
                 "required_for_builder": result.get("required_for_builder"),
                 "alternate": result.get("alternate"),
                 "manual": result.get("status") in MANUAL_STATUSES,
+                "reused": result.get("status") in REUSED_STATUSES,
+                "reused_from": result.get("reused_from"),
             }
         )
     return {
@@ -712,13 +790,19 @@ def resolve_source_dir(registry: dict[str, T.Any], dataset: str, output_root: Pa
     dataset = _dataset_key(dataset)
     entry = (registry.get("datasets") or {}).get(dataset) if registry else None
     candidates: list[Path] = []
+    archive_dirs: list[Path] = []
     if entry:
         if entry.get("source_dir"):
             candidates.append(Path(entry["source_dir"]))
         for asset in entry.get("assets") or []:
             if asset.get("extracted"):
                 candidates.append(Path(asset["extracted"]))
+            if asset.get("archive"):
+                archive_dirs.append(Path(asset["archive"]).parent)
     candidates.append(_dataset_source_dir(output_root, dataset))
+    # Non-archive single-file assets (e.g. HELEN annotations.json) live in archives/.
+    candidates.extend(archive_dirs)
+    candidates.append(Path(output_root) / dataset / "archives")
     for candidate in candidates:
         if candidate.is_dir():
             return candidate

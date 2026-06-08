@@ -257,7 +257,8 @@ def test_jd_landmark_registry_entries_without_network(tmp_path, monkeypatch):
 
     def fake_download_google_drive(file_id, destination, *, force=False):
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"fake jd landmark zip")
+        with zipfile.ZipFile(destination, "w") as zf:
+            zf.writestr("placeholder.txt", "fake jd landmark content")
         return destination
 
     monkeypatch.setattr(

@@ -74,6 +74,19 @@ folders because those identifiers are preserved for leakage checks.
 Use `tools/landmarks/download_landmark_datasets.py --list --dataset all` to
 inspect configured sources.
 
+The downloader reuses existing archives before downloading. It checks the
+dataset's archive directory for the configured filename and known alternates
+(for example `WFLW_images.zip`, `WFLW_images.tar.gz`, and `WFLW_images.tgz`),
+and reuses a shared image archive across variants (`cofw68` and `cofw29` share
+`COFW_color.zip`). Use `--force` to re-download. Files saved with an archive
+extension that are not valid zip/tar archives (such as HTML error/login pages)
+are rejected before extraction and removed so later runs do not reuse them.
+The `registry.json` records whether each asset was `downloaded`, `reused`,
+`reused_shared`, or manually staged.
+
+When preparing multiple datasets, `--audit-overlay-limit` applies per dataset,
+and overlays are written under `visual_audit/overlays/<dataset>/<schema>/`.
+
 HELEN dense and JD-landmark are annotation layers over the 300W image cache.
 HELEN expects `annotations.json` from the linked S3 source and resolves images
 under `<300w-cache>/data/300w/300w/helen/{trainset,testset}`. JD-landmark

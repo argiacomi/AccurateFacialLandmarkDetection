@@ -878,6 +878,7 @@ class _OverlayTask:
     """Inputs for rendering one audit overlay in a worker."""
 
     sample_id: str
+    dataset: str
     schema: str
     image_path: Path
     landmarks_path: Path
@@ -910,15 +911,18 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
     skipped: list[dict[str, str]] = []
     schema_counts: dict[str, int] = {}
 
-    # Select up to `limit` overlay tasks deterministically, then render them in
-    # parallel (image decode/encode releases the GIL). Results stay input-ordered.
+    # Select up to `limit` overlay tasks per dataset deterministically, then render
+    # them in parallel (image decode/encode releases the GIL). Output is organized
+    # by dataset/schema and results stay input-ordered.
     tasks: list[_OverlayTask] = []
+    per_dataset_selected: dict[str, int] = {}
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
         schema = str(entry.get("target_schema") or entry.get("source_schema") or "unknown")
         schema_counts[schema] = schema_counts.get(schema, 0) + 1
-        if len(tasks) >= int(limit):
+        dataset_name = str(entry.get("dataset") or "unknown")
+        if per_dataset_selected.get(dataset_name, 0) >= int(limit):
             continue
         image_value = entry.get("image")
         landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
@@ -930,16 +934,19 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
         if visibility is None and isinstance(entry.get("metadata"), dict):
             visibility = entry["metadata"].get("visibility")
         overlay_name = _safe_id(sample_id).replace("/", "_").replace("#", "_")
+        dataset_dir = _safe_id(dataset_name).replace("/", "_").replace("#", "_")
         tasks.append(
             _OverlayTask(
                 sample_id=sample_id,
+                dataset=dataset_name,
                 schema=schema,
                 image_path=_resolve_path(image_value, base_dir=base_dir),
                 landmarks_path=_resolve_path(landmarks_value, base_dir=base_dir),
-                overlay_path=audit_dir / "overlays" / schema / f"{overlay_name}.jpg",
+                overlay_path=audit_dir / "overlays" / dataset_dir / schema / f"{overlay_name}.jpg",
                 visibility=tuple(visibility) if visibility is not None else None,
             )
         )
+        per_dataset_selected[dataset_name] = per_dataset_selected.get(dataset_name, 0) + 1
 
     for task, error in parallel_map(
         _draw_overlay_task, tasks, workers=max_workers, desc="Overlays", unit="overlay"
@@ -950,6 +957,7 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
         overlays.append(
             {
                 "sample_id": task.sample_id,
+                "dataset": task.dataset,
                 "schema": task.schema,
                 "image": str(task.image_path),
                 "landmarks": str(task.landmarks_path),
