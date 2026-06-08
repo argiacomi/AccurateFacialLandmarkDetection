@@ -214,3 +214,74 @@ def test_manifest_occluder_mask_generates_synthetic_visibility_targets(tmp_path)
     assert item["visibility_target"][0].item() == 0.0
     assert item["visibility_target"][1].item() == 1.0
     assert item["visibility_target_provenance"] == "synthetic_occluder_mask"
+
+
+def test_manifest_occluder_mask_follows_geometric_augmentation(tmp_path, monkeypatch):
+    import lib.landmarks.datasets.manifest as manifest_module
+
+    class ShiftRightAug:
+        def __call__(self, *, image, keypoints, mask=None):
+            shifted_points = np.asarray(keypoints, dtype=np.float32).copy()
+            shifted_points[:, 0] += 20.0
+
+            output = {
+                "image": image,
+                "keypoints": shifted_points,
+            }
+
+            if mask is not None:
+                shifted_mask = np.zeros_like(mask)
+                shifted_mask[:, 20:] = mask[:, :-20]
+                output["mask"] = shifted_mask
+
+            return output
+
+    monkeypatch.setattr(manifest_module, "GetAugTransform", lambda: ShiftRightAug())
+    monkeypatch.setattr(np.random, "random", lambda: 1.0)
+
+    image = np.full((256, 256, 3), 127, dtype=np.uint8)
+    image_path = tmp_path / "image.jpg"
+    cv2.imwrite(str(image_path), image)
+
+    points = np.zeros((68, 2), dtype=np.float32)
+    points[:, 0] = np.linspace(40, 220, 68)
+    points[:, 1] = np.linspace(40, 220, 68)
+    points[0] = [10, 10]
+    points_path = tmp_path / "points.npy"
+    np.save(points_path, points)
+
+    mask = np.zeros((256, 256), dtype=np.uint8)
+    mask[8:13, 8:13] = 255
+    mask_path = tmp_path / "mask.png"
+    cv2.imwrite(str(mask_path), mask)
+
+    manifest = {
+        "samples": [
+            {
+                "sample_id": "sample",
+                "dataset": "w300",
+                "split": "train",
+                "image": str(image_path),
+                "landmarks": str(points_path),
+                "source_schema": "2d_68",
+                "synthetic_occluder_mask": str(mask_path),
+            }
+        ]
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    dataset = LandmarkDataset(
+        manifest_path=str(manifest_path),
+        split="train",
+        preload=False,
+        aug=True,
+        heatmap_size=8,
+        schema_aware_training=True,
+    )
+
+    item = dataset[0]
+
+    assert item["target"][0, 0].item() == pytest.approx(30.0 / 255.0)
+    assert item["visibility_target"][0].item() == 0.0
+    assert item["visibility_target_provenance"] == "synthetic_occluder_mask"

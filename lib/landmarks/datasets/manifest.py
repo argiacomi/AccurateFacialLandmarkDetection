@@ -874,33 +874,37 @@ class LandmarkDataset(Dataset):
             img = img.copy()
             lmk = lmk.copy()
             landmark_mask = landmark_mask.copy()
+        synthetic_occluder_mask = None
         if visibility_target is None and sample.get("synthetic_visibility_occluder_mask"):
-            occluder_mask = cv2.imread(
+            synthetic_occluder_mask = cv2.imread(
                 sample["synthetic_visibility_occluder_mask"],
                 cv2.IMREAD_GRAYSCALE,
             )
-            if occluder_mask is not None:
-                if occluder_mask.shape[:2] != img.shape[:2]:
-                    occluder_mask = cv2.resize(
-                        occluder_mask,
-                        (img.shape[1], img.shape[0]),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
-                visibility_target = synthetic_visibility_from_occluder_mask(
-                    lmk,
-                    occluder_mask,
-                    valid_mask=landmark_mask,
-                )
-                visibility_target_source = "synthetic_occluder_mask"
-                visibility_target_weight = np.ones(
-                    (int(visibility_target.shape[0]),),
-                    dtype=np.float32,
+            if synthetic_occluder_mask is not None and synthetic_occluder_mask.shape[:2] != img.shape[:2]:
+                synthetic_occluder_mask = cv2.resize(
+                    synthetic_occluder_mask,
+                    (img.shape[1], img.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
                 )
 
         if self.aug_transform is not None:
-            transformed = self.aug_transform(image=img, keypoints=lmk)
+            if synthetic_occluder_mask is None:
+                transformed = self.aug_transform(image=img, keypoints=lmk)
+            else:
+                try:
+                    transformed = self.aug_transform(
+                        image=img,
+                        keypoints=lmk,
+                        mask=synthetic_occluder_mask,
+                    )
+                except TypeError:
+                    transformed = self.aug_transform(image=img, keypoints=lmk)
+                    synthetic_occluder_mask = None
+
             img = transformed["image"]
             lmk = np.array(transformed["keypoints"], dtype=np.float32)
+            if synthetic_occluder_mask is not None:
+                synthetic_occluder_mask = transformed.get("mask", synthetic_occluder_mask)
 
             if np.random.random() < 0.5:
                 if self.schema_aware_training:
@@ -919,6 +923,18 @@ class LandmarkDataset(Dataset):
                     if visibility_target_weight is not None:
                         visibility_target_weight = np.asarray(visibility_target_weight)[flip_index]
                     lmk[:, 0] = 255 - lmk[:, 0]
+
+        if visibility_target is None and synthetic_occluder_mask is not None:
+            visibility_target = synthetic_visibility_from_occluder_mask(
+                lmk,
+                synthetic_occluder_mask,
+                valid_mask=landmark_mask,
+            )
+            visibility_target_source = "synthetic_occluder_mask"
+            visibility_target_weight = np.ones(
+                (int(visibility_target.shape[0]),),
+                dtype=np.float32,
+            )
 
         img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
         img = self.transform(img)
