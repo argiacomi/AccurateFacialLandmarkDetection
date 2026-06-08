@@ -135,6 +135,25 @@ def _coerce_optional_int(value):
     except (TypeError, ValueError):
         raise ValueError(f"invalid landmark_count value: {value!r}")
 
+
+def _schemas_share_trainable_head_and_count(left_schema, right_schema):
+    """Return True when two canonical schemas are shape/head-compatible.
+
+    Semantic profile schemas such as ``multipie_profile_39`` and the generic
+    inferred ``2d_39`` are both valid for the same loaded (39, 2) array and map
+    to the same trainable ``profile39`` head. This helper keeps that aliasing
+    narrow: both schemas must have the same point count and trainable head.
+    """
+    if left_schema == right_schema:
+        return True
+    try:
+        return (
+            point_count_for_schema(left_schema) == point_count_for_schema(right_schema)
+            and head_name_for_schema(left_schema) == head_name_for_schema(right_schema)
+        )
+    except ValueError:
+        return False
+
 class ManifestContractError(ValueError):
     """Raised when a manifest entry violates the declared training contract."""
 
@@ -414,7 +433,14 @@ class LandmarkDataset(Dataset):
 
                 if raw_schema and declared_schema != detected_schema:
                     has_explicit_target = raw_target_schema not in (None, "")
-                    if not (has_explicit_target and target_schema == detected_schema):
+                    source_schema_matches_loaded_points = _schemas_share_trainable_head_and_count(
+                        declared_schema,
+                        detected_schema,
+                    )
+                    if (
+                        not source_schema_matches_loaded_points
+                        and not (has_explicit_target and target_schema == detected_schema)
+                    ):
                         raise ManifestContractError(
                             "manifest source_schema does not match loaded landmark array "
                             "and no explicit matching target_schema was provided: "

@@ -221,10 +221,12 @@ Visible/occluded landmark metrics are emitted when per-point visibility targets 
 
 ### Training runtime controls
 
+`FS68Manifest` remains a backward-compatible alias for the schema-aware manifest loader. New docs should describe the manifest path as schema-aware or multi-schema.
+
 The pipeline forwards runtime flags to `TrainHeatmapStageFP16.py` so long runs can be resumed and profiled safely:
 
 - Data loading: `--preload 0`, `--pin-memory`, `--persistent-workers`, and `--prefetch-factor`.
 - Evaluation cadence: `--eval-every`, `--full-eval-every`, `--eval-ema-every`, and `--eval-max-samples`.
 - Checkpoints: `last_checkpoint.pt`, `best_checkpoint.pt`, metadata sidecars, manifest/config compatibility checks, and optional `--restore-rng`.
-- Metrics: `runtime_metrics.jsonl` records epoch throughput, CUDA memory, data wait, transfer, forward/backward/update, eval, checkpoint, and total epoch timing where available.
+- Metrics: `runtime_metrics.jsonl` records epoch throughput, CUDA memory, data wait, device transfer, forward/loss, backward, optimizer step, scaler update, eval, EMA eval, checkpoint, aggregate compute, unattributed, and total epoch timing. CUDA transfer/compute/eval sections use CUDA event timing by default through `--synchronize-runtime-timing`; pass `--no-synchronize-runtime-timing` for low-overhead CPU wall-clock timing. Checkpoint timing includes periodic, legacy, best, EMA-best, and last-checkpoint writes.
 

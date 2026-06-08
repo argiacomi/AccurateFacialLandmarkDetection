@@ -34,6 +34,11 @@ from lib.landmarks.core.manifest_aliases import (
 )
 
 from lib.landmarks.manifest.validator import validate_training_manifest
+from lib.landmarks.training.checkpoint_compat import (
+    build_pipeline_training_compat_config,
+    checkpoint_compat_errors_for_config,
+    training_compat_digest_from_config,
+)
 
 
 TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
@@ -358,97 +363,24 @@ def _pipeline_effective_training_manifest_for_compat(
 
 
 def _pipeline_training_compat_config(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
-    """Mirror TrainHeatmapStageFP16._training_compat_config for auto-resume.
+    """Build the trainer checkpoint contract for a pipeline invocation.
 
-    The pipeline appends --train-arg values after generated arguments, so
-    train_arg overrides are treated as effective trainer values here.
+    Contract keys and override semantics live in
+    lib.landmarks.training.checkpoint_compat so the trainer and pipeline do not
+    drift.
     """
-
-    def int_opt(default: int, *names: str) -> int:
-        return int(_pipeline_train_arg_option(args, *names, default=default))
-
-    def float_opt(default: float, *names: str) -> float:
-        return float(_pipeline_train_arg_option(args, *names, default=default))
-
-    def str_opt(default: str, *names: str) -> str:
-        return str(_pipeline_train_arg_option(args, *names, default=default))
-
-    data_name = str_opt(str(args.train_data_name), "--data_name", "--data-name")
-    split_policy = str_opt("declared_or_random_hash", "--split-policy")
-    if _pipeline_train_bool_arg(args, "--respect-declared-splits", default=False):
-        split_policy = "declared"
-    if _pipeline_train_bool_arg(args, "--ignore-declared-splits", default=False):
-        split_policy = "random_hash"
-
-    return {
-        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_training_manifest_for_compat(args, paths))),
-        "train_manifest_sha256": _safe_sha256_file(
-            Path(_pipeline_train_arg_option(args, "--train_manifest", "--train-manifest", default=""))
-        ),
-        "test_manifest_sha256": _safe_sha256_file(
-            Path(_pipeline_train_arg_option(args, "--test_manifest", "--test-manifest", default=""))
-        ),
-        "batch_size": int_opt(int(args.batch_size), "--batch_size", "--batch-size"),
-        "heatmap_size": int_opt(int(args.heatmap_size), "--heatmap_size", "--heatmap-size"),
-        "lmk_num": int_opt(int(args.lmk_num), "--lmk_num", "--lmk-num"),
-        "sched_step": int_opt(200, "--sched_step", "--sched-step"),
-        "nstack": int_opt(8, "--nstack"),
-        "max_depth": int_opt(256, "--max_depth", "--max-depth"),
-        "seed": int_opt(0, "--seed"),
-        "lr": float_opt(float(args.lr), "--lr"),
-        "hw": float_opt(10.0, "--hw"),
-        "locw": float_opt(1.0, "--locw"),
-        "mul": float_opt(1.2, "--mul"),
-        "schema_consistency_weight": float_opt(
-            0.05,
-            "--schema-consistency-weight",
-            "--schema_consistency_weight",
-        ),
-        "auxiliary_loss_weight": float_opt(
-            0.1,
-            "--auxiliary-loss-weight",
-            "--auxiliary_loss_weight",
-        ),
-        "schema_aware_training": _pipeline_train_bool_arg(
-            args,
-            "--schema-aware-training",
-            "--no-schema-aware-training",
-            default=True,
-        ),
-        "domain_balanced_sampling": _pipeline_train_bool_arg(
-            args,
-            "--domain-balanced-sampling",
-            default=False,
-        ),
-        "auxiliary_heads": _pipeline_train_bool_arg(
-            args,
-            "--auxiliary-heads",
-            "--no-auxiliary-heads",
-            default=True,
-        ),
-        "data_name": data_name,
-        "eval_mode": str_opt("random_hash", "--eval-mode"),
-        "split_policy": split_policy,
-        "bucket_targets": str_opt(
-            "anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
-            "--bucket-targets",
-        ),
-        "dataset_targets": str_opt("", "--dataset-targets"),
-        "schema_targets": str_opt("", "--schema-targets"),
-        "heldout_dataset": [
-            str(item)
-            for item in _pipeline_train_arg_values(args, "--heldout-dataset")
-        ],
-    }
-
+    return build_pipeline_training_compat_config(
+        args,
+        paths,
+        train_arg_option=_pipeline_train_arg_option,
+        train_bool_arg=_pipeline_train_bool_arg,
+        train_arg_values=_pipeline_train_arg_values,
+        effective_training_manifest_for_compat=_pipeline_effective_training_manifest_for_compat,
+        safe_sha256_file=_safe_sha256_file,
+    )
 
 def _pipeline_training_compat_digest(args: argparse.Namespace, paths: PipelinePaths) -> str:
-    payload = json.dumps(
-        _pipeline_training_compat_config(args, paths),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return training_compat_digest_from_config(_pipeline_training_compat_config(args, paths))
 
 
 def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
@@ -473,6 +405,7 @@ def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths)
             "persistent_workers": bool(args.persistent_workers),
             "prefetch_factor": int(args.prefetch_factor),
             "log_every": int(args.log_every),
+            "synchronize_runtime_timing": bool(args.synchronize_runtime_timing),
         },
         "eval": {
             "eval_batch_size": int(args.eval_batch_size),
@@ -606,50 +539,32 @@ def _checkpoint_matches_pipeline_request(
         return False, "checkpoint manifest SHA differs from the current manifest"
 
     expected_config = _pipeline_training_compat_config(args, paths)
-    checkpoint_config = payload.get("compat_config")
-    if isinstance(checkpoint_config, dict):
-        comparable_checkpoint = {
-            key: checkpoint_config.get(key)
-            for key in expected_config
-        }
-        if comparable_checkpoint != expected_config:
-            return False, "checkpoint training contract differs from the current pipeline request"
-        return True, "compatible"
-
-    checkpoint_digest = payload.get("compat_config_digest")
-    if checkpoint_digest:
-        if checkpoint_digest != _pipeline_training_compat_digest(args, paths):
-            return False, "checkpoint training contract digest differs from the current pipeline request"
-        return True, "compatible"
-
-    checkpoint_args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-    checks = {
-        "data_name": str(args.train_data_name),
-        "batch_size": int(args.batch_size),
-        "heatmap_size": int(args.heatmap_size),
-        "lmk_num": int(args.lmk_num),
-        "lr": float(args.lr),
-        "schema_aware_training": True,
-        "auxiliary_heads": True,
-    }
-    for key, expected in checks.items():
-        if key not in checkpoint_args:
-            continue
-        actual = checkpoint_args[key]
-        try:
-            if isinstance(expected, bool):
-                matches = bool(actual) == expected
-            elif isinstance(expected, int):
-                matches = int(actual) == expected
-            elif isinstance(expected, float):
-                matches = float(actual) == expected
-            else:
-                matches = str(actual) == str(expected)
-        except (TypeError, ValueError):
-            matches = False
-        if not matches:
-            return False, f"checkpoint arg {key!r} differs: checkpoint={actual!r}, current={expected!r}"
-
+    compat_errors = checkpoint_compat_errors_for_config(
+        payload,
+        expected_config,
+        current_manifest_sha=current_manifest_sha,
+        fallback_expected_args={
+            "data_name": str(args.train_data_name),
+            "batch_size": int(args.batch_size),
+            "heatmap_size": int(args.heatmap_size),
+            "lmk_num": int(args.lmk_num),
+            "lr": float(args.lr),
+            "schema_aware_training": True,
+            "domain_balanced_sampling": _pipeline_train_bool_arg(
+                args,
+                "--domain-balanced-sampling",
+                default=False,
+            ),
+            "auxiliary_heads": _pipeline_train_bool_arg(
+                args,
+                "--auxiliary-heads",
+                "--no-auxiliary-heads",
+                default=True,
+            ),
+        },
+    )
+    if compat_errors:
+        return False, "; ".join(compat_errors)
     return True, "compatible"
 
 
@@ -838,6 +753,10 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
         else paths.run_root / "runtime_metrics.jsonl"
     )
     argv.extend(["--runtime-metrics-jsonl", str(runtime_metrics_jsonl)])
+    if args.synchronize_runtime_timing:
+        argv.append("--synchronize-runtime-timing")
+    else:
+        argv.append("--no-synchronize-runtime-timing")
     return _append_extra(argv, args.train_arg or [])
 
 
@@ -1206,6 +1125,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-ema-every", "--eval-on-ema-every", dest="eval_ema_every", type=int, default=1)
     parser.add_argument("--eval-max-samples", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=20)
+    parser.add_argument(
+        "--synchronize-runtime-timing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Forward CUDA event timing around transfer/compute/eval sections. "
+            "Pass --no-synchronize-runtime-timing for low-overhead CPU wall-clock timing."
+        ),
+    )
     parser.add_argument(
         "--save-last-checkpoint",
         action=argparse.BooleanOptionalAction,

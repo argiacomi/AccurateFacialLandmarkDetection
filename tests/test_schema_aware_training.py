@@ -94,7 +94,7 @@ def test_fs68_legacy_loader_skips_profile39(tmp_path):
             schema_aware_training=False,
         )
     except ValueError as err:
-        assert "no 68-point samples found" in str(err)
+        assert "no trainable schema-aware samples found" in str(err)
     else:
         raise AssertionError("legacy loader should skip profile39 samples")
 

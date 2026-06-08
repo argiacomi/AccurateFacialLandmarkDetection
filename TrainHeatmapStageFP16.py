@@ -1,6 +1,4 @@
 import argparse
-import hashlib
-import json
 import os
 from pathlib import Path
 import torch
@@ -51,6 +49,50 @@ from lib.landmarks.training.domain_balanced_sampler import (
     DomainBalancedBatchSampler,
     parse_target_spec,
 )
+from lib.landmarks.training.runtime import (
+    dataloader_kwargs as _dataloader_kwargs,
+    maybe_limit_eval_dataset as _maybe_limit_eval_dataset,
+    normalize_runtime_args as _normalize_runtime_args,
+    seed_worker as _seed_worker,
+    set_dataset_runtime_epoch as _set_dataset_runtime_epoch,
+    should_run_interval as _should_run_interval,
+)
+from lib.landmarks.training.profiling import (
+    accumulate_timing as _accumulate_timing,
+    append_runtime_metrics as _append_runtime_metrics,
+    cuda_peak_memory_mb as _cuda_peak_memory_mb,
+    elapsed_timing as _elapsed_timing,
+    empty_epoch_timing as _empty_epoch_timing,
+    finalize_epoch_timing as _finalize_epoch_timing,
+    runtime_metrics_path as _runtime_metrics_path,
+    start_timing as _start_timing,
+    time_call as _time_call,
+)
+from lib.landmarks.training.checkpoint_compat import (
+    build_training_compat_config_from_args as _training_compat_config,
+    checkpoint_compat_errors_from_args as _checkpoint_compat_errors,
+    file_sha256_or_none as _file_sha256_or_none,
+    normalize_path_for_compat as _normalize_path_for_compat,
+    training_compat_digest_from_args as _training_compat_digest,
+    training_manifest_path_for_compat as _training_manifest_path_for_compat,
+)
+from lib.landmarks.training.checkpointing import (
+    _checkpoint_metadata_path,
+    _checkpoint_metadata_payload,
+    _checkpoint_rng_state_for_payload,
+    _collect_rng_state_by_rank,
+    _current_rank_string,
+    _json_safe_checkpoint_value,
+    _local_rng_state_for_checkpoint,
+    _model_state,
+    _restore_training_checkpoint,
+    _rng_state_for_current_rank,
+    _save_training_checkpoint,
+    _set_checkpoint_rng_state_by_rank,
+    _torch_load_training_checkpoint,
+    _write_checkpoint_metadata,
+    _write_training_complete_sentinel,
+)
 
 
 # from torch.cuda.amp import autocast as autocast
@@ -65,501 +107,10 @@ def _is_schema_aware_manifest_dataset(data_name):
     return is_schema_aware_manifest_dataset(data_name)
 
 
-# PR3 training runtime helpers.
-def _dataloader_kwargs(args, *, eval_loader=False):
-    workers = int(args.eval_num_workers if eval_loader else args.num_workers)
-    kwargs = {
-        "num_workers": workers,
-        "pin_memory": bool(args.pin_memory),
-    }
-    if workers > 0:
-        kwargs["persistent_workers"] = bool(args.persistent_workers)
-        kwargs["worker_init_fn"] = _seed_worker
-        if args.prefetch_factor is not None and int(args.prefetch_factor) > 0:
-            kwargs["prefetch_factor"] = int(args.prefetch_factor)
-    return kwargs
+# Runtime, profiling, and checkpoint-compat helpers live in lib.landmarks.training.*.
 
 
-def _maybe_limit_eval_dataset(dataset, max_samples, seed=0):
-    max_samples = int(max_samples or 0)
-    if max_samples <= 0 or len(dataset) <= max_samples:
-        return dataset
-    rng = random.Random(int(seed))
-    indices = list(range(len(dataset)))
-    rng.shuffle(indices)
-    return torch.utils.data.Subset(dataset, sorted(indices[:max_samples]))
-
-
-def _should_run_interval(interval, epoch, final_epoch):
-    interval = int(interval or 0)
-    if interval <= 0:
-        return False
-    if int(epoch) >= int(final_epoch):
-        return True
-    return (int(epoch) + 1) % interval == 0
-
-
-def _cuda_peak_memory_mb(device):
-    if not torch.cuda.is_available():
-        return None
-    try:
-        return round(torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0), 3)
-    except Exception:
-        return None
-
-
-def _runtime_metrics_path(args):
-    if args.runtime_metrics_jsonl:
-        return Path(args.runtime_metrics_jsonl)
-    return Path(args.ckpt_folder) / "runtime_metrics.jsonl"
-
-
-def _append_runtime_metrics(args, payload):
-    path = _runtime_metrics_path(args)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True) + "\n")
-
-
-def _empty_epoch_timing():
-    return {
-        "data_wait_seconds": 0.0,
-        "device_transfer_seconds": 0.0,
-        "forward_backward_update_seconds": 0.0,
-        "eval_seconds": 0.0,
-        "ema_eval_seconds": 0.0,
-        "checkpoint_seconds": 0.0,
-    }
-
-
-def _accumulate_timing(timing, key, started_at):
-    timing[key] = float(timing.get(key, 0.0)) + (time.time() - started_at)
-
-
-
-def _normalize_path_for_compat(value):
-    if value in (None, ""):
-        return ""
-    try:
-        return str(Path(value).expanduser().resolve())
-    except OSError:
-        return str(Path(value).expanduser())
-
-
-def _file_sha256_or_none(value):
-    if value in (None, ""):
-        return None
-    path = Path(value)
-    if not path.is_file():
-        return None
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _training_manifest_path_for_compat(args):
-    return args.train_manifest or args.manifest or args.root_folder
-
-
-def _coerce_config_scalar(value):
-    if isinstance(value, Path):
-        return _normalize_path_for_compat(value)
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_coerce_config_scalar(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _coerce_config_scalar(val) for key, val in sorted(value.items())}
-    return str(value)
-
-
-def _training_compat_config(args):
-    int_keys = {
-        "batch_size",
-        "heatmap_size",
-        "lmk_num",
-        "sched_step",
-        "nstack",
-        "max_depth",
-        "seed",
-    }
-    float_keys = {
-        "lr",
-        "hw",
-        "locw",
-        "mul",
-        "schema_consistency_weight",
-        "auxiliary_loss_weight",
-    }
-    bool_keys = {
-        "schema_aware_training",
-        "domain_balanced_sampling",
-        "auxiliary_heads",
-    }
-    string_keys = {
-        "data_name",
-        "eval_mode",
-        "split_policy",
-        "bucket_targets",
-        "dataset_targets",
-        "schema_targets",
-    }
-
-    config = {
-        "manifest_sha256": _file_sha256_or_none(_training_manifest_path_for_compat(args)),
-        "train_manifest_sha256": _file_sha256_or_none(getattr(args, "train_manifest", "")),
-        "test_manifest_sha256": _file_sha256_or_none(getattr(args, "test_manifest", "")),
-    }
-
-    for key in sorted(int_keys):
-        try:
-            config[key] = int(getattr(args, key))
-        except (TypeError, ValueError):
-            config[key] = getattr(args, key, None)
-    for key in sorted(float_keys):
-        try:
-            config[key] = float(getattr(args, key))
-        except (TypeError, ValueError):
-            config[key] = getattr(args, key, None)
-    for key in sorted(bool_keys):
-        config[key] = bool(getattr(args, key, False))
-    for key in sorted(string_keys):
-        config[key] = str(getattr(args, key, ""))
-
-    config["heldout_dataset"] = [
-        str(item) for item in list(getattr(args, "heldout_dataset", []) or [])
-    ]
-    return config
-
-
-def _training_compat_digest(args):
-    payload = json.dumps(
-        _training_compat_config(args),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _checkpoint_compat_errors(checkpoint, args):
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "cdvit-training-checkpoint-v1":
-        return []
-
-    errors = []
-    expected_config = _training_compat_config(args)
-    actual_config = checkpoint.get("compat_config")
-    if isinstance(actual_config, dict):
-        comparable_actual = {key: actual_config.get(key) for key in expected_config}
-        if comparable_actual != expected_config:
-            errors.append("checkpoint data/model training contract differs from the current invocation")
-    else:
-        actual_digest = checkpoint.get("compat_config_digest")
-        if actual_digest:
-            if actual_digest != _training_compat_digest(args):
-                errors.append("checkpoint data/model training contract digest differs from the current invocation")
-        else:
-            # Fallback for PR3 checkpoints produced before compat_config existed.
-            saved_args = checkpoint.get("args") if isinstance(checkpoint.get("args"), dict) else {}
-            critical_keys = {
-                "data_name": str(args.data_name),
-                "batch_size": int(args.batch_size),
-                "heatmap_size": int(args.heatmap_size),
-                "lmk_num": int(args.lmk_num),
-                "lr": float(args.lr),
-                "schema_aware_training": bool(args.schema_aware_training),
-                "domain_balanced_sampling": bool(args.domain_balanced_sampling),
-                "auxiliary_heads": bool(args.auxiliary_heads),
-            }
-            for key, expected in critical_keys.items():
-                if key not in saved_args:
-                    continue
-                actual = saved_args[key]
-                try:
-                    if isinstance(expected, bool):
-                        matches = bool(actual) == expected
-                    elif isinstance(expected, int):
-                        matches = int(actual) == expected
-                    elif isinstance(expected, float):
-                        matches = float(actual) == expected
-                    else:
-                        matches = str(actual) == str(expected)
-                except (TypeError, ValueError):
-                    matches = False
-                if not matches:
-                    errors.append(
-                        f"checkpoint arg {key!r} differs: checkpoint={actual!r}, current={expected!r}"
-                    )
-
-    current_manifest_sha = _file_sha256_or_none(_training_manifest_path_for_compat(args))
-    checkpoint_manifest_sha = checkpoint.get("manifest_sha256")
-    if current_manifest_sha and checkpoint_manifest_sha and current_manifest_sha != checkpoint_manifest_sha:
-        errors.append("checkpoint manifest SHA differs from the current manifest")
-
-    return errors
-
-
-def _set_dataset_runtime_epoch(dataset, epoch, args):
-    rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-    targets = [dataset]
-    if hasattr(dataset, "dataset"):
-        targets.append(dataset.dataset)
-    for target in targets:
-        try:
-            setattr(target, "runtime_epoch", int(epoch))
-            setattr(target, "runtime_base_seed", int(args.seed))
-            setattr(target, "runtime_rank", int(rank))
-        except Exception:
-            pass
-
-
-def _seed_worker(worker_id):
-    info = torch.utils.data.get_worker_info()
-    dataset = info.dataset if info is not None else None
-    base_seed = int(getattr(dataset, "runtime_base_seed", 0))
-    epoch = int(getattr(dataset, "runtime_epoch", 0))
-    rank = int(getattr(dataset, "runtime_rank", 0))
-    seed = (base_seed + epoch * 1_000_003 + rank * 10_007 + int(worker_id)) % (2**32)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-
-
-
-def _normalize_runtime_args(args):
-    if args.restore_rng and args.persistent_workers:
-        print(
-            "warning: --restore-rng requires epoch-reseeded training workers; "
-            "forcing --no-persistent-workers for checkpoint-compatible replay",
-            flush=True,
-        )
-        args.persistent_workers = False
-    return args
-
-
-_CHECKPOINT_RNG_STATE_BY_RANK = None
-
-
-def _current_rank_string():
-    if dist.is_available() and dist.is_initialized():
-        return str(dist.get_rank())
-    return "0"
-
-
-def _local_rng_state_for_checkpoint():
-    return {
-        "torch": torch.get_rng_state(),
-        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        "numpy": np.random.get_state(),
-        "python": random.getstate(),
-    }
-
-
-def _collect_rng_state_by_rank():
-    local_payload = {
-        "rank": _current_rank_string(),
-        "rng": _local_rng_state_for_checkpoint(),
-    }
-    if dist.is_available() and dist.is_initialized():
-        gathered = [None for _ in range(dist.get_world_size())]
-        dist.all_gather_object(gathered, local_payload)
-        return {
-            str(item["rank"]): item["rng"]
-            for item in gathered
-            if isinstance(item, dict) and "rank" in item and "rng" in item
-        }
-    return {local_payload["rank"]: local_payload["rng"]}
-
-
-def _set_checkpoint_rng_state_by_rank(rng_state_by_rank):
-    global _CHECKPOINT_RNG_STATE_BY_RANK
-    _CHECKPOINT_RNG_STATE_BY_RANK = rng_state_by_rank
-
-
-def _checkpoint_rng_state_for_payload():
-    if _CHECKPOINT_RNG_STATE_BY_RANK:
-        return _CHECKPOINT_RNG_STATE_BY_RANK
-    return {_current_rank_string(): _local_rng_state_for_checkpoint()}
-
-
-def _rng_state_for_current_rank(checkpoint):
-    rng_by_rank = checkpoint.get("rng_by_rank")
-    if isinstance(rng_by_rank, dict):
-        rank_key = _current_rank_string()
-        if rank_key in rng_by_rank:
-            return rng_by_rank[rank_key]
-        print(
-            f"warning: checkpoint has rank-keyed RNG but no RNG state for rank {rank_key}; "
-            "skipping RNG restore on this rank",
-            flush=True,
-        )
-        return None
-
-    legacy_rng = checkpoint.get("rng")
-    if legacy_rng:
-        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-            print(
-                "warning: checkpoint has legacy rank-0 RNG only; skipping RNG restore "
-                "for distributed resume. Use a rank-keyed PR3 checkpoint for exact DDP replay.",
-                flush=True,
-            )
-            return None
-        return legacy_rng
-    return None
-
-
-def _write_training_complete_sentinel(args, epoch, best_nme, best_record, global_train_samples):
-    path = Path(args.ckpt_folder) / "training_complete.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "status": "complete",
-        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "epoch": int(epoch),
-        "requested_epochs": int(args.epoch),
-        "best_nme": best_nme,
-        "best_record": list(best_record),
-        "global_train_samples_last_epoch": int(global_train_samples),
-        "manifest": _normalize_path_for_compat(_training_manifest_path_for_compat(args)),
-        "manifest_sha256": _file_sha256_or_none(_training_manifest_path_for_compat(args)),
-        "compat_config": _training_compat_config(args),
-        "compat_config_digest": _training_compat_digest(args),
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-
-def _torch_load_training_checkpoint(path, device):
-    """Load trusted local CD-ViT training checkpoints.
-
-    Full training checkpoints include optimizer, scheduler, scaler, EMA, RNG,
-    and argparse state, so they are intentionally not weights-only payloads.
-    """
-    try:
-        return torch.load(path, map_location=device, weights_only=False)
-    except TypeError:
-        # Older PyTorch releases do not accept weights_only.
-        return torch.load(path, map_location=device)
-
-
-def _checkpoint_metadata_path(path):
-    return Path(str(Path(path)) + ".meta.json")
-
-
-def _json_safe_checkpoint_value(value):
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_json_safe_checkpoint_value(item) for item in value]
-    if isinstance(value, dict):
-        return {
-            str(key): _json_safe_checkpoint_value(val)
-            for key, val in sorted(value.items(), key=lambda item: str(item[0]))
-        }
-    return str(value)
-
-
-def _checkpoint_metadata_payload(payload):
-    heavy_keys = {
-        "model",
-        "optimizer",
-        "scheduler",
-        "scaler",
-        "ema",
-        "rng",
-        "rng_by_rank",
-    }
-    metadata = {
-        key: value
-        for key, value in payload.items()
-        if key not in heavy_keys
-    }
-    metadata["has_model"] = "model" in payload
-    metadata["has_optimizer"] = payload.get("optimizer") is not None
-    metadata["has_scheduler"] = payload.get("scheduler") is not None
-    metadata["has_scaler"] = payload.get("scaler") is not None
-    metadata["has_ema"] = payload.get("ema") is not None
-    metadata["has_rng_by_rank"] = payload.get("rng_by_rank") is not None
-    return _json_safe_checkpoint_value(metadata)
-
-
-def _write_checkpoint_metadata(path, payload):
-    meta_path = _checkpoint_metadata_path(path)
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(
-        json.dumps(_checkpoint_metadata_payload(payload), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _model_state(net):
-    model = net.module if hasattr(net, "module") else net
-    return model.state_dict()
-
-
-def _save_training_checkpoint(path, net, optimizer, scheduler, scaler, ema, epoch, best_nme, best_record, args):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "format": "cdvit-training-checkpoint-v1",
-        "epoch": int(epoch),
-        "next_epoch": int(epoch) + 1,
-        "model": _model_state(net),
-        "optimizer": optimizer.state_dict() if optimizer is not None else None,
-        "scheduler": scheduler.state_dict() if scheduler is not None else None,
-        "scaler": scaler.state_dict() if scaler is not None else None,
-        "best_nme": best_nme,
-        "best_record": list(best_record),
-        "args": vars(args),
-        "manifest": _normalize_path_for_compat(_training_manifest_path_for_compat(args)),
-        "manifest_sha256": _file_sha256_or_none(_training_manifest_path_for_compat(args)),
-        "compat_config": _training_compat_config(args),
-        "compat_config_digest": _training_compat_digest(args),
-        "rng_schema": "rank-keyed-v1",
-        "rng_by_rank": _checkpoint_rng_state_for_payload(),
-    }
-    if ema is not None:
-        payload["ema"] = ema.model.state_dict()
-        payload["ema_n_iter"] = int(getattr(ema, "n_iter", 0))
-    torch.save(payload, path)
-    _write_checkpoint_metadata(path, payload)
-
-
-def _restore_training_checkpoint(checkpoint, optimizer, scheduler, scaler, ema, best_nme, best_record, args):
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "cdvit-training-checkpoint-v1":
-        return 0, best_nme, best_record
-
-    if checkpoint.get("optimizer") is not None:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-    if checkpoint.get("scheduler") is not None:
-        scheduler.load_state_dict(checkpoint["scheduler"])
-    if checkpoint.get("scaler") is not None:
-        scaler.load_state_dict(checkpoint["scaler"])
-    if ema is not None and checkpoint.get("ema") is not None:
-        ema.model.load_state_dict(checkpoint["ema"])
-        ema.n_iter = int(checkpoint.get("ema_n_iter", getattr(ema, "n_iter", 0)))
-
-    if args.restore_rng:
-        rng = _rng_state_for_current_rank(checkpoint)
-        if rng is not None:
-            try:
-                if rng.get("torch") is not None:
-                    torch.set_rng_state(rng["torch"].cpu())
-                if torch.cuda.is_available() and rng.get("cuda") is not None:
-                    torch.cuda.set_rng_state_all(rng["cuda"])
-                if rng.get("numpy") is not None:
-                    np.random.set_state(rng["numpy"])
-                if rng.get("python") is not None:
-                    random.setstate(rng["python"])
-            except Exception as err:
-                print(f"warning: failed to restore RNG state from checkpoint: {err}", flush=True)
-
-    start_epoch = int(checkpoint.get("next_epoch", int(checkpoint.get("epoch", -1)) + 1))
-    best_nme = checkpoint.get("best_nme", best_nme)
-    best_record = checkpoint.get("best_record", best_record)
-    return start_epoch, best_nme, best_record
+# Checkpoint save/load/RNG helpers live in lib.landmarks.training.checkpointing.
 
 
 AUXILIARY_CLASS_NAMES = {
@@ -1457,6 +1008,15 @@ def main():
         help="Enable optional pose/quality/visibility auxiliary heads for schema-aware manifest training.",
     )
     parser.add_argument("--auxiliary-loss-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--synchronize-runtime-timing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Synchronize CUDA around timed transfer/compute/eval sections for more accurate profiling. "
+            "Pass --no-synchronize-runtime-timing for low-overhead CPU wall-clock timing."
+        ),
+    )
     parser.add_argument("--data_name", type=str, default="WFLW")
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument(
@@ -1709,7 +1269,7 @@ def main():
                     _accumulate_timing(epoch_timing, "data_wait_seconds", batch_fetch_start_time)
                 optimizer.zero_grad(set_to_none=True)
                 schema_batch = isinstance(batch, dict)
-                transfer_start_time = time.time()
+                transfer_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
                 if schema_batch:
                     data, schema_heads, aux_labels = _unpack_train_batch(batch, device, non_blocking=args.pin_memory)
                 else:
@@ -1717,8 +1277,8 @@ def main():
                         _unpack_train_batch(batch, device, non_blocking=args.pin_memory)
                     )
                 if dist.get_rank() == 0:
-                    _accumulate_timing(epoch_timing, "device_transfer_seconds", transfer_start_time)
-                compute_start_time = time.time()
+                    _accumulate_timing(epoch_timing, "device_transfer_seconds", transfer_start_time, device=device, synchronize=args.synchronize_runtime_timing)
+                forward_loss_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
                 loss = 0
                 loss_loc = torch.tensor(0.0, device=device)
                 loss_heatmap = torch.tensor(0.0, device=device)
@@ -1770,11 +1330,47 @@ def main():
                             )  # for awing loss
                             # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
                             loss = loss + (loss_loc + loss_heatmap) * weights[i]
+                if dist.get_rank() == 0:
+                    _accumulate_timing(
+                        epoch_timing,
+                        "forward_loss_seconds",
+                        forward_loss_start_time,
+                        device=device,
+                        synchronize=args.synchronize_runtime_timing,
+                    )
+
+                backward_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
                 scaler.scale(loss).backward()
+                if dist.get_rank() == 0:
+                    _accumulate_timing(
+                        epoch_timing,
+                        "backward_seconds",
+                        backward_start_time,
+                        device=device,
+                        synchronize=args.synchronize_runtime_timing,
+                    )
+
+                optimizer_step_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
                 scaler.step(optimizer)
+                if dist.get_rank() == 0:
+                    _accumulate_timing(
+                        epoch_timing,
+                        "optimizer_step_seconds",
+                        optimizer_step_start_time,
+                        device=device,
+                        synchronize=args.synchronize_runtime_timing,
+                    )
+
+                scaler_update_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
                 scaler.update()
                 if dist.get_rank() == 0:
-                    _accumulate_timing(epoch_timing, "forward_backward_update_seconds", compute_start_time)
+                    _accumulate_timing(
+                        epoch_timing,
+                        "scaler_update_seconds",
+                        scaler_update_start_time,
+                        device=device,
+                        synchronize=args.synchronize_runtime_timing,
+                    )
 
                 #                 loss.backward()
                 #                 optimizer.step()
@@ -1801,7 +1397,10 @@ def main():
             ):
                 if not os.path.exists(args.ckpt_folder):
                     os.mkdir(args.ckpt_folder)
-                torch.save(
+                _time_call(
+                    epoch_timing,
+                    "checkpoint_seconds",
+                    torch.save,
                     net.module.state_dict(),
                     os.path.join(args.ckpt_folder, ("epoch_%d") % (epoch,)),
                 )
@@ -1822,7 +1421,10 @@ def main():
 
             if dist.get_rank() == 0:
                 if args.save_n_epoch > 0 and (epoch + 1) % args.save_n_epoch == 0:
-                    _save_training_checkpoint(
+                    _time_call(
+                        epoch_timing,
+                        "checkpoint_seconds",
+                        _save_training_checkpoint,
                         Path(args.ckpt_folder) / f"checkpoint_epoch_{epoch:04d}.pt",
                         net,
                         optimizer,
@@ -1872,7 +1474,7 @@ def main():
                 ema_report = None
 
                 if should_eval_model:
-                    eval_start_time = time.time()
+                    eval_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
                     with torch.no_grad():
                         model_report = _evaluate_landmark_model(
                             net.module,
@@ -1883,7 +1485,7 @@ def main():
                             ),
                             non_blocking=args.pin_memory,
                         )
-                    eval_seconds = time.time() - eval_start_time
+                    eval_seconds = _elapsed_timing(eval_start_time, device=device, synchronize=args.synchronize_runtime_timing)
                     epoch_timing["eval_seconds"] = float(epoch_timing.get("eval_seconds", 0.0)) + eval_seconds
                     nme = model_report["overall"]["nme"]
                     if is_full_eval and nme is not None and best_nme > nme:
@@ -1891,11 +1493,17 @@ def main():
                         best_record.append((epoch, best_nme * 100))
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
-                        torch.save(
+                        _time_call(
+                            epoch_timing,
+                            "checkpoint_seconds",
+                            torch.save,
                             net.module.state_dict(),
                             os.path.join(args.ckpt_folder, "best_model"),
                         )
-                        _save_training_checkpoint(
+                        _time_call(
+                            epoch_timing,
+                            "checkpoint_seconds",
+                            _save_training_checkpoint,
                             Path(args.ckpt_folder) / "best_checkpoint.pt",
                             net,
                             optimizer,
@@ -1927,7 +1535,7 @@ def main():
                     and _should_run_interval(args.eval_ema_every, epoch, final_epoch)
                 )
                 if should_eval_ema:
-                    ema_eval_start_time = time.time()
+                    ema_eval_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
                     with torch.no_grad():
                         ema_report = _evaluate_landmark_model(
                             ema,
@@ -1935,10 +1543,12 @@ def main():
                             device,
                             non_blocking=args.pin_memory,
                         )
-                    epoch_timing["ema_eval_seconds"] = (
-                        float(epoch_timing.get("ema_eval_seconds", 0.0))
-                        + time.time()
-                        - ema_eval_start_time
+                    _accumulate_timing(
+                        epoch_timing,
+                        "ema_eval_seconds",
+                        ema_eval_start_time,
+                        device=device,
+                        synchronize=args.synchronize_runtime_timing,
                     )
                     nme = ema_report["overall"]["nme"]
                     if is_full_eval and nme is not None and best_nme > nme:
@@ -1946,11 +1556,17 @@ def main():
                         best_record.append((epoch, "ema", best_nme * 100))
                         if not os.path.exists(args.ckpt_folder):
                             os.mkdir(args.ckpt_folder)
-                        torch.save(
+                        _time_call(
+                            epoch_timing,
+                            "checkpoint_seconds",
+                            torch.save,
                             ema.model.state_dict(),
                             os.path.join(args.ckpt_folder, "best_model"),
                         )
-                        _save_training_checkpoint(
+                        _time_call(
+                            epoch_timing,
+                            "checkpoint_seconds",
+                            _save_training_checkpoint,
                             Path(args.ckpt_folder) / "best_checkpoint.pt",
                             net,
                             optimizer,
@@ -1992,8 +1608,10 @@ def main():
                         write_eval_records_csv(args.eval_records_csv, records)
                 # Save last checkpoint after eval so best_nme and best_record are current.
                 if args.save_last_checkpoint:
-                    checkpoint_start_time = time.time()
-                    _save_training_checkpoint(
+                    _time_call(
+                        epoch_timing,
+                        "checkpoint_seconds",
+                        _save_training_checkpoint,
                         Path(args.ckpt_folder) / "last_checkpoint.pt",
                         net,
                         optimizer,
@@ -2005,28 +1623,10 @@ def main():
                         best_record,
                         args,
                     )
-                    epoch_timing["checkpoint_seconds"] = (
-                        float(epoch_timing.get("checkpoint_seconds", 0.0))
-                        + time.time()
-                        - checkpoint_start_time
-                    )
 
-                final_epoch_timing = dict(epoch_timing)
-                final_epoch_timing["epoch_wall_seconds"] = time.time() - epoch_start_time
-                final_epoch_timing["unattributed_seconds"] = max(
-                    0.0,
-                    final_epoch_timing["epoch_wall_seconds"]
-                    - sum(
-                        float(final_epoch_timing.get(key, 0.0))
-                        for key in (
-                            "data_wait_seconds",
-                            "device_transfer_seconds",
-                            "forward_backward_update_seconds",
-                            "eval_seconds",
-                            "ema_eval_seconds",
-                            "checkpoint_seconds",
-                        )
-                    ),
+                final_epoch_timing = _finalize_epoch_timing(
+                    epoch_timing,
+                    epoch_wall_seconds=time.time() - epoch_start_time,
                 )
                 _append_runtime_metrics(
                     args,
