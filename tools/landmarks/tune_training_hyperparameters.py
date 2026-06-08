@@ -42,6 +42,11 @@ import subprocess
 import sys
 import typing as T
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lib.landmarks.io_utils import read_json
 
 DEFAULT_STAR_BRACKET = [0.0, 0.005, 0.01, 0.02, 0.05]
 DEFAULT_LR_SWEEP = [3e-5, 5e-5, 1e-4, 2e-4, 3e-4]
@@ -89,10 +94,6 @@ def _write_json(path: Path, payload: T.Any) -> None:
         json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n",
         encoding="utf-8",
     )
-
-
-def _read_json(path: Path) -> T.Any:
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _split_csv_floats(raw: str, default: list[float]) -> list[float]:
@@ -430,7 +431,7 @@ def _loss_search_plan_path(args: argparse.Namespace) -> Path:
 def _load_loss_search_plan(args: argparse.Namespace) -> dict[str, T.Any]:
     path = _loss_search_plan_path(args)
     if path.exists():
-        return _read_json(path)
+        return read_json(path)
     return {
         "study_name": args.optuna_study_name,
         "storage": optuna_storage_url(args),
@@ -576,7 +577,7 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
         print("SKIP", run["id"], "training did not write metrics", metrics_path)
         return None
 
-    raw_metrics = _read_json(metrics_path)
+    raw_metrics = read_json(metrics_path)
     metrics = normalize_metrics(raw_metrics)
     score, diagnostics = objective_score(
         metrics,

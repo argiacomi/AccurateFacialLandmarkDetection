@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -23,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.landmarks.datasets.progress import track
+from lib.landmarks.io_utils import sha1_file, sha256_file
 
 CHUNK_SIZE = 1024 * 1024
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
@@ -336,7 +336,6 @@ def _dataset_key(value: str) -> str:
         "wflw": "wflw",
         "cofw68": "cofw68",
         "cofw29": "cofw29",
-        "cofw29": "cofw29",
         "helen": "helen",
         "lapa": "lapa",
         "jd": "jd-landmark",
@@ -397,29 +396,13 @@ def _selected_sources(
     ]
 
 
-def _hash_file(path: Path, algorithm: str) -> str:
-    digest = hashlib.new(algorithm)
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    return _hash_file(path, "sha256")
-
-
-def _sha1_file(path: Path) -> str:
-    return _hash_file(path, "sha1")
-
-
 def _verify(path: Path, *, sha256: str | None, sha1: str | None) -> None:
     if sha256 is not None:
-        actual = _sha256_file(path)
+        actual = sha256_file(path)
         if actual.lower() != sha256.lower():
             raise ValueError(f"sha256 mismatch for {path}: expected {sha256}, got {actual}")
     if sha1 is not None:
-        actual = _sha1_file(path)
+        actual = sha1_file(path)
         if actual.lower() != sha1.lower():
             raise ValueError(f"sha1 mismatch for {path}: expected {sha1}, got {actual}")
 
@@ -488,20 +471,12 @@ def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> P
     return destination
 
 
-def _is_relative_to(path: Path, base: Path) -> bool:
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return False
-    return True
-
-
 def _extract_zip(path: Path, destination: Path) -> None:
     with zipfile.ZipFile(path, "r") as zf:
         members = zf.infolist()
         for member in members:
             target = (destination / member.filename).resolve()
-            if not _is_relative_to(target, destination.resolve()):
+            if not target.is_relative_to(destination.resolve()):
                 raise ValueError(f"blocked zip path traversal member: {member.filename}")
         for member in track(members, desc=f"Extract {path.name}", total=len(members), unit="file"):
             zf.extract(member, destination)
@@ -514,7 +489,7 @@ def _extract_tar(path: Path, destination: Path) -> None:
             if member.issym() or member.islnk():
                 raise ValueError(f"blocked tar link member: {member.name}")
             target = (destination / member.name).resolve()
-            if not _is_relative_to(target, destination.resolve()):
+            if not target.is_relative_to(destination.resolve()):
                 raise ValueError(f"blocked tar path traversal member: {member.name}")
         extract_kwargs: dict[str, str] = {"filter": "data"}
         for member in track(members, desc=f"Extract {path.name}", total=len(members), unit="file"):
@@ -530,7 +505,7 @@ def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
     if not any(str(path).lower().endswith(suffix) for suffix in ARCHIVE_SUFFIXES):
         return destination
     marker = destination / ".extracted_from.json"
-    marker_payload = {"archive": path.name, "size": path.stat().st_size, "sha256": _sha256_file(path)}
+    marker_payload = {"archive": path.name, "size": path.stat().st_size, "sha256": sha256_file(path)}
     if destination.is_dir() and marker.is_file() and not force:
         try:
             if json.loads(marker.read_text(encoding="utf-8")) == marker_payload:
@@ -682,8 +657,8 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
         result.update(
             status=status,
             archive=str(path),
-            sha256=_sha256_file(path),
-            sha1=_sha1_file(path),
+            sha256=sha256_file(path),
+            sha1=sha1_file(path),
             checksum_status=checksum_status,
         )
         if args.extract and asset.extract:

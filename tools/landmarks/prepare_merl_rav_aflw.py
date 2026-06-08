@@ -44,6 +44,12 @@ from pathlib import Path
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lib.landmarks.io_utils import relative_or_absolute, safe_id, write_json
+
 logger = logging.getLogger(__name__)
 
 AFLW_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
@@ -88,39 +94,6 @@ class PrepStats:
             "aflw_image_count": self.aflw_image_count,
             "visibility_counts": dict(self.visibility_counts),
         }
-
-
-def _jsonable(value: T.Any) -> T.Any:
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    return value
-
-
-def _write_json(path: Path, payload: T.Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _safe_id(value: T.Any) -> str:
-    text = str(value or "sample").strip().replace("\\", "/").strip("/") or "sample"
-    return "".join(ch if ch.isalnum() or ch in "._-/#" else "_" for ch in text)
-
-
-def _relative_or_absolute(path: Path, base: Path) -> str:
-    try:
-        return path.resolve().relative_to(base.resolve()).as_posix()
-    except ValueError:
-        return str(path.resolve())
 
 
 def _labels_from_path(path: Path) -> tuple[str, ...]:
@@ -294,17 +267,17 @@ def _materialize_image(image_path: Path, output_dir: Path, aflw_root: Path, *, m
     target = output_dir / "images" / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        return _relative_or_absolute(target, output_dir)
+        return relative_or_absolute(target, output_dir)
 
     if mode == "copy":
         shutil.copy2(image_path, target)
         stats.copied_images += 1
-        return _relative_or_absolute(target, output_dir)
+        return relative_or_absolute(target, output_dir)
 
     if mode == "symlink":
         os.symlink(image_path.resolve(), target)
         stats.symlinked_images += 1
-        return _relative_or_absolute(target, output_dir)
+        return relative_or_absolute(target, output_dir)
 
     raise ValueError(f"unsupported --image-mode {mode!r}")
 
@@ -387,7 +360,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
             condition_labels = tuple(dict.fromkeys((*condition_labels, "occlusion")))
 
         sample_base_id = relative_annotation.with_suffix("").as_posix().replace("/", "_")
-        sample_id = _safe_id(f"{sample_base_id}__{image_path.stem}")
+        sample_id = safe_id(f"{sample_base_id}__{image_path.stem}")
         landmark_rel = Path("landmarks") / f"{sample_id}.npy"
         _write_landmarks(output_dir / landmark_rel, points)
         image_value = _materialize_image(image_path, output_dir, aflw_root, mode=args.image_mode, stats=stats)
@@ -403,7 +376,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
 
         metadata: dict[str, T.Any] = {
             "annotation_file": relative_annotation.as_posix(),
-            "image_id": _relative_or_absolute(image_path, aflw_root),
+            "image_id": relative_or_absolute(image_path, aflw_root),
             "aflw_image_source": "aflw_native",
             "visibility": visibility_labels,
             "self_occluded_count": sum(1 for value in visibility_labels if value == "self_occluded"),
@@ -442,7 +415,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
         stats.written += 1
 
     manifest_path = output_dir / "manifest.json"
-    _write_json(
+    write_json(
         manifest_path,
         {
             "version": 1,
@@ -462,7 +435,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
     audit = stats.to_json()
     audit["skipped_examples"] = skipped_examples[:100]
     audit_path = output_dir / "prepare_audit.json"
-    _write_json(audit_path, audit)
+    write_json(audit_path, audit)
     return manifest_path, {"audit": audit_path, **audit}
 
 

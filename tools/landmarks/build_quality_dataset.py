@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import json
 import logging
 import re
 import sys
@@ -53,6 +52,7 @@ from lib.landmarks.datasets.parallel import parallel_map
 from lib.landmarks.datasets.progress import track
 from lib.landmarks.datasets.sources import extract_archive_to_temp
 from lib.landmarks.datasets.video_frames import extract_video_frames, video_files
+from lib.landmarks.io_utils import read_json, relative_or_absolute, safe_id, write_json
 from lib.landmarks.manifest.contract import (
     TRAINING_MANIFEST_CONTRACT,
     TRAINING_MANIFEST_VERSION,
@@ -115,7 +115,6 @@ def _dataset(value: str) -> str:
         "cofw68": "cofw68",
         "cofw29": "cofw29",
         "cofw29-29": "cofw29",
-        "cofw29": "cofw29",
         "cofw29-color": "cofw29",
         "helen": "helen",
         "lapa": "lapa",
@@ -143,43 +142,6 @@ def _parse_csv(value: str | None) -> tuple[str, ...] | None:
         return None
     parsed = tuple(_label(item) for item in value.split(",") if item.strip())
     return parsed or None
-
-
-def _safe_id(value: T.Any) -> str:
-    text = str(value or "sample").strip().replace("\\", "/").strip("/") or "sample"
-    return "".join(ch if ch.isalnum() or ch in "._-/#" else "_" for ch in text)
-
-
-def _relative_or_absolute(path: Path, base: Path) -> str:
-    try:
-        return path.resolve().relative_to(base.resolve()).as_posix()
-    except ValueError:
-        return str(path.resolve())
-
-
-def _jsonable(value: T.Any) -> T.Any:
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    return value
-
-
-def _read_json(path: Path) -> T.Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json(path: Path, payload: T.Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _resolve_path(value: T.Any, *, base_dir: Path) -> Path:
@@ -366,7 +328,7 @@ def _load_points(value: T.Any, *, base_dir: Path, source_schema: str | None = No
         points, detected_schema = _load_landmark_file(path)
         return points, source_schema or detected_schema
     if path.suffix.lower() == ".json":
-        return _canonical_points(_read_json(path), source_schema=source_schema)
+        return _canonical_points(read_json(path), source_schema=source_schema)
     raise ValueError(f"unsupported landmark input: {value!r}")
 
 
@@ -486,7 +448,7 @@ def _crop_image_and_remap_points(
 
 
 def _write_crop_image(output_dir: Path, dataset: str, sample_id: str, crop_rgb: np.ndarray) -> Path:
-    safe = _safe_id(sample_id).replace("#", "_").replace("/", "_")
+    safe = safe_id(sample_id).replace("#", "_").replace("/", "_")
     out = output_dir / "images" / dataset / f"{safe}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
@@ -659,7 +621,7 @@ def _split_from_entry_or_identity(
 
 
 def _save_landmarks(output_dir: Path, sample_id: str, points68: np.ndarray) -> Path:
-    safe = _safe_id(sample_id).replace("#", "_")
+    safe = safe_id(sample_id).replace("#", "_")
     path = output_dir / "landmarks" / f"{safe}.npy"
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(path, points68.astype(np.float32))
@@ -681,7 +643,7 @@ def _sample(
     visibility: T.Any = None,
     normalizer: T.Any = None,
 ) -> dict[str, T.Any]:
-    sample_id = _safe_id(sample_id)
+    sample_id = safe_id(sample_id)
     source_schema = canonicalize_schema(source_schema)
     target_schema = source_schema
     head_name = head_name_for_schema(target_schema)
@@ -721,7 +683,7 @@ def _sample(
         "condition": _label(condition),
         "conditions": tuple(_label(item) for item in conditions),
         "image": str(image.resolve()),
-        "landmarks": _relative_or_absolute(landmarks, output_dir),
+        "landmarks": relative_or_absolute(landmarks, output_dir),
         "source_schema": source_schema,
         "target_schema": target_schema,
         "landmark_count": int(points68.shape[0]),
@@ -802,7 +764,7 @@ def _write_manifest(
     manifest_path = output_dir / "manifest.json"
     merged: list[dict[str, T.Any]] = []
     if mode == "merge" and manifest_path.is_file():
-        payload = _read_json(manifest_path)
+        payload = read_json(manifest_path)
         merged = [dict(item) for item in payload.get("samples", []) if isinstance(item, dict)]
     seen = {str(item.get("image")) for item in merged}
     for sample in samples:
@@ -828,9 +790,9 @@ def _write_manifest(
         **summary,
         "samples": merged,
     }
-    _write_json(manifest_path, payload)
+    write_json(manifest_path, payload)
 
-    _write_json(
+    write_json(
         output_dir / "dataset_audit.json",
         {
             "manifest": str(manifest_path),
@@ -901,7 +863,7 @@ def _draw_overlay_task(task: _OverlayTask) -> tuple[_OverlayTask, str | None]:
 
 
 def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 50, max_workers: int = 1) -> Path:
-    payload = _read_json(manifest_path)
+    payload = read_json(manifest_path)
     entries = payload.get("samples", [])
     if not isinstance(entries, list):
         raise ValueError(f"manifest {manifest_path} must contain samples list for visual audit")
@@ -933,8 +895,8 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
         visibility = entry.get("visibility")
         if visibility is None and isinstance(entry.get("metadata"), dict):
             visibility = entry["metadata"].get("visibility")
-        overlay_name = _safe_id(sample_id).replace("/", "_").replace("#", "_")
-        dataset_dir = _safe_id(dataset_name).replace("/", "_").replace("#", "_")
+        overlay_name = safe_id(sample_id).replace("/", "_").replace("#", "_")
+        dataset_dir = safe_id(dataset_name).replace("/", "_").replace("#", "_")
         tasks.append(
             _OverlayTask(
                 sample_id=sample_id,
@@ -974,7 +936,7 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
         "skipped_examples": skipped[:50],
     }
     report_path = audit_dir / "visual_audit.json"
-    _write_json(report_path, report)
+    write_json(report_path, report)
     return report_path
 
 
@@ -984,7 +946,7 @@ def _json_source(root: Path) -> Path | None:
         if not path.is_file() or path.name == "dataset_audit.json":
             continue
         try:
-            payload = _read_json(path)
+            payload = read_json(path)
         except Exception:
             continue
         if isinstance(payload, list) or (
@@ -1006,7 +968,7 @@ def _build_json(
     allow_overlap: bool,
     image_root: str | None,
 ) -> Path:
-    payload = _read_json(path)
+    payload = read_json(path)
     entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
     if not isinstance(entries, list):
         raise ValueError(f"JSON source must contain list, entries, or samples list: {path}")
@@ -1693,7 +1655,7 @@ def _build_expected_schema_json(
     allow_overlap: bool,
     image_root: str | None,
 ) -> Path:
-    payload = _read_json(path)
+    payload = read_json(path)
     entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
     if not isinstance(entries, list):
         raise ValueError(f"{parser_name} JSON source must contain list, entries, or samples list: {path}")
@@ -1799,7 +1761,7 @@ def _build_helen(
             image_root=image_root,
         )
 
-    payload = _read_json(annotations)
+    payload = read_json(annotations)
     if not isinstance(payload, list):
         raise ValueError(f"HELEN annotations.json must contain a list: {annotations}")
 
@@ -2441,7 +2403,7 @@ def _build_subject_session_dataset(
             allow_overlap=allow_overlap,
             image_root=image_root,
         )
-        payload = _read_json(manifest)
+        payload = read_json(manifest)
         for sample in payload.get("samples", []):
             if not isinstance(sample, dict):
                 continue
@@ -2449,7 +2411,7 @@ def _build_subject_session_dataset(
             if isinstance(metadata, dict):
                 metadata.setdefault("dataset_parser", f"{dataset}_menpo_style")
                 metadata.setdefault("parser_type", "dataset_specific")
-        _write_json(manifest, payload)
+        write_json(manifest, payload)
         return manifest
 
     image_base = Path(image_root) if image_root else root
@@ -2622,7 +2584,7 @@ def _write_cofw68_original_image(
         output_dir
         / "images"
         / "cofw29"
-        / f"{_safe_id(sample_id).replace('/', '_')}.png"
+        / f"{safe_id(sample_id).replace('/', '_')}.png"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(image)
@@ -4056,7 +4018,7 @@ def _build_cofw68_json_cropped(
     allow_overlap: bool,
     image_root: str | None,
 ) -> Path:
-    payload = _read_json(path)
+    payload = read_json(path)
     entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
     if not isinstance(entries, list):
         raise ValueError(

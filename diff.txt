@@ -1,215 +1,863 @@
-diff --git a/lib/landmarks/datasets/sources.py b/lib/landmarks/datasets/sources.py
-index 23484b3..fb74d7a 100644
---- a/lib/landmarks/datasets/sources.py
-+++ b/lib/landmarks/datasets/sources.py
-@@ -28,7 +28,7 @@ IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+diff --git a/diff.txt b/diff.txt
+index eb2340d..e69de29 100644
+--- a/diff.txt
++++ b/diff.txt
+@@ -1,215 +0,0 @@
+-diff --git a/lib/landmarks/datasets/sources.py b/lib/landmarks/datasets/sources.py
+-index 23484b3..fb74d7a 100644
+---- a/lib/landmarks/datasets/sources.py
+-+++ b/lib/landmarks/datasets/sources.py
+-@@ -28,7 +28,7 @@ IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+- 
+- WFLW_ANNOTATIONS_URL = "https://wywu.github.io/projects/LAB/support/WFLW_annotations.tar.gz"
+- WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID = "1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC"
+--cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/cofw68_color.zip"
+-+cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/COFW_color.zip"
+- MERL_RAV_LABELS_URL = "https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip"
+- AFLW2000_3D_URL = "http://www.cbsr.ia.ac.cn/users/xiangyuzhu/projects/3DDFA/Database/AFLW2000-3D.zip"
+- AFLW2000_3D_SHA256 = "252bc35274d65ff27b6e573aa96c2f4c116ad88452cc984fb882258c0ed6e2d8"
+-diff --git a/tests/test_issue8_dataset_ingestion.py b/tests/test_issue8_dataset_ingestion.py
+-index 2051be5..1079c57 100644
+---- a/tests/test_issue8_dataset_ingestion.py
+-+++ b/tests/test_issue8_dataset_ingestion.py
+-@@ -442,7 +442,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
+-     occlusions = np.zeros((1, 29), dtype=np.uint8)
+-     occlusions[0, 3] = 1
+-     scipy.savemat(
+--        source / "cofw68_train_color.mat",
+-+        source / "COFW_train_color.mat",
+-         {
+-             "phisTr": points,
+-             "IsTr": images,
+-@@ -469,7 +469,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
+-     assert sample["split"] == "train"
+-     assert sample["visibility"][3] is False
+-     assert sample["metadata"]["occlusion_mask"][3] is True
+--    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
+-+    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+-     assert manifest["projection_status"] == {"not_projectable": 1}
+- 
+- 
+-@@ -485,7 +485,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
+-     phis[58 + 3, 0] = 1.0
+-     image = np.full((3, 64, 64), 127, dtype=np.uint8)
+- 
+--    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
+-+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+-         image_ds = handle.create_dataset("image_0000", data=image)
+-         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
+-         refs[0, 0] = image_ds.ref
+-@@ -509,7 +509,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
+-     assert sample["visibility"][3] is False
+-     assert sample["metadata"]["bbox_xyxy"] == [1.0, 2.0, 30.0, 40.0]
+-     assert Path(sample["image"]).is_file()
+--    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
+-+    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+- 
+- 
+- def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
+-@@ -528,7 +528,7 @@ def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
+-     image = np.zeros((3, 60, 40), dtype=np.uint8)
+-     image[:, 5, 10] = 255  # white marker at annotation (x=5, y=10)
+- 
+--    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
+-+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+-         image_ds = handle.create_dataset("image_0000", data=image)
+-         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
+-         refs[0, 0] = image_ds.ref
+-diff --git a/tools/landmarks/build_quality_dataset.py b/tools/landmarks/build_quality_dataset.py
+-index 2c91e77..d8096e1 100644
+---- a/tools/landmarks/build_quality_dataset.py
+-+++ b/tools/landmarks/build_quality_dataset.py
+-@@ -2506,7 +2506,7 @@ def _cofw68_original_mat_files(root: Path) -> list[tuple[Path, str]]:
+-     out: list[tuple[Path, str]] = []
+-     for path in sorted(root.rglob("*.mat"), key=lambda item: len(item.parts)):
+-         name = path.name.lower()
+--        if "cofw68" not in name:
+-+        if "cofw" not in name or "color" not in name:
+-             continue
+-         if "train" in name:
+-             out.append((path, "train"))
+-@@ -2702,6 +2702,9 @@ def _cofw68_original_hdf5_arrays(
+- 
+-     return points_rows, images, visibility_rows, bbox_rows
+- 
+-+def _is_matlab_hdf_reader_error(err: Exception) -> bool:
+-+    message = str(err)
+-+    return "HDF reader" in message or "MATLAB 7.3" in message
+- 
+- def _build_cofw68_original(
+-     root: Path,
+-@@ -2721,7 +2724,7 @@ def _build_cofw68_original(
+-             output_dir,
+-             dataset="cofw29",
+-             expected_schema="2d_29",
+--            parser_name="cofw68_original_29",
+-+            parser_name="cofw_original_29",
+-             scenario=scenario,
+-             scenarios=scenarios,
+-             limit=limit,
+-@@ -2745,26 +2748,41 @@ def _build_cofw68_original(
+-                         import scipy.io as sio_module
+-                     except ImportError as err:
+-                         raise RuntimeError(
+--                            "scipy is required to read cofw68 original .mat files"
+-+                            "scipy is required to read COFW original .mat files"
+-                         ) from err
+-                     sio = sio_module
+--                payload = sio.loadmat(mat_path)
+--                points_rows = _cofw68_original_points_array(
+--                    _mat_first_key(
+--                        payload, ("phisTr", "phisT", "phis", "points", "landmarks")
+-+
+-+                try:
+-+                    payload = sio.loadmat(mat_path)
+-+                except (NotImplementedError, ValueError) as err:
+-+                    if not _is_matlab_hdf_reader_error(err):
+-+                        raise
+-+                    points_rows, images, visibility_rows, bbox_rows = (
+-+                        _cofw68_original_hdf5_arrays(mat_path, declared_split)
+-                     )
+--                )
+--                images = _cofw68_original_image_array(
+--                    _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
+--                )
+--                visibility_rows = _cofw68_original_visibility(
+--                    _mat_first_key(
+--                        payload,
+--                        ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded"),
+--                    ),
+--                    len(points_rows),
+--                )
+--                bbox_rows = [None] * len(points_rows)
+-+                else:
+-+                    points_rows = _cofw68_original_points_array(
+-+                        _mat_first_key(
+-+                            payload, ("phisTr", "phisT", "phis", "points", "landmarks")
+-+                        )
+-+                    )
+-+                    images = _cofw68_original_image_array(
+-+                        _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
+-+                    )
+-+                    visibility_rows = _cofw68_original_visibility(
+-+                        _mat_first_key(
+-+                            payload,
+-+                            (
+-+                                "occlusionsTr",
+-+                                "occlusionsT",
+-+                                "occlusion",
+-+                                "occ",
+-+                                "occluded",
+-+                            ),
+-+                        ),
+-+                        len(points_rows),
+-+                    )
+-+                    bbox_rows = [None] * len(points_rows)
+-         except Exception as err:  # noqa: BLE001
+-             skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
+-             continue
+-@@ -2789,7 +2807,7 @@ def _build_cofw68_original(
+-             visibility = visibility_rows[index] if index < len(visibility_rows) else [True] * 29
+-             metadata = {
+-                 "dataset": "cofw29",
+--                "dataset_parser": "cofw68_original_29",
+-+                "dataset_parser": "cofw_original_29",
+-                 "parser_type": "dataset_specific",
+-                 "annotation_file": str(mat_path.resolve()),
+-                 "source_schema": "2d_29",
+-@@ -2848,10 +2866,10 @@ def _cofw6868_annotation_paths(root: Path) -> list[Path]:
+- 
+- def _cofw68_test_color_mat(root: Path) -> Path:
+-     matches = sorted(
+--        root.rglob("cofw68_test_color.mat"), key=lambda item: len(item.parts)
+-+        root.rglob("COFW_test_color.mat"), key=lambda item: len(item.parts)
+-     )
+-     if not matches:
+--        raise FileNotFoundError(f"cofw68_test_color.mat not found below {root}")
+-+        raise FileNotFoundError(f"COFW_test_color.mat not found below {root}")
+-     return matches[0]
+- 
+- 
+-diff --git a/tools/landmarks/download_landmark_datasets.py b/tools/landmarks/download_landmark_datasets.py
+-index 7df42fc..e781e57 100644
+---- a/tools/landmarks/download_landmark_datasets.py
+-+++ b/tools/landmarks/download_landmark_datasets.py
+-@@ -121,7 +121,7 @@ SOURCES: tuple[SourceAsset, ...] = (
+-     SourceAsset(
+-         dataset="cofw68",
+-         name="cofw68 color images",
+--        filename="cofw68_color.zip",
+-+        filename="COFW_color.zip",
+-         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
+-         required_for_builder=False,
+-         note="cofw68 color image archive. Pair with cofw6868 annotations/JSON for manifest building.",
+-@@ -136,7 +136,7 @@ SOURCES: tuple[SourceAsset, ...] = (
+-     SourceAsset(
+-         dataset="cofw29",
+-         name="cofw68 original color images",
+--        filename="cofw68_color.zip",
+-+        filename="COFW_color.zip",
+-         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
+-         note="Original cofw68 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
+-     ),
+-diff --git a/tools/landmarks/prepare_landmark_dataset.py b/tools/landmarks/prepare_landmark_dataset.py
+-index 3c5de1d..ecf1071 100644
+---- a/tools/landmarks/prepare_landmark_dataset.py
+-+++ b/tools/landmarks/prepare_landmark_dataset.py
+-@@ -318,7 +318,12 @@ def _parser() -> argparse.ArgumentParser:
+-     parser.add_argument("--audit-overlay-limit", type=int, default=50)
+-     parser.add_argument("--frame-stride", type=int, default=1, help="Frame stride for video datasets.")
+-     parser.add_argument("--max-frames-per-video", type=int, default=None, help="Cap frames per video for video datasets.")
+--    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).")
+-+    parser.add_argument(
+-+        "--workers",
+-+        type=int,
+-+        default=16,
+-+        help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).",
+-+    )
+-     parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
+-     parser.add_argument("--skip-checksum", action="store_true", help="Skip stored checksum verification.")
+-     parser.add_argument("--skip-download", action="store_true", help="Reuse already-downloaded/extracted assets from --data-root.")
+diff --git a/tools/landmarks/build_production_validated_manifest.py b/tools/landmarks/build_production_validated_manifest.py
+index 0d470b8..d7bf1cb 100644
+--- a/tools/landmarks/build_production_validated_manifest.py
++++ b/tools/landmarks/build_production_validated_manifest.py
+@@ -15,7 +15,6 @@ Example:
+ from __future__ import annotations
  
- WFLW_ANNOTATIONS_URL = "https://wywu.github.io/projects/LAB/support/WFLW_annotations.tar.gz"
- WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID = "1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC"
--cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/cofw68_color.zip"
-+cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/COFW_color.zip"
- MERL_RAV_LABELS_URL = "https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip"
- AFLW2000_3D_URL = "http://www.cbsr.ia.ac.cn/users/xiangyuzhu/projects/3DDFA/Database/AFLW2000-3D.zip"
- AFLW2000_3D_SHA256 = "252bc35274d65ff27b6e573aa96c2f4c116ad88452cc984fb882258c0ed6e2d8"
-diff --git a/tests/test_issue8_dataset_ingestion.py b/tests/test_issue8_dataset_ingestion.py
-index 2051be5..1079c57 100644
---- a/tests/test_issue8_dataset_ingestion.py
-+++ b/tests/test_issue8_dataset_ingestion.py
-@@ -442,7 +442,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
-     occlusions = np.zeros((1, 29), dtype=np.uint8)
-     occlusions[0, 3] = 1
-     scipy.savemat(
--        source / "cofw68_train_color.mat",
-+        source / "COFW_train_color.mat",
-         {
-             "phisTr": points,
-             "IsTr": images,
-@@ -469,7 +469,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
-     assert sample["split"] == "train"
-     assert sample["visibility"][3] is False
-     assert sample["metadata"]["occlusion_mask"][3] is True
--    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
-+    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
-     assert manifest["projection_status"] == {"not_projectable": 1}
+ import argparse
+-import json
+ import logging
+ import pickle
+ import re
+@@ -33,6 +32,7 @@ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+ 
+ from lib.landmarks.core.schema import normalize_landmarks
++from lib.landmarks.io_utils import jsonable, write_json
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -49,25 +49,6 @@ PRODUCTION_RUNTIME_BUCKET_KEYS = (
+ EXTRACTED_SOURCE_DIRNAME = "extracted_source"
  
  
-@@ -485,7 +485,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
-     phis[58 + 3, 0] = 1.0
-     image = np.full((3, 64, 64), 127, dtype=np.uint8)
+-def _jsonable(value: T.Any) -> T.Any:
+-    if isinstance(value, np.ndarray):
+-        return value.tolist()
+-    if isinstance(value, np.generic):
+-        return value.item()
+-    if isinstance(value, Path):
+-        return str(value)
+-    if isinstance(value, dict):
+-        return {str(key): _jsonable(item) for key, item in value.items()}
+-    if isinstance(value, (list, tuple)):
+-        return [_jsonable(item) for item in value]
+-    return value
+-
+-
+-def _write_json(path: Path, payload: T.Any) -> None:
+-    path.parent.mkdir(parents=True, exist_ok=True)
+-    path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+-
+-
+ def _safe_sample_id(frame_name: str, face_index: int) -> str:
+     stem = Path(frame_name).stem
+     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("_")
+@@ -280,7 +261,7 @@ def _metadata(face: T.Mapping[str, T.Any], *, frame_name: str, fsa_path: Path, f
+     metadata.setdefault("frame", frame_name)
+     metadata.setdefault("face_index", face_index)
+     metadata.setdefault("alignments_file", str(fsa_path.resolve()))
+-    return _jsonable(metadata)
++    return jsonable(metadata)
  
--    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
-+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
-         image_ds = handle.create_dataset("image_0000", data=image)
-         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
-         refs[0, 0] = image_ds.ref
-@@ -509,7 +509,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
-     assert sample["visibility"][3] is False
-     assert sample["metadata"]["bbox_xyxy"] == [1.0, 2.0, 30.0, 40.0]
-     assert Path(sample["image"]).is_file()
--    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
-+    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+ 
+ def _runtime_bucket(metadata: T.Mapping[str, T.Any]) -> str | None:
+@@ -380,7 +361,7 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
+         "metadata": metadata,
+         "samples": sorted(samples, key=lambda item: str(item["sample_id"])),
+     }
+-    _write_json(output_dir / "manifest.json", payload)
++    write_json(output_dir / "manifest.json", payload)
+     return metadata
  
  
- def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
-@@ -528,7 +528,7 @@ def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
-     image = np.zeros((3, 60, 40), dtype=np.uint8)
-     image[:, 5, 10] = 255  # white marker at annotation (x=5, y=10)
- 
--    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
-+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
-         image_ds = handle.create_dataset("image_0000", data=image)
-         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
-         refs[0, 0] = image_ds.ref
 diff --git a/tools/landmarks/build_quality_dataset.py b/tools/landmarks/build_quality_dataset.py
-index 2c91e77..d8096e1 100644
+index 05ce0bb..88c8a85 100644
 --- a/tools/landmarks/build_quality_dataset.py
 +++ b/tools/landmarks/build_quality_dataset.py
-@@ -2506,7 +2506,7 @@ def _cofw68_original_mat_files(root: Path) -> list[tuple[Path, str]]:
-     out: list[tuple[Path, str]] = []
-     for path in sorted(root.rglob("*.mat"), key=lambda item: len(item.parts)):
-         name = path.name.lower()
--        if "cofw68" not in name:
-+        if "cofw" not in name or "color" not in name:
+@@ -26,7 +26,6 @@ from __future__ import annotations
+ import argparse
+ import contextlib
+ import hashlib
+-import json
+ import logging
+ import re
+ import sys
+@@ -53,6 +52,7 @@ from lib.landmarks.datasets.parallel import parallel_map
+ from lib.landmarks.datasets.progress import track
+ from lib.landmarks.datasets.sources import extract_archive_to_temp
+ from lib.landmarks.datasets.video_frames import extract_video_frames, video_files
++from lib.landmarks.io_utils import read_json, relative_or_absolute, safe_id, write_json
+ from lib.landmarks.manifest.contract import (
+     TRAINING_MANIFEST_CONTRACT,
+     TRAINING_MANIFEST_VERSION,
+@@ -115,7 +115,6 @@ def _dataset(value: str) -> str:
+         "cofw68": "cofw68",
+         "cofw29": "cofw29",
+         "cofw29-29": "cofw29",
+-        "cofw29": "cofw29",
+         "cofw29-color": "cofw29",
+         "helen": "helen",
+         "lapa": "lapa",
+@@ -145,43 +144,6 @@ def _parse_csv(value: str | None) -> tuple[str, ...] | None:
+     return parsed or None
+ 
+ 
+-def _safe_id(value: T.Any) -> str:
+-    text = str(value or "sample").strip().replace("\\", "/").strip("/") or "sample"
+-    return "".join(ch if ch.isalnum() or ch in "._-/#" else "_" for ch in text)
+-
+-
+-def _relative_or_absolute(path: Path, base: Path) -> str:
+-    try:
+-        return path.resolve().relative_to(base.resolve()).as_posix()
+-    except ValueError:
+-        return str(path.resolve())
+-
+-
+-def _jsonable(value: T.Any) -> T.Any:
+-    if isinstance(value, np.ndarray):
+-        return value.tolist()
+-    if isinstance(value, np.generic):
+-        return value.item()
+-    if isinstance(value, Path):
+-        return str(value)
+-    if isinstance(value, tuple):
+-        return [_jsonable(item) for item in value]
+-    if isinstance(value, list):
+-        return [_jsonable(item) for item in value]
+-    if isinstance(value, dict):
+-        return {str(key): _jsonable(item) for key, item in value.items()}
+-    return value
+-
+-
+-def _read_json(path: Path) -> T.Any:
+-    return json.loads(path.read_text(encoding="utf-8"))
+-
+-
+-def _write_json(path: Path, payload: T.Any) -> None:
+-    path.parent.mkdir(parents=True, exist_ok=True)
+-    path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+-
+-
+ def _resolve_path(value: T.Any, *, base_dir: Path) -> Path:
+     path = Path(str(value))
+     return path if path.is_absolute() else (base_dir / path).resolve()
+@@ -366,7 +328,7 @@ def _load_points(value: T.Any, *, base_dir: Path, source_schema: str | None = No
+         points, detected_schema = _load_landmark_file(path)
+         return points, source_schema or detected_schema
+     if path.suffix.lower() == ".json":
+-        return _canonical_points(_read_json(path), source_schema=source_schema)
++        return _canonical_points(read_json(path), source_schema=source_schema)
+     raise ValueError(f"unsupported landmark input: {value!r}")
+ 
+ 
+@@ -486,7 +448,7 @@ def _crop_image_and_remap_points(
+ 
+ 
+ def _write_crop_image(output_dir: Path, dataset: str, sample_id: str, crop_rgb: np.ndarray) -> Path:
+-    safe = _safe_id(sample_id).replace("#", "_").replace("/", "_")
++    safe = safe_id(sample_id).replace("#", "_").replace("/", "_")
+     out = output_dir / "images" / dataset / f"{safe}.jpg"
+     out.parent.mkdir(parents=True, exist_ok=True)
+     ok = cv2.imwrite(str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+@@ -659,7 +621,7 @@ def _split_from_entry_or_identity(
+ 
+ 
+ def _save_landmarks(output_dir: Path, sample_id: str, points68: np.ndarray) -> Path:
+-    safe = _safe_id(sample_id).replace("#", "_")
++    safe = safe_id(sample_id).replace("#", "_")
+     path = output_dir / "landmarks" / f"{safe}.npy"
+     path.parent.mkdir(parents=True, exist_ok=True)
+     np.save(path, points68.astype(np.float32))
+@@ -681,7 +643,7 @@ def _sample(
+     visibility: T.Any = None,
+     normalizer: T.Any = None,
+ ) -> dict[str, T.Any]:
+-    sample_id = _safe_id(sample_id)
++    sample_id = safe_id(sample_id)
+     source_schema = canonicalize_schema(source_schema)
+     target_schema = source_schema
+     head_name = head_name_for_schema(target_schema)
+@@ -721,7 +683,7 @@ def _sample(
+         "condition": _label(condition),
+         "conditions": tuple(_label(item) for item in conditions),
+         "image": str(image.resolve()),
+-        "landmarks": _relative_or_absolute(landmarks, output_dir),
++        "landmarks": relative_or_absolute(landmarks, output_dir),
+         "source_schema": source_schema,
+         "target_schema": target_schema,
+         "landmark_count": int(points68.shape[0]),
+@@ -802,7 +764,7 @@ def _write_manifest(
+     manifest_path = output_dir / "manifest.json"
+     merged: list[dict[str, T.Any]] = []
+     if mode == "merge" and manifest_path.is_file():
+-        payload = _read_json(manifest_path)
++        payload = read_json(manifest_path)
+         merged = [dict(item) for item in payload.get("samples", []) if isinstance(item, dict)]
+     seen = {str(item.get("image")) for item in merged}
+     for sample in samples:
+@@ -828,9 +790,9 @@ def _write_manifest(
+         **summary,
+         "samples": merged,
+     }
+-    _write_json(manifest_path, payload)
++    write_json(manifest_path, payload)
+ 
+-    _write_json(
++    write_json(
+         output_dir / "dataset_audit.json",
+         {
+             "manifest": str(manifest_path),
+@@ -901,7 +863,7 @@ def _draw_overlay_task(task: _OverlayTask) -> tuple[_OverlayTask, str | None]:
+ 
+ 
+ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 50, max_workers: int = 1) -> Path:
+-    payload = _read_json(manifest_path)
++    payload = read_json(manifest_path)
+     entries = payload.get("samples", [])
+     if not isinstance(entries, list):
+         raise ValueError(f"manifest {manifest_path} must contain samples list for visual audit")
+@@ -933,8 +895,8 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
+         visibility = entry.get("visibility")
+         if visibility is None and isinstance(entry.get("metadata"), dict):
+             visibility = entry["metadata"].get("visibility")
+-        overlay_name = _safe_id(sample_id).replace("/", "_").replace("#", "_")
+-        dataset_dir = _safe_id(dataset_name).replace("/", "_").replace("#", "_")
++        overlay_name = safe_id(sample_id).replace("/", "_").replace("#", "_")
++        dataset_dir = safe_id(dataset_name).replace("/", "_").replace("#", "_")
+         tasks.append(
+             _OverlayTask(
+                 sample_id=sample_id,
+@@ -974,7 +936,7 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
+         "skipped_examples": skipped[:50],
+     }
+     report_path = audit_dir / "visual_audit.json"
+-    _write_json(report_path, report)
++    write_json(report_path, report)
+     return report_path
+ 
+ 
+@@ -984,7 +946,7 @@ def _json_source(root: Path) -> Path | None:
+         if not path.is_file() or path.name == "dataset_audit.json":
              continue
-         if "train" in name:
-             out.append((path, "train"))
-@@ -2702,6 +2702,9 @@ def _cofw68_original_hdf5_arrays(
- 
-     return points_rows, images, visibility_rows, bbox_rows
- 
-+def _is_matlab_hdf_reader_error(err: Exception) -> bool:
-+    message = str(err)
-+    return "HDF reader" in message or "MATLAB 7.3" in message
- 
- def _build_cofw68_original(
-     root: Path,
-@@ -2721,7 +2724,7 @@ def _build_cofw68_original(
-             output_dir,
-             dataset="cofw29",
-             expected_schema="2d_29",
--            parser_name="cofw68_original_29",
-+            parser_name="cofw_original_29",
-             scenario=scenario,
-             scenarios=scenarios,
-             limit=limit,
-@@ -2745,26 +2748,41 @@ def _build_cofw68_original(
-                         import scipy.io as sio_module
-                     except ImportError as err:
-                         raise RuntimeError(
--                            "scipy is required to read cofw68 original .mat files"
-+                            "scipy is required to read COFW original .mat files"
-                         ) from err
-                     sio = sio_module
--                payload = sio.loadmat(mat_path)
--                points_rows = _cofw68_original_points_array(
--                    _mat_first_key(
--                        payload, ("phisTr", "phisT", "phis", "points", "landmarks")
-+
-+                try:
-+                    payload = sio.loadmat(mat_path)
-+                except (NotImplementedError, ValueError) as err:
-+                    if not _is_matlab_hdf_reader_error(err):
-+                        raise
-+                    points_rows, images, visibility_rows, bbox_rows = (
-+                        _cofw68_original_hdf5_arrays(mat_path, declared_split)
-                     )
--                )
--                images = _cofw68_original_image_array(
--                    _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
--                )
--                visibility_rows = _cofw68_original_visibility(
--                    _mat_first_key(
--                        payload,
--                        ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded"),
--                    ),
--                    len(points_rows),
--                )
--                bbox_rows = [None] * len(points_rows)
-+                else:
-+                    points_rows = _cofw68_original_points_array(
-+                        _mat_first_key(
-+                            payload, ("phisTr", "phisT", "phis", "points", "landmarks")
-+                        )
-+                    )
-+                    images = _cofw68_original_image_array(
-+                        _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
-+                    )
-+                    visibility_rows = _cofw68_original_visibility(
-+                        _mat_first_key(
-+                            payload,
-+                            (
-+                                "occlusionsTr",
-+                                "occlusionsT",
-+                                "occlusion",
-+                                "occ",
-+                                "occluded",
-+                            ),
-+                        ),
-+                        len(points_rows),
-+                    )
-+                    bbox_rows = [None] * len(points_rows)
-         except Exception as err:  # noqa: BLE001
-             skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
+         try:
+-            payload = _read_json(path)
++            payload = read_json(path)
+         except Exception:
              continue
-@@ -2789,7 +2807,7 @@ def _build_cofw68_original(
-             visibility = visibility_rows[index] if index < len(visibility_rows) else [True] * 29
-             metadata = {
-                 "dataset": "cofw29",
--                "dataset_parser": "cofw68_original_29",
-+                "dataset_parser": "cofw_original_29",
-                 "parser_type": "dataset_specific",
-                 "annotation_file": str(mat_path.resolve()),
-                 "source_schema": "2d_29",
-@@ -2848,10 +2866,10 @@ def _cofw6868_annotation_paths(root: Path) -> list[Path]:
+         if isinstance(payload, list) or (
+@@ -1006,7 +968,7 @@ def _build_json(
+     allow_overlap: bool,
+     image_root: str | None,
+ ) -> Path:
+-    payload = _read_json(path)
++    payload = read_json(path)
+     entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+     if not isinstance(entries, list):
+         raise ValueError(f"JSON source must contain list, entries, or samples list: {path}")
+@@ -1693,7 +1655,7 @@ def _build_expected_schema_json(
+     allow_overlap: bool,
+     image_root: str | None,
+ ) -> Path:
+-    payload = _read_json(path)
++    payload = read_json(path)
+     entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+     if not isinstance(entries, list):
+         raise ValueError(f"{parser_name} JSON source must contain list, entries, or samples list: {path}")
+@@ -1799,7 +1761,7 @@ def _build_helen(
+             image_root=image_root,
+         )
  
- def _cofw68_test_color_mat(root: Path) -> Path:
-     matches = sorted(
--        root.rglob("cofw68_test_color.mat"), key=lambda item: len(item.parts)
-+        root.rglob("COFW_test_color.mat"), key=lambda item: len(item.parts)
+-    payload = _read_json(annotations)
++    payload = read_json(annotations)
+     if not isinstance(payload, list):
+         raise ValueError(f"HELEN annotations.json must contain a list: {annotations}")
+ 
+@@ -2441,7 +2403,7 @@ def _build_subject_session_dataset(
+             allow_overlap=allow_overlap,
+             image_root=image_root,
+         )
+-        payload = _read_json(manifest)
++        payload = read_json(manifest)
+         for sample in payload.get("samples", []):
+             if not isinstance(sample, dict):
+                 continue
+@@ -2449,7 +2411,7 @@ def _build_subject_session_dataset(
+             if isinstance(metadata, dict):
+                 metadata.setdefault("dataset_parser", f"{dataset}_menpo_style")
+                 metadata.setdefault("parser_type", "dataset_specific")
+-        _write_json(manifest, payload)
++        write_json(manifest, payload)
+         return manifest
+ 
+     image_base = Path(image_root) if image_root else root
+@@ -2622,7 +2584,7 @@ def _write_cofw68_original_image(
+         output_dir
+         / "images"
+         / "cofw29"
+-        / f"{_safe_id(sample_id).replace('/', '_')}.png"
++        / f"{safe_id(sample_id).replace('/', '_')}.png"
      )
-     if not matches:
--        raise FileNotFoundError(f"cofw68_test_color.mat not found below {root}")
-+        raise FileNotFoundError(f"COFW_test_color.mat not found below {root}")
-     return matches[0]
- 
- 
+     path.parent.mkdir(parents=True, exist_ok=True)
+     arr = np.asarray(image)
+@@ -4056,7 +4018,7 @@ def _build_cofw68_json_cropped(
+     allow_overlap: bool,
+     image_root: str | None,
+ ) -> Path:
+-    payload = _read_json(path)
++    payload = read_json(path)
+     entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+     if not isinstance(entries, list):
+         raise ValueError(
 diff --git a/tools/landmarks/download_landmark_datasets.py b/tools/landmarks/download_landmark_datasets.py
-index 7df42fc..e781e57 100644
+index 6fca3d6..580a7f8 100644
 --- a/tools/landmarks/download_landmark_datasets.py
 +++ b/tools/landmarks/download_landmark_datasets.py
-@@ -121,7 +121,7 @@ SOURCES: tuple[SourceAsset, ...] = (
-     SourceAsset(
-         dataset="cofw68",
-         name="cofw68 color images",
--        filename="cofw68_color.zip",
-+        filename="COFW_color.zip",
-         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
-         required_for_builder=False,
-         note="cofw68 color image archive. Pair with cofw6868 annotations/JSON for manifest building.",
-@@ -136,7 +136,7 @@ SOURCES: tuple[SourceAsset, ...] = (
-     SourceAsset(
-         dataset="cofw29",
-         name="cofw68 original color images",
--        filename="cofw68_color.zip",
-+        filename="COFW_color.zip",
-         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
-         note="Original cofw68 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
-     ),
-diff --git a/tools/landmarks/prepare_landmark_dataset.py b/tools/landmarks/prepare_landmark_dataset.py
-index 3c5de1d..ecf1071 100644
---- a/tools/landmarks/prepare_landmark_dataset.py
-+++ b/tools/landmarks/prepare_landmark_dataset.py
-@@ -318,7 +318,12 @@ def _parser() -> argparse.ArgumentParser:
-     parser.add_argument("--audit-overlay-limit", type=int, default=50)
-     parser.add_argument("--frame-stride", type=int, default=1, help="Frame stride for video datasets.")
-     parser.add_argument("--max-frames-per-video", type=int, default=None, help="Cap frames per video for video datasets.")
--    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).")
-+    parser.add_argument(
-+        "--workers",
-+        type=int,
-+        default=16,
-+        help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).",
-+    )
-     parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
-     parser.add_argument("--skip-checksum", action="store_true", help="Skip stored checksum verification.")
-     parser.add_argument("--skip-download", action="store_true", help="Reuse already-downloaded/extracted assets from --data-root.")
+@@ -4,7 +4,6 @@
+ from __future__ import annotations
+ 
+ import argparse
+-import hashlib
+ import json
+ import os
+ import shutil
+@@ -23,6 +22,7 @@ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+ 
+ from lib.landmarks.datasets.progress import track
++from lib.landmarks.io_utils import sha1_file, sha256_file
+ 
+ CHUNK_SIZE = 1024 * 1024
+ ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
+@@ -336,7 +336,6 @@ def _dataset_key(value: str) -> str:
+         "wflw": "wflw",
+         "cofw68": "cofw68",
+         "cofw29": "cofw29",
+-        "cofw29": "cofw29",
+         "helen": "helen",
+         "lapa": "lapa",
+         "jd": "jd-landmark",
+@@ -397,29 +396,13 @@ def _selected_sources(
+     ]
+ 
+ 
+-def _hash_file(path: Path, algorithm: str) -> str:
+-    digest = hashlib.new(algorithm)
+-    with path.open("rb") as handle:
+-        for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
+-            digest.update(chunk)
+-    return digest.hexdigest()
+-
+-
+-def _sha256_file(path: Path) -> str:
+-    return _hash_file(path, "sha256")
+-
+-
+-def _sha1_file(path: Path) -> str:
+-    return _hash_file(path, "sha1")
+-
+-
+ def _verify(path: Path, *, sha256: str | None, sha1: str | None) -> None:
+     if sha256 is not None:
+-        actual = _sha256_file(path)
++        actual = sha256_file(path)
+         if actual.lower() != sha256.lower():
+             raise ValueError(f"sha256 mismatch for {path}: expected {sha256}, got {actual}")
+     if sha1 is not None:
+-        actual = _sha1_file(path)
++        actual = sha1_file(path)
+         if actual.lower() != sha1.lower():
+             raise ValueError(f"sha1 mismatch for {path}: expected {sha1}, got {actual}")
+ 
+@@ -488,20 +471,12 @@ def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> P
+     return destination
+ 
+ 
+-def _is_relative_to(path: Path, base: Path) -> bool:
+-    try:
+-        path.relative_to(base)
+-    except ValueError:
+-        return False
+-    return True
+-
+-
+ def _extract_zip(path: Path, destination: Path) -> None:
+     with zipfile.ZipFile(path, "r") as zf:
+         members = zf.infolist()
+         for member in members:
+             target = (destination / member.filename).resolve()
+-            if not _is_relative_to(target, destination.resolve()):
++            if not target.is_relative_to(destination.resolve()):
+                 raise ValueError(f"blocked zip path traversal member: {member.filename}")
+         for member in track(members, desc=f"Extract {path.name}", total=len(members), unit="file"):
+             zf.extract(member, destination)
+@@ -514,7 +489,7 @@ def _extract_tar(path: Path, destination: Path) -> None:
+             if member.issym() or member.islnk():
+                 raise ValueError(f"blocked tar link member: {member.name}")
+             target = (destination / member.name).resolve()
+-            if not _is_relative_to(target, destination.resolve()):
++            if not target.is_relative_to(destination.resolve()):
+                 raise ValueError(f"blocked tar path traversal member: {member.name}")
+         extract_kwargs: dict[str, str] = {"filter": "data"}
+         for member in track(members, desc=f"Extract {path.name}", total=len(members), unit="file"):
+@@ -530,7 +505,7 @@ def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
+     if not any(str(path).lower().endswith(suffix) for suffix in ARCHIVE_SUFFIXES):
+         return destination
+     marker = destination / ".extracted_from.json"
+-    marker_payload = {"archive": path.name, "size": path.stat().st_size, "sha256": _sha256_file(path)}
++    marker_payload = {"archive": path.name, "size": path.stat().st_size, "sha256": sha256_file(path)}
+     if destination.is_dir() and marker.is_file() and not force:
+         try:
+             if json.loads(marker.read_text(encoding="utf-8")) == marker_payload:
+@@ -682,8 +657,8 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
+         result.update(
+             status=status,
+             archive=str(path),
+-            sha256=_sha256_file(path),
+-            sha1=_sha1_file(path),
++            sha256=sha256_file(path),
++            sha1=sha1_file(path),
+             checksum_status=checksum_status,
+         )
+         if args.extract and asset.extract:
+diff --git a/tools/landmarks/prepare_merl_rav_aflw.py b/tools/landmarks/prepare_merl_rav_aflw.py
+index 52a9d04..304ac81 100644
+--- a/tools/landmarks/prepare_merl_rav_aflw.py
++++ b/tools/landmarks/prepare_merl_rav_aflw.py
+@@ -44,6 +44,12 @@ from pathlib import Path
+ 
+ import numpy as np
+ 
++ROOT = Path(__file__).resolve().parents[2]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++from lib.landmarks.io_utils import relative_or_absolute, safe_id, write_json
++
+ logger = logging.getLogger(__name__)
+ 
+ AFLW_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+@@ -90,39 +96,6 @@ class PrepStats:
+         }
+ 
+ 
+-def _jsonable(value: T.Any) -> T.Any:
+-    if isinstance(value, np.ndarray):
+-        return value.tolist()
+-    if isinstance(value, np.generic):
+-        return value.item()
+-    if isinstance(value, Path):
+-        return str(value)
+-    if isinstance(value, tuple):
+-        return [_jsonable(item) for item in value]
+-    if isinstance(value, list):
+-        return [_jsonable(item) for item in value]
+-    if isinstance(value, dict):
+-        return {str(key): _jsonable(item) for key, item in value.items()}
+-    return value
+-
+-
+-def _write_json(path: Path, payload: T.Any) -> None:
+-    path.parent.mkdir(parents=True, exist_ok=True)
+-    path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+-
+-
+-def _safe_id(value: T.Any) -> str:
+-    text = str(value or "sample").strip().replace("\\", "/").strip("/") or "sample"
+-    return "".join(ch if ch.isalnum() or ch in "._-/#" else "_" for ch in text)
+-
+-
+-def _relative_or_absolute(path: Path, base: Path) -> str:
+-    try:
+-        return path.resolve().relative_to(base.resolve()).as_posix()
+-    except ValueError:
+-        return str(path.resolve())
+-
+-
+ def _labels_from_path(path: Path) -> tuple[str, ...]:
+     parts = tuple(part.lower().replace("-", "_") for part in path.parts)
+     labels: list[str] = []
+@@ -294,17 +267,17 @@ def _materialize_image(image_path: Path, output_dir: Path, aflw_root: Path, *, m
+     target = output_dir / "images" / relative
+     target.parent.mkdir(parents=True, exist_ok=True)
+     if target.exists():
+-        return _relative_or_absolute(target, output_dir)
++        return relative_or_absolute(target, output_dir)
+ 
+     if mode == "copy":
+         shutil.copy2(image_path, target)
+         stats.copied_images += 1
+-        return _relative_or_absolute(target, output_dir)
++        return relative_or_absolute(target, output_dir)
+ 
+     if mode == "symlink":
+         os.symlink(image_path.resolve(), target)
+         stats.symlinked_images += 1
+-        return _relative_or_absolute(target, output_dir)
++        return relative_or_absolute(target, output_dir)
+ 
+     raise ValueError(f"unsupported --image-mode {mode!r}")
+ 
+@@ -387,7 +360,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
+             condition_labels = tuple(dict.fromkeys((*condition_labels, "occlusion")))
+ 
+         sample_base_id = relative_annotation.with_suffix("").as_posix().replace("/", "_")
+-        sample_id = _safe_id(f"{sample_base_id}__{image_path.stem}")
++        sample_id = safe_id(f"{sample_base_id}__{image_path.stem}")
+         landmark_rel = Path("landmarks") / f"{sample_id}.npy"
+         _write_landmarks(output_dir / landmark_rel, points)
+         image_value = _materialize_image(image_path, output_dir, aflw_root, mode=args.image_mode, stats=stats)
+@@ -403,7 +376,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
+ 
+         metadata: dict[str, T.Any] = {
+             "annotation_file": relative_annotation.as_posix(),
+-            "image_id": _relative_or_absolute(image_path, aflw_root),
++            "image_id": relative_or_absolute(image_path, aflw_root),
+             "aflw_image_source": "aflw_native",
+             "visibility": visibility_labels,
+             "self_occluded_count": sum(1 for value in visibility_labels if value == "self_occluded"),
+@@ -442,7 +415,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
+         stats.written += 1
+ 
+     manifest_path = output_dir / "manifest.json"
+-    _write_json(
++    write_json(
+         manifest_path,
+         {
+             "version": 1,
+@@ -462,7 +435,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
+     audit = stats.to_json()
+     audit["skipped_examples"] = skipped_examples[:100]
+     audit_path = output_dir / "prepare_audit.json"
+-    _write_json(audit_path, audit)
++    write_json(audit_path, audit)
+     return manifest_path, {"audit": audit_path, **audit}
+ 
+ 
+diff --git a/tools/landmarks/run_cdvit_manifest_training_pipeline.py b/tools/landmarks/run_cdvit_manifest_training_pipeline.py
+index a5ba967..c382d21 100644
+--- a/tools/landmarks/run_cdvit_manifest_training_pipeline.py
++++ b/tools/landmarks/run_cdvit_manifest_training_pipeline.py
+@@ -36,6 +36,7 @@ from lib.landmarks.datasets.manifest import (
+     build_manifest_index,
+     manifest_index_path,
+ )
++from lib.landmarks.io_utils import sha256_file, write_json
+ from lib.landmarks.manifest.validator import validate_training_manifest
+ from lib.landmarks.pipeline.config import (
+     _extract_config_path,
+@@ -238,21 +239,6 @@ def _dataset_source_zip_map(args: argparse.Namespace) -> dict[str, Path]:
+     return mapping
+ 
+ 
+-def _sha256_file(path: Path) -> str:
+-    digest = hashlib.sha256()
+-    with path.open("rb") as handle:
+-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+-            digest.update(chunk)
+-    return digest.hexdigest()
+-
+-
+-def _write_json(path: Path, payload: T.Mapping[str, T.Any]) -> None:
+-    path.parent.mkdir(parents=True, exist_ok=True)
+-    path.write_text(
+-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+-    )
+-
+-
+ def _resolved_pipeline_config(
+     args: argparse.Namespace,
+     paths: PipelinePaths,
+@@ -294,7 +280,7 @@ def _normalize_path_for_signature(value: Path | str | None) -> str:
+ 
+ def _safe_sha256_file(path: Path) -> str | None:
+     try:
+-        return _sha256_file(path) if path.is_file() else None
++        return sha256_file(path) if path.is_file() else None
+     except OSError:
+         return None
+ 
+@@ -660,7 +646,7 @@ def _write_stage_signature(
+         "command": list(command or []),
+         "notes": list(notes or []),
+     }
+-    _write_json(_stage_signature_path(paths, stage), payload)
++    write_json(_stage_signature_path(paths, stage), payload)
+ 
+ 
+ def _pipeline_train_arg_tokens(args: argparse.Namespace) -> list[str]:
+@@ -1402,7 +1388,7 @@ def _run_stage(
+ 
+         elif stage == "train_cdvit":
+             command = _train_command(args, paths)
+-            _write_json(
++            write_json(
+                 paths.train_command_json,
+                 {
+                     "command": command,
+@@ -1709,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:
+     _require_local_tools(args)
+ 
+     selected_stages = _stage_slice(args.start_at, args.stop_after)
+-    _write_json(
++    write_json(
+         paths.run_root / "run_config.resolved.json",
+         _resolved_pipeline_config(args, paths, selected_stages),
+     )
+diff --git a/tools/landmarks/tune_training_hyperparameters.py b/tools/landmarks/tune_training_hyperparameters.py
+index 1c6797f..4cae151 100644
+--- a/tools/landmarks/tune_training_hyperparameters.py
++++ b/tools/landmarks/tune_training_hyperparameters.py
+@@ -42,6 +42,11 @@ import subprocess
+ import sys
+ import typing as T
+ 
++ROOT = Path(__file__).resolve().parents[2]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++from lib.landmarks.io_utils import read_json
+ 
+ DEFAULT_STAR_BRACKET = [0.0, 0.005, 0.01, 0.02, 0.05]
+ DEFAULT_LR_SWEEP = [3e-5, 5e-5, 1e-4, 2e-4, 3e-4]
+@@ -91,10 +96,6 @@ def _write_json(path: Path, payload: T.Any) -> None:
+     )
+ 
+ 
+-def _read_json(path: Path) -> T.Any:
+-    return json.loads(path.read_text(encoding="utf-8"))
+-
+-
+ def _split_csv_floats(raw: str, default: list[float]) -> list[float]:
+     raw = str(raw or "").strip()
+     if not raw:
+@@ -430,7 +431,7 @@ def _loss_search_plan_path(args: argparse.Namespace) -> Path:
+ def _load_loss_search_plan(args: argparse.Namespace) -> dict[str, T.Any]:
+     path = _loss_search_plan_path(args)
+     if path.exists():
+-        return _read_json(path)
++        return read_json(path)
+     return {
+         "study_name": args.optuna_study_name,
+         "storage": optuna_storage_url(args),
+@@ -576,7 +577,7 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
+         print("SKIP", run["id"], "training did not write metrics", metrics_path)
+         return None
+ 
+-    raw_metrics = _read_json(metrics_path)
++    raw_metrics = read_json(metrics_path)
+     metrics = normalize_metrics(raw_metrics)
+     score, diagnostics = objective_score(
+         metrics,

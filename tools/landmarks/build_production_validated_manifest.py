@@ -15,7 +15,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import pickle
 import re
@@ -33,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.landmarks.core.schema import normalize_landmarks
+from lib.landmarks.io_utils import jsonable, write_json
 
 logger = logging.getLogger(__name__)
 
@@ -47,25 +47,6 @@ PRODUCTION_RUNTIME_BUCKET_KEYS = (
     "landmark_ensemble_bucket",
 )
 EXTRACTED_SOURCE_DIRNAME = "extracted_source"
-
-
-def _jsonable(value: T.Any) -> T.Any:
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
-
-
-def _write_json(path: Path, payload: T.Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _safe_sample_id(frame_name: str, face_index: int) -> str:
@@ -280,7 +261,7 @@ def _metadata(face: T.Mapping[str, T.Any], *, frame_name: str, fsa_path: Path, f
     metadata.setdefault("frame", frame_name)
     metadata.setdefault("face_index", face_index)
     metadata.setdefault("alignments_file", str(fsa_path.resolve()))
-    return _jsonable(metadata)
+    return jsonable(metadata)
 
 
 def _runtime_bucket(metadata: T.Mapping[str, T.Any]) -> str | None:
@@ -380,7 +361,7 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
         "metadata": metadata,
         "samples": sorted(samples, key=lambda item: str(item["sample_id"])),
     }
-    _write_json(output_dir / "manifest.json", payload)
+    write_json(output_dir / "manifest.json", payload)
     return metadata
 
 

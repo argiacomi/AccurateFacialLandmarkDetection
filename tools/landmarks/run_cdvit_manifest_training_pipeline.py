@@ -36,6 +36,7 @@ from lib.landmarks.datasets.manifest import (
     build_manifest_index,
     manifest_index_path,
 )
+from lib.landmarks.io_utils import sha256_file, write_json
 from lib.landmarks.manifest.validator import validate_training_manifest
 from lib.landmarks.pipeline.config import (
     _extract_config_path,
@@ -238,21 +239,6 @@ def _dataset_source_zip_map(args: argparse.Namespace) -> dict[str, Path]:
     return mapping
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _write_json(path: Path, payload: T.Mapping[str, T.Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-
-
 def _resolved_pipeline_config(
     args: argparse.Namespace,
     paths: PipelinePaths,
@@ -294,7 +280,7 @@ def _normalize_path_for_signature(value: Path | str | None) -> str:
 
 def _safe_sha256_file(path: Path) -> str | None:
     try:
-        return _sha256_file(path) if path.is_file() else None
+        return sha256_file(path) if path.is_file() else None
     except OSError:
         return None
 
@@ -660,7 +646,7 @@ def _write_stage_signature(
         "command": list(command or []),
         "notes": list(notes or []),
     }
-    _write_json(_stage_signature_path(paths, stage), payload)
+    write_json(_stage_signature_path(paths, stage), payload)
 
 
 def _pipeline_train_arg_tokens(args: argparse.Namespace) -> list[str]:
@@ -1402,7 +1388,7 @@ def _run_stage(
 
         elif stage == "train_cdvit":
             command = _train_command(args, paths)
-            _write_json(
+            write_json(
                 paths.train_command_json,
                 {
                     "command": command,
@@ -1709,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:
     _require_local_tools(args)
 
     selected_stages = _stage_slice(args.start_at, args.stop_after)
-    _write_json(
+    write_json(
         paths.run_root / "run_config.resolved.json",
         _resolved_pipeline_config(args, paths, selected_stages),
     )
