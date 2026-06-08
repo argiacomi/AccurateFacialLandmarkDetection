@@ -60,9 +60,9 @@ folders because those identifiers are preserved for leakage checks.
 
 | Dataset | Schema | Source | Builder command |
 | --- | --- | --- | --- |
-| HELEN | `2d_194` | `https://github.com/argiacomi/faceswap/issues/99` | `python tools/landmarks/build_quality_dataset.py --dataset helen --source-dir <root> --output-dir runs/landmarks/build_helen` |
+| HELEN dense | `2d_194` | `https://github.com/argiacomi/faceswap/issues/99` | `python tools/landmarks/build_quality_dataset.py --dataset helen-dense --source-dir <annotations-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_helen` |
 | LaPa | `2d_106` | `https://github.com/argiacomi/faceswap-test-dev/blob/master/tools/automask/lapa_adapter.py` | `python tools/landmarks/build_quality_dataset.py --dataset lapa --source-dir <root> --output-dir runs/landmarks/build_lapa` |
-| JD-landmark | `2d_106` | `https://github.com/argiacomi/faceswap/issues/98` | `python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <root> --output-dir runs/landmarks/build_jd_landmark` |
+| JD-landmark | `2d_106` | `https://github.com/argiacomi/faceswap/issues/98` | `python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <jd-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_jd_landmark` |
 | FFL2 | `2d_106` | Google Drive file id `16fiVoBaTtOevQa4mH34rWggfkNKNEL2A` | `python tools/landmarks/build_quality_dataset.py --dataset ffl2 --source-dir <root> --output-dir runs/landmarks/build_ffl2` |
 | FLL3 | `2d_106` | Google Drive file id `1F_UnmpRnUnNS3Wk3V6CkJiIUYmG5Wjdr` | `python tools/landmarks/build_quality_dataset.py --dataset fll3 --source-dir <root> --output-dir runs/landmarks/build_fll3` |
 | COFW original | `2d_29` | `https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1` | `python tools/landmarks/build_quality_dataset.py --dataset cofw-original --source-dir <root> --output-dir runs/landmarks/build_cofw_original` |
@@ -75,6 +75,13 @@ Use `tools/landmarks/download_landmark_datasets.py --list --dataset all` to
 inspect configured sources. Google Drive downloads require
 `--include-google-drive` and `gdown`; otherwise the downloader writes manual
 staging notes.
+
+HELEN dense and JD-landmark are annotation layers over the 300W image cache.
+HELEN expects `annotations.json` from the linked S3 source and resolves images
+under `<300w-cache>/data/300w/300w/helen/{trainset,testset}`. JD-landmark
+resolves corrected/test annotation names back to 300W subsets, for example
+`AFW_134212_1_0.jpg.txt` resolves to `afw/134212_1.jpg`; ambiguous or missing
+300W matches are reported as staging errors.
 
 ## Video Layout
 

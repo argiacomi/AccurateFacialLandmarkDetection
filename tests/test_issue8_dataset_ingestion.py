@@ -67,6 +67,7 @@ def test_issue8_dataset_choices_and_projection_statuses_are_registered():
 
     assert {
         "helen",
+        "helen-dense",
         "lapa",
         "jd-landmark",
         "ffl2",
@@ -88,9 +89,11 @@ def test_issue8_dataset_choices_and_projection_statuses_are_registered():
 
 def test_helen_annotations_json_parser_uses_native_release_format(tmp_path):
     source = tmp_path / "source"
+    cache = tmp_path / "300w" / "data" / "300w" / "300w"
     output = tmp_path / "out"
     points = _points(194)
-    _write_image(source / "images" / "sample.jpg")
+    image_path = _write_image(cache / "helen" / "trainset" / "sample.jpg")
+    source.mkdir(parents=True)
     (source / "annotations.json").write_text(
         json.dumps([[["sample.jpg", 256, 256], points.tolist()]]),
         encoding="utf-8",
@@ -99,9 +102,11 @@ def test_helen_annotations_json_parser_uses_native_release_format(tmp_path):
     manifest_path = builder.build(
         _builder_args(
             "--dataset",
-            "helen",
+            "helen-dense",
             "--source-dir",
             str(source),
+            "--image-root",
+            str(cache),
             "--output-dir",
             str(output),
         )
@@ -118,7 +123,57 @@ def test_helen_annotations_json_parser_uses_native_release_format(tmp_path):
     assert sample["metadata"]["dataset_parser"] == "helen_annotations_json"
     assert sample["metadata"]["parser_type"] == "dataset_specific"
     assert sample["metadata"]["image_width"] == 256
+    assert sample["metadata"]["resolved_300w_image_path"] == str(image_path.resolve())
     assert manifest["projection_status"] == {"not_projectable": 1}
+
+
+def test_helen_annotations_require_300w_cache(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+    (source / "annotations.json").parent.mkdir(parents=True)
+    (source / "annotations.json").write_text(
+        json.dumps([[["sample.jpg", 256, 256], _points(194).tolist()]]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="HELEN dense annotations require a 300W Helen image cache"):
+        builder.build(
+            _builder_args(
+                "--dataset",
+                "helen",
+                "--source-dir",
+                str(source),
+                "--output-dir",
+                str(output),
+            )
+        )
+
+
+def test_helen_annotations_reject_ambiguous_300w_image_matches(tmp_path):
+    source = tmp_path / "source"
+    cache = tmp_path / "300w" / "data" / "300w" / "300w"
+    output = tmp_path / "out"
+    _write_image(cache / "helen" / "trainset" / "sample.jpg")
+    _write_image(cache / "helen" / "testset" / "sample.jpg")
+    (source / "annotations.json").parent.mkdir(parents=True)
+    (source / "annotations.json").write_text(
+        json.dumps([[["sample.jpg", 256, 256], _points(194).tolist()]]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        builder.build(
+            _builder_args(
+                "--dataset",
+                "helen",
+                "--source-dir",
+                str(source),
+                "--image-root",
+                str(cache),
+                "--output-dir",
+                str(output),
+            )
+        )
 
 
 def test_lapa_release_parser_preserves_split_and_segmentation_label(tmp_path):
@@ -177,6 +232,92 @@ def test_jd_landmark_test_data_parser_pairs_jpg_txt_images_and_rects(tmp_path):
     assert sample["metadata"]["dataset_parser"] == "jd_landmark_release_106"
     assert sample["metadata"]["source_release"] == "test_data1"
     assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
+
+
+def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_corrected_override(tmp_path):
+    source = tmp_path / "source"
+    cache = tmp_path / "300w" / "data" / "300w" / "300w"
+    output = tmp_path / "out"
+    image_path = _write_image(cache / "afw" / "134212_1.jpg")
+    original = _points(106)
+    corrected = original + 7.0
+    name = "AFW_134212_1_0.jpg.txt"
+    _write_counted_txt(source / "Test_data1" / "landmark" / name, original)
+    _write_counted_txt(source / "Corrected_landmark" / name, corrected)
+    bbox_dir = (
+        source
+        / "training_dataset_face_detection_bounding_box_v1"
+        / "training_dataset_face_detection_bounding_box"
+    )
+    bbox_dir.mkdir(parents=True)
+    (bbox_dir / "AFW_134212_1_0.jpg.rect").write_text("10 20 210 220\n", encoding="utf-8")
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "jd-landmark",
+            "--source-dir",
+            str(source),
+            "--image-root",
+            str(cache),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    manifest = _load_manifest(manifest_path)
+    sample = manifest["samples"][0]
+    saved_points = np.load(output / sample["landmarks"])
+
+    assert len(manifest["samples"]) == 1
+    assert np.allclose(saved_points, corrected)
+    assert sample["image"] == str(image_path.resolve())
+    assert sample["metadata"]["resolved_image_source"] == "300w_cache"
+    assert sample["metadata"]["resolved_300w_image_path"] == str(image_path.resolve())
+    assert sample["metadata"]["base_subset"] == "afw"
+    assert sample["metadata"]["corrected_annotation"].endswith("Corrected_landmark/AFW_134212_1_0.jpg.txt")
+    assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
+
+
+def test_jd_landmark_corrected_annotations_require_300w_cache_images(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+    _write_counted_txt(source / "Corrected_landmark" / "AFW_134212_1_0.jpg.txt", _points(106))
+
+    with pytest.raises(ValueError, match="JD-landmark requires a 300W image cache"):
+        builder.build(
+            _builder_args(
+                "--dataset",
+                "jd-landmark",
+                "--source-dir",
+                str(source),
+                "--output-dir",
+                str(output),
+            )
+        )
+
+
+def test_jd_landmark_rejects_ambiguous_300w_cache_matches(tmp_path):
+    source = tmp_path / "source"
+    cache = tmp_path / "300w" / "data" / "300w" / "300w"
+    output = tmp_path / "out"
+    _write_counted_txt(source / "Corrected_landmark" / "LFPW_image_test_0237_0.jpg.txt", _points(106))
+    _write_image(cache / "lfpw" / "trainset" / "image_0237.png")
+    _write_image(cache / "lfpw" / "testset" / "image_0237.png")
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        builder.build(
+            _builder_args(
+                "--dataset",
+                "jd-landmark",
+                "--source-dir",
+                str(source),
+                "--image-root",
+                str(cache),
+                "--output-dir",
+                str(output),
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -449,9 +590,11 @@ def test_wflw_builder_keeps_native_98_points(tmp_path):
 
 def test_write_overlays_generates_visual_audit_for_native_schema(tmp_path):
     source = tmp_path / "source"
+    cache = tmp_path / "300w" / "data" / "300w" / "300w"
     output = tmp_path / "out"
     points = _points(194)
-    _write_image(source / "images" / "sample.jpg")
+    _write_image(cache / "helen" / "trainset" / "sample.jpg")
+    source.mkdir(parents=True)
     (source / "annotations.json").write_text(
         json.dumps([[["sample.jpg", 256, 256], points.tolist()]]),
         encoding="utf-8",
@@ -463,6 +606,8 @@ def test_write_overlays_generates_visual_audit_for_native_schema(tmp_path):
             "helen",
             "--source-dir",
             str(source),
+            "--image-root",
+            str(cache),
             "--output-dir",
             str(output),
             "--write-overlays",

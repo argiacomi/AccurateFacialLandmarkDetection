@@ -66,6 +66,7 @@ SUPPORTED_DATASETS = (
     "cofw",
     "cofw-original",
     "helen",
+    "helen-dense",
     "lapa",
     "jd-landmark",
     "ffl2",
@@ -115,6 +116,7 @@ def _dataset(value: str) -> str:
         "cofw29": "cofw-original",
         "cofw-original-color": "cofw-original",
         "helen": "helen",
+        "helen-dense": "helen",
         "lapa": "lapa",
         "jd": "jd-landmark",
         "jdlandmark": "jd-landmark",
@@ -528,6 +530,22 @@ def _build_image_index(root: Path) -> dict[str, list[Path]]:
     for ext in IMAGE_EXTS:
         for path in root.rglob(f"*{ext}"):
             index.setdefault(path.stem.lower(), []).append(path)
+    return index
+
+
+def _build_combined_image_index(roots: T.Iterable[Path]) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for key, paths in _build_image_index(root).items():
+            bucket = index.setdefault(key, [])
+            for path in paths:
+                resolved = path.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    bucket.append(path)
     return index
 
 
@@ -1273,6 +1291,236 @@ def _native_conditions_for_split(scenario: str, split: str) -> tuple[str, tuple[
     return conds[0], conds
 
 
+def _is_300w_cache_root(path: Path) -> bool:
+    return any((path / subset).is_dir() for subset in ("afw", "helen", "lfpw", "ibug"))
+
+
+def _candidate_300w_cache_roots(root: Path, image_root: str | None) -> tuple[Path, ...]:
+    raw_candidates: list[Path] = []
+    if image_root:
+        raw = Path(image_root)
+        raw_candidates.extend(
+            (
+                raw,
+                raw / "300w",
+                raw / "data" / "300w" / "300w",
+                raw / "extracted" / "data" / "300w" / "300w",
+            )
+        )
+    else:
+        raw_candidates.extend(
+            (
+                root,
+                root / "300w",
+                root / "data" / "300w" / "300w",
+                root.parent / "300w" / "data" / "300w" / "300w",
+                root.parent / "300w" / "300w",
+                ROOT / ".fs_cache" / "landmark_quality" / "300w" / "extracted" / "data" / "300w" / "300w",
+            )
+        )
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in raw_candidates:
+        if not candidate.is_dir():
+            continue
+        if candidate.name in {"trainset", "testset"} and candidate.parent.name in {"helen", "lfpw"}:
+            candidate = candidate.parent.parent
+        elif candidate.name in {"afw", "helen", "lfpw", "ibug"}:
+            candidate = candidate.parent
+        if not _is_300w_cache_root(candidate):
+            continue
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(candidate)
+    return tuple(out)
+
+
+def _path_under_roots(path: Path, roots: T.Sequence[Path]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        with contextlib.suppress(ValueError):
+            resolved.relative_to(root.resolve())
+            return True
+    return False
+
+
+def _images_matching_name(
+    roots: T.Iterable[Path],
+    image_name: str,
+    *,
+    image_index: dict[str, list[Path]] | None = None,
+) -> list[Path]:
+    raw = Path(str(image_name))
+    root_list = tuple(roots)
+    out: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(candidate: Path) -> None:
+        if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTS:
+            resolved = candidate.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                out.append(candidate)
+
+    if raw.is_absolute():
+        add(raw)
+        return out
+
+    search_names = [raw.name]
+    if raw.suffix.lower() not in IMAGE_EXTS:
+        search_names = [f"{raw.name}{ext}" for ext in IMAGE_EXTS]
+    if image_index is not None:
+        index_key = raw.stem.lower() if raw.suffix.lower() in IMAGE_EXTS else raw.name.lower()
+        for match in image_index.get(index_key, []):
+            if match.name in search_names and _path_under_roots(match, root_list):
+                add(match)
+        if out:
+            return out
+
+    for root in root_list:
+        for name in search_names:
+            add(root / raw.parent / name if raw.parent != Path(".") else root / name)
+            for match in sorted(root.rglob(name), key=lambda item: len(item.parts)):
+                add(match)
+    return out
+
+
+def _resolve_unique_image(
+    roots: T.Iterable[Path],
+    image_name: str,
+    *,
+    context: str,
+    image_index: dict[str, list[Path]] | None = None,
+) -> Path:
+    matches = _images_matching_name(roots, image_name, image_index=image_index)
+    if not matches:
+        raise FileNotFoundError(f"{context} image not found: {image_name}")
+    if len(matches) > 1:
+        rendered = ", ".join(str(path) for path in matches[:5])
+        raise ValueError(f"{context} image match is ambiguous for {image_name}: {rendered}")
+    return matches[0]
+
+
+def _helen_300w_roots(root: Path, image_root: str | None) -> tuple[Path, ...]:
+    roots = []
+    for cache_root in _candidate_300w_cache_roots(root, image_root):
+        helen_root = cache_root / "helen"
+        if helen_root.is_dir():
+            roots.append(helen_root)
+    return tuple(roots)
+
+
+def _jd_300w_base_subset(image_name: str) -> str | None:
+    prefix = Path(image_name).stem.split("_", 1)[0].lower()
+    return prefix if prefix in {"afw", "helen", "lfpw", "ibug"} else None
+
+
+def _jd_drop_face_index(stem: str) -> str:
+    base, sep, tail = stem.rpartition("_")
+    return base if sep and tail.isdigit() else stem
+
+
+def _jd_300w_stem_and_split(image_name: str) -> tuple[str | None, str | None, str | None]:
+    path = Path(image_name)
+    stem = path.stem
+    prefix, sep, rest = stem.partition("_")
+    subset = prefix.lower() if sep and prefix.lower() in {"afw", "helen", "lfpw", "ibug"} else None
+    if subset is None:
+        return None, None, None
+    base_stem = _jd_drop_face_index(rest)
+    split_hint: str | None = None
+    if subset == "lfpw":
+        for token, split in (("image_train_", "trainset"), ("image_test_", "testset")):
+            if base_stem.startswith(token):
+                base_stem = "image_" + base_stem.removeprefix(token)
+                split_hint = split
+                break
+    return subset, base_stem, split_hint
+
+
+def _jd_300w_candidate_roots(root: Path, image_root: str | None, image_name: str) -> tuple[Path, ...]:
+    subset, _, split_hint = _jd_300w_stem_and_split(image_name)
+    cache_roots = _candidate_300w_cache_roots(root, image_root)
+    roots: list[Path] = []
+    for cache_root in cache_roots:
+        if subset is None:
+            roots.append(cache_root)
+            continue
+        subset_root = cache_root / subset
+        if not subset_root.is_dir():
+            continue
+        if subset in {"helen", "lfpw"}:
+            if split_hint and (subset_root / split_hint).is_dir():
+                roots.append(subset_root / split_hint)
+            roots.extend(path for path in (subset_root / "trainset", subset_root / "testset") if path.is_dir())
+        else:
+            roots.append(subset_root)
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for item in roots:
+        resolved = item.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(item)
+    return tuple(out)
+
+
+def _jd_300w_image_names(image_name: str) -> list[str]:
+    subset, base_stem, _ = _jd_300w_stem_and_split(image_name)
+    names: list[str] = []
+    if base_stem:
+        names.extend(f"{base_stem}{ext}" for ext in IMAGE_EXTS)
+    names.append(Path(image_name).name)
+    return list(dict.fromkeys(names))
+
+
+def _resolve_jd_300w_image(
+    root: Path,
+    image_root: str | None,
+    image_name: str,
+    *,
+    image_index: dict[str, list[Path]] | None = None,
+) -> Path:
+    roots = _jd_300w_candidate_roots(root, image_root, image_name)
+    if not roots:
+        raise FileNotFoundError(
+            "JD-landmark requires a 300W image cache; pass --image-root pointing to data/300w/300w"
+        )
+    errors: list[str] = []
+    for candidate_name in _jd_300w_image_names(image_name):
+        try:
+            return _resolve_unique_image(
+                roots,
+                candidate_name,
+                context="JD-landmark 300W",
+                image_index=image_index,
+            )
+        except FileNotFoundError as err:
+            errors.append(str(err))
+            continue
+    raise FileNotFoundError(errors[-1] if errors else f"JD-landmark image not found: {image_name}")
+
+
+def _jd_bbox_dirs(root: Path) -> tuple[Path, ...]:
+    candidates = [
+        root / "Test_data1" / "rect",
+        root / "training_dataset_face_detection_bounding_box_v1" / "training_dataset_face_detection_bounding_box",
+    ]
+    candidates.extend(path for path in root.rglob("training_dataset_face_detection_bounding_box") if path.is_dir())
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(candidate)
+    return tuple(out)
+
+
 def _build_expected_schema_dataset(
     root: Path,
     output_dir: Path,
@@ -1354,6 +1602,8 @@ def _build_expected_schema_dataset(
                 split,
             )
         )
+        if limit and scenarios is None and len(samples) >= limit:
+            break
 
     if not samples:
         raise ValueError(f"no {dataset} samples built with {parser_name}; skipped={skipped[:10]}")
@@ -1494,8 +1744,13 @@ def _build_helen(
     if not isinstance(payload, list):
         raise ValueError(f"HELEN annotations.json must contain a list: {annotations}")
 
-    image_base = Path(image_root) if image_root else annotations.parent
-    image_index = _build_image_index(image_base) if image_base.is_dir() else {}
+    helen_roots = _helen_300w_roots(root, image_root)
+    if not helen_roots:
+        raise ValueError(
+            "HELEN dense annotations require a 300W Helen image cache; "
+            "pass --image-root pointing to data/300w/300w or its helen subdirectory"
+        )
+    helen_image_index = _build_combined_image_index(helen_roots)
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     for index, entry in enumerate(payload):
@@ -1521,9 +1776,12 @@ def _build_helen(
             points, detected_schema = _canonical_points(raw_points, source_schema="2d_194")
             if detected_schema != "2d_194":
                 raise ValueError(f"HELEN expected 2d_194, got {detected_schema}")
-            image = _find_named_image((image_base, annotations.parent, root), image_name, image_index=image_index)
-            if image is None:
-                raise FileNotFoundError(f"HELEN image not found: {image_name}")
+            image = _resolve_unique_image(
+                helen_roots,
+                image_name,
+                context="HELEN 300W",
+                image_index=helen_image_index,
+            )
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": sample_id, "reason": str(err)})
             continue
@@ -1537,6 +1795,7 @@ def _build_helen(
             "parser_type": "dataset_specific",
             "annotation_file": str(annotations.resolve()),
             "source_image_name": image_name,
+            "resolved_300w_image_path": str(image.resolve()),
             "source_schema": "2d_194",
         }
         if width is not None:
@@ -1747,31 +2006,43 @@ def _build_jd_landmark(
             image_root=image_root,
         )
 
-    index_root = Path(image_root) if image_root else root
-    image_index = _build_image_index(index_root) if index_root.is_dir() else {}
+    corrected_by_name = {
+        path.name: path
+        for corrected_root in (root / "Corrected_landmark", root if root.name == "Corrected_landmark" else root / "__missing__")
+        if corrected_root.is_dir()
+        for path in corrected_root.glob("*.txt")
+    }
+    global_bbox_dirs = _jd_bbox_dirs(root)
+    jd_image_index = _build_combined_image_index(_candidate_300w_cache_roots(root, image_root))
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     for landmark_dir, image_dir, bbox_dir, source_split, source_name in sources:
         for landmark_path in sorted(landmark_dir.glob("*.txt")):
             image_name = _image_name_from_landmark_name(landmark_path)
+            corrected_path = corrected_by_name.get(landmark_path.name)
+            annotation_path = corrected_path if corrected_path is not None else landmark_path
             try:
-                points, detected_schema = _load_landmark_file(landmark_path)
+                points, detected_schema = _load_landmark_file(annotation_path)
                 if detected_schema != "2d_106":
                     raise ValueError(f"JD-landmark expected 2d_106, got {detected_schema}")
-                roots = []
-                if image_root:
-                    roots.append(Path(image_root))
-                if image_dir is not None:
-                    roots.append(image_dir)
-                roots.append(root)
-                image = _find_named_image(roots, image_name, image_index=image_index)
-                if image is None:
-                    raise FileNotFoundError(f"JD-landmark image not found: {image_name}")
+                try:
+                    image = _resolve_jd_300w_image(root, image_root, image_name, image_index=jd_image_index)
+                    image_source = "300w_cache"
+                except FileNotFoundError:
+                    if image_dir is None:
+                        raise
+                    image = _resolve_unique_image((image_dir,), image_name, context="JD-landmark Test_data1")
+                    image_source = "test_data1_picture"
             except Exception as err:  # noqa: BLE001
                 skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
                 continue
 
-            bbox_path = _bbox_file_for_landmark(bbox_dir, landmark_path, image_name=image_name)
+            bbox_dirs = tuple(path for path in (bbox_dir, *global_bbox_dirs) if path is not None)
+            bbox_path = None
+            for candidate_bbox_dir in bbox_dirs:
+                bbox_path = _bbox_file_for_landmark(candidate_bbox_dir, landmark_path, image_name=image_name)
+                if bbox_path is not None:
+                    break
             bbox = _read_bbox_file(bbox_path)
             sample_id = f"{source_name}/{Path(image_name).stem}"
             metadata = _path_identity_metadata(landmark_path, root=root, dataset="jd-landmark")
@@ -1782,10 +2053,17 @@ def _build_jd_landmark(
                     "source_release": source_name,
                     "source_split": source_split,
                     "source_schema": "2d_106",
+                    "source_annotation": str(landmark_path.resolve()),
                     "source_image_name": image_name,
                     "source_image": str(image.resolve()),
+                    "resolved_image_source": image_source,
+                    "resolved_300w_image_path": str(image.resolve()) if image_source == "300w_cache" else None,
+                    "base_subset": _jd_300w_base_subset(image_name),
                 }
             )
+            if corrected_path is not None:
+                metadata["corrected_annotation"] = str(corrected_path.resolve())
+                metadata["source_landmarks"] = str(corrected_path.resolve())
             if bbox_path is not None and bbox is not None:
                 metadata["source_bbox"] = str(bbox_path.resolve())
                 metadata["bbox_xyxy"] = bbox
@@ -1815,6 +2093,10 @@ def _build_jd_landmark(
                     split,
                 )
             )
+            if limit and scenarios is None and len(samples) >= limit:
+                break
+        if limit and scenarios is None and len(samples) >= limit:
+            break
 
     if not samples:
         raise ValueError(f"no JD-landmark native release samples built; skipped={skipped[:10]}")

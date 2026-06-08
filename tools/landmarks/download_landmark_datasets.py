@@ -102,15 +102,15 @@ SOURCES: tuple[SourceAsset, ...] = (
     ),
     SourceAsset(
         dataset="helen",
-        name="HELEN 194-point source notes",
+        name="HELEN dense 194-point annotations",
         filename="README_HELEN.md",
         required_for_builder=False,
         extract=False,
-        note="Manual staging is required; see the HELEN tracking/source issue.",
+        note="Use the dense annotations as an annotation layer over the existing 300W image cache.",
         manual_steps=(
-            "Review https://github.com/argiacomi/faceswap/issues/99 for the current HELEN source and license notes.",
-            "Stage images and 194-point annotations as images plus same-stem .pts/.txt/.npy/.mat files.",
-            "Build with: python tools/landmarks/build_quality_dataset.py --dataset helen --source-dir <staged-root> --output-dir runs/landmarks/build_helen",
+            "Download annotations.json from https://s3.amazonaws.com/helen-images/annotations.json.",
+            "Keep Helen images in the existing 300W cache at data/300w/300w/helen/{trainset,testset}; do not duplicate them.",
+            "Build with: python tools/landmarks/build_quality_dataset.py --dataset helen-dense --source-dir <annotations-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_helen",
         ),
     ),
     SourceAsset(
@@ -132,11 +132,12 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="README_JD_LANDMARK.md",
         required_for_builder=False,
         extract=False,
-        note="Manual staging is required; see the JD-landmark tracking/source issue.",
+        note="Use JD annotations as an annotation layer over the existing 300W image cache.",
         manual_steps=(
             "Review https://github.com/argiacomi/faceswap/issues/98 for current source and layout details.",
-            "Stage images and 106-point annotations as images plus same-stem .pts/.txt/.npy/.mat files.",
-            "Build with: python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <staged-root> --output-dir runs/landmarks/build_jd_landmark",
+            "Stage Test_data1, Corrected_landmark, and training bbox artifacts; keep base images in data/300w/300w.",
+            "The builder maps names like AFW_134212_1_0.jpg.txt back to afw/134212_1.jpg in the 300W cache.",
+            "Build with: python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <jd-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_jd_landmark",
         ),
     ),
     SourceAsset(
