@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os.path
+import time
 from pathlib import Path
 
 import cv2
@@ -281,6 +283,281 @@ def _visibility_target_from_entry(entry, metadata, landmark_count):
     return None, ""
 
 
+MANIFEST_INDEX_VERSION = 1
+
+
+def _sha256_path(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _path_fingerprint(path, *, include_sha256=False):
+    path = Path(path)
+    payload = {
+        "path": str(path.resolve() if path.exists() else path.expanduser()),
+        "exists": path.exists(),
+        "is_file": path.is_file(),
+        "size": None,
+        "mtime_ns": None,
+    }
+    try:
+        stat = path.stat()
+    except OSError:
+        return payload
+
+    payload["size"] = int(stat.st_size)
+    payload["mtime_ns"] = int(stat.st_mtime_ns)
+    if include_sha256 and path.is_file():
+        payload["sha256"] = _sha256_path(path)
+    return payload
+
+
+def _manifest_index_path(manifest_path):
+    manifest_path = Path(manifest_path)
+    return manifest_path.with_name(f"{manifest_path.name}.index.jsonl")
+
+
+def _manifest_index_header(manifest_path):
+    return {
+        "type": "manifest_index_meta",
+        "version": MANIFEST_INDEX_VERSION,
+        "manifest_fingerprint": _path_fingerprint(manifest_path, include_sha256=True),
+    }
+
+
+def _load_manifest_index(manifest_path):
+    index_path = _manifest_index_path(manifest_path)
+    if not index_path.is_file():
+        return {}
+
+    try:
+        lines = index_path.read_text(encoding="utf-8").splitlines()
+        if not lines:
+            return {}
+        header = json.loads(lines[0])
+        if header.get("type") != "manifest_index_meta":
+            return {}
+        if int(header.get("version", -1)) != MANIFEST_INDEX_VERSION:
+            return {}
+        if header.get("manifest_fingerprint") != _manifest_index_header(manifest_path)["manifest_fingerprint"]:
+            return {}
+
+        records = {}
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("type") != "landmark_contract":
+                continue
+            records[int(record["entry_index"])] = record
+        return records
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return {}
+
+
+def _write_manifest_index(manifest_path, records_by_index):
+    if not records_by_index:
+        return
+
+    index_path = _manifest_index_path(manifest_path)
+    lines = [json.dumps(_manifest_index_header(manifest_path), sort_keys=True)]
+    for entry_index in sorted(records_by_index):
+        record = records_by_index[entry_index]
+        if record.get("type") == "landmark_contract":
+            lines.append(json.dumps(record, sort_keys=True))
+
+    tmp_path = index_path.with_name(f"{index_path.name}.tmp.{int(time.time() * 1_000_000)}")
+    try:
+        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp_path.replace(index_path)
+    except OSError as exc:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        print(f"warning: could not write manifest index cache {index_path}: {exc}")
+
+
+def _cached_landmark_contract(index_records, entry_index, landmarks_path):
+    record = index_records.get(int(entry_index))
+    if not isinstance(record, dict):
+        return None
+
+    if record.get("landmarks_path") != str(landmarks_path):
+        return None
+    if record.get("landmarks_fingerprint") != _path_fingerprint(landmarks_path):
+        return None
+
+    contract = record.get("contract")
+    if not isinstance(contract, dict):
+        return None
+    required = {"schema", "target_schema", "landmark_count", "head_name"}
+    if not required.issubset(contract):
+        return None
+    return contract
+
+
+def _build_landmark_contract(entry, metadata, landmarks_path, entry_index):
+    try:
+        landmarks = np.load(landmarks_path)
+    except OSError:
+        raise FileNotFoundError(
+            f"could not read landmarks for manifest entry {entry_index}: {landmarks_path}"
+        )
+
+    raw_schema = str(metadata.get("source_schema") or entry.get("source_schema") or "")
+    raw_target_schema = entry.get("target_schema") or metadata.get("target_schema")
+    sample_label = entry.get("sample_id") or entry.get("id") or entry_index
+    raw_points = np.asarray(landmarks)
+
+    declared_schema = canonicalize_schema(raw_schema) if raw_schema else None
+    declared_source_trainable = False
+    if declared_schema is not None:
+        try:
+            head_name_for_schema(declared_schema)
+            declared_source_trainable = True
+        except ValueError:
+            declared_source_trainable = False
+
+    try:
+        xy_points = raw_points[:, :2]
+    except (IndexError, TypeError) as exc:
+        raise ManifestContractError(
+            "manifest landmark array is not a 2D landmark array: "
+            f"sample={sample_label!r} "
+            f"source_schema={raw_schema or None!r} "
+            f"target_schema={raw_target_schema or None!r} "
+            f"shape={tuple(raw_points.shape)!r}"
+        ) from exc
+
+    try:
+        detected_schema = infer_schema(xy_points)
+    except ValueError as exc:
+        if raw_target_schema not in (None, "") or declared_source_trainable:
+            raise ManifestContractError(
+                "manifest landmark array shape is not compatible with declared schema: "
+                f"sample={sample_label!r} "
+                f"source_schema={raw_schema or None!r} "
+                f"target_schema={raw_target_schema or None!r} "
+                f"shape={tuple(raw_points.shape)!r}"
+            ) from exc
+        raise
+
+    if declared_schema is None:
+        declared_schema = detected_schema
+    target_schema = (
+        canonicalize_schema(raw_target_schema)
+        if raw_target_schema not in (None, "")
+        else detected_schema
+    )
+
+    if raw_schema and declared_schema != detected_schema:
+        has_explicit_target = raw_target_schema not in (None, "")
+        source_schema_matches_loaded_points = _schemas_share_trainable_head_and_count(
+            declared_schema,
+            detected_schema,
+        )
+        if (
+            not source_schema_matches_loaded_points
+            and not (has_explicit_target and target_schema == detected_schema)
+        ):
+            raise ManifestContractError(
+                "manifest source_schema does not match loaded landmark array "
+                "and no explicit matching target_schema was provided: "
+                f"sample={sample_label!r} "
+                f"source_schema={declared_schema!r} "
+                f"detected_schema={detected_schema!r} "
+                f"target_schema={target_schema!r} "
+                f"shape={tuple(raw_points.shape)!r}"
+            )
+
+    if target_schema != detected_schema:
+        raise ManifestContractError(
+            "manifest target_schema does not match loaded landmark array: "
+            f"sample={sample_label!r} "
+            f"target_schema={target_schema!r} actual_schema={detected_schema!r} "
+            f"shape={tuple(raw_points.shape)!r}"
+        )
+
+    try:
+        normalized_landmarks = normalize_landmark_array(xy_points, schema=target_schema)
+    except ValueError as exc:
+        raise ManifestContractError(
+            "manifest landmarks failed target_schema normalization: "
+            f"sample={sample_label!r} "
+            f"target_schema={target_schema!r} "
+            f"shape={tuple(raw_points.shape)!r}: {exc}"
+        ) from exc
+
+    actual_schema = infer_schema(normalized_landmarks[:, :2])
+    if target_schema != actual_schema:
+        raise ManifestContractError(
+            "manifest target_schema does not match normalized landmark array: "
+            f"sample={sample_label!r} "
+            f"target_schema={target_schema!r} actual_schema={actual_schema!r} "
+            f"shape={tuple(normalized_landmarks.shape)!r}"
+        )
+
+    expected_head_name = head_name_for_schema(target_schema)
+    head_name = str(
+        entry.get("head_name")
+        or metadata.get("head_name")
+        or expected_head_name
+    )
+    if head_name != expected_head_name:
+        raise ManifestContractError(
+            "manifest head_name does not match target_schema: "
+            f"sample={sample_label!r} "
+            f"head_name={head_name!r} expected={expected_head_name!r}"
+        )
+
+    raw_landmark_count = entry.get("landmark_count")
+    if raw_landmark_count in (None, ""):
+        raw_landmark_count = metadata.get("landmark_count")
+    try:
+        declared_landmark_count = _coerce_optional_int(raw_landmark_count)
+    except ValueError as exc:
+        raise ManifestContractError(str(exc)) from exc
+    expected_landmark_count = point_count_for_schema(target_schema)
+    if (
+        declared_landmark_count is not None
+        and declared_landmark_count != expected_landmark_count
+    ):
+        raise ManifestContractError(
+            "manifest landmark_count does not match target_schema: "
+            f"sample={sample_label!r} "
+            f"landmark_count={declared_landmark_count!r} "
+            f"expected={expected_landmark_count!r}"
+        )
+
+    return {
+        "schema": str(target_schema),
+        "target_schema": str(target_schema),
+        "landmark_count": int(normalized_landmarks.shape[0]),
+        "head_name": str(head_name),
+    }
+
+
+def _landmark_contract_for_entry(entry, metadata, landmarks_path, entry_index, index_records):
+    cached_contract = _cached_landmark_contract(index_records, entry_index, landmarks_path)
+    if cached_contract is not None:
+        return cached_contract, index_records[int(entry_index)], True
+
+    contract = _build_landmark_contract(entry, metadata, landmarks_path, entry_index)
+    record = {
+        "type": "landmark_contract",
+        "version": MANIFEST_INDEX_VERSION,
+        "entry_index": int(entry_index),
+        "landmarks_path": str(landmarks_path),
+        "landmarks_fingerprint": _path_fingerprint(landmarks_path),
+        "contract": contract,
+    }
+    return contract, record, False
+
+
 class LandmarkDataset(Dataset):
     """Schema-aware landmark manifest dataset.
 
@@ -356,6 +633,10 @@ class LandmarkDataset(Dataset):
         declared_splits = {_entry_split(entry) for entry in entries if isinstance(entry, dict) and _entry_split(entry)}
         use_split_filter = bool(declared_splits)
 
+        cached_index_records = _load_manifest_index(manifest_path)
+        index_records = dict(cached_index_records)
+        index_dirty = False
+
         samples = []
         skipped_non_trainable_schema = 0
         for index, entry in enumerate(entries):
@@ -381,131 +662,20 @@ class LandmarkDataset(Dataset):
 
             landmarks_path = _resolve_path(base_dir, landmarks_value)
             try:
-                landmarks = np.load(landmarks_path)
-            except OSError:
-                raise FileNotFoundError(f"could not read landmarks for manifest entry {index}: {landmarks_path}")
-            try:
-                raw_schema = str(metadata.get("source_schema") or entry.get("source_schema") or "")
-                raw_target_schema = entry.get("target_schema") or metadata.get("target_schema")
-                sample_label = entry.get("sample_id") or entry.get("id") or index
-                raw_points = np.asarray(landmarks)
-
-                declared_schema = canonicalize_schema(raw_schema) if raw_schema else None
-                declared_source_trainable = False
-                if declared_schema is not None:
-                    try:
-                        head_name_for_schema(declared_schema)
-                        declared_source_trainable = True
-                    except ValueError:
-                        declared_source_trainable = False
-
-                try:
-                    xy_points = raw_points[:, :2]
-                except (IndexError, TypeError) as exc:
-                    raise ManifestContractError(
-                        "manifest landmark array is not a 2D landmark array: "
-                        f"sample={sample_label!r} "
-                        f"source_schema={raw_schema or None!r} "
-                        f"target_schema={raw_target_schema or None!r} "
-                        f"shape={tuple(raw_points.shape)!r}"
-                    ) from exc
-
-                try:
-                    detected_schema = infer_schema(xy_points)
-                except ValueError as exc:
-                    if raw_target_schema not in (None, "") or declared_source_trainable:
-                        raise ManifestContractError(
-                            "manifest landmark array shape is not compatible with declared schema: "
-                            f"sample={sample_label!r} "
-                            f"source_schema={raw_schema or None!r} "
-                            f"target_schema={raw_target_schema or None!r} "
-                            f"shape={tuple(raw_points.shape)!r}"
-                        ) from exc
-                    raise
-
-                if declared_schema is None:
-                    declared_schema = detected_schema
-                target_schema = (
-                    canonicalize_schema(raw_target_schema)
-                    if raw_target_schema not in (None, "")
-                    else detected_schema
+                contract, index_record, cache_hit = _landmark_contract_for_entry(
+                    entry,
+                    metadata,
+                    landmarks_path,
+                    index,
+                    cached_index_records,
                 )
-
-                if raw_schema and declared_schema != detected_schema:
-                    has_explicit_target = raw_target_schema not in (None, "")
-                    source_schema_matches_loaded_points = _schemas_share_trainable_head_and_count(
-                        declared_schema,
-                        detected_schema,
-                    )
-                    if (
-                        not source_schema_matches_loaded_points
-                        and not (has_explicit_target and target_schema == detected_schema)
-                    ):
-                        raise ManifestContractError(
-                            "manifest source_schema does not match loaded landmark array "
-                            "and no explicit matching target_schema was provided: "
-                            f"sample={sample_label!r} "
-                            f"source_schema={declared_schema!r} "
-                            f"detected_schema={detected_schema!r} "
-                            f"target_schema={target_schema!r} "
-                            f"shape={tuple(raw_points.shape)!r}"
-                        )
-
-                if target_schema != detected_schema:
-                    raise ManifestContractError(
-                        "manifest target_schema does not match loaded landmark array: "
-                        f"sample={sample_label!r} "
-                        f"target_schema={target_schema!r} actual_schema={detected_schema!r} "
-                        f"shape={tuple(raw_points.shape)!r}"
-                    )
-
-                try:
-                    landmarks = normalize_landmark_array(xy_points, schema=target_schema)
-                except ValueError as exc:
-                    raise ManifestContractError(
-                        "manifest landmarks failed target_schema normalization: "
-                        f"sample={sample_label!r} "
-                        f"target_schema={target_schema!r} "
-                        f"shape={tuple(raw_points.shape)!r}: {exc}"
-                    ) from exc
-
-                schema = target_schema
-                actual_schema = infer_schema(landmarks[:, :2])
-                if target_schema != actual_schema:
-                    raise ManifestContractError(
-                        "manifest target_schema does not match normalized landmark array: "
-                        f"sample={sample_label!r} "
-                        f"target_schema={target_schema!r} actual_schema={actual_schema!r} "
-                        f"shape={tuple(landmarks.shape)!r}"
-                    )
-
-                expected_head_name = head_name_for_schema(target_schema)
-                head_name = str(
-                    entry.get("head_name")
-                    or metadata.get("head_name")
-                    or expected_head_name
-                )
-                if head_name != expected_head_name:
-                    raise ManifestContractError(
-                        "manifest head_name does not match target_schema: "
-                        f"sample={entry.get('sample_id') or entry.get('id') or index!r} "
-                        f"head_name={head_name!r} expected={expected_head_name!r}"
-                    )
-
-                raw_landmark_count = entry.get("landmark_count")
-                if raw_landmark_count in (None, ""):
-                    raw_landmark_count = metadata.get("landmark_count")
-                try:
-                    declared_landmark_count = _coerce_optional_int(raw_landmark_count)
-                except ValueError as exc:
-                    raise ManifestContractError(str(exc)) from exc
-                expected_landmark_count = point_count_for_schema(target_schema)
-                if declared_landmark_count is not None and declared_landmark_count != expected_landmark_count:
-                    raise ManifestContractError(
-                        "manifest landmark_count does not match target_schema: "
-                        f"sample={entry.get('sample_id') or entry.get('id') or index!r} "
-                        f"landmark_count={declared_landmark_count!r} expected={expected_landmark_count!r}"
-                    )
+                if not cache_hit:
+                    index_records[int(index)] = index_record
+                    index_dirty = True
+                schema = str(contract["schema"])
+                target_schema = str(contract["target_schema"])
+                landmark_count = int(contract["landmark_count"])
+                head_name = str(contract["head_name"])
             except ManifestContractError:
                 raise
             except ValueError:
@@ -516,8 +686,8 @@ class LandmarkDataset(Dataset):
                 skipped_non_trainable_schema += 1
                 continue
 
-            landmark_mask = _landmark_mask_from_entry(entry, metadata, landmarks.shape[0])
-            visibility_target, visibility_target_source = _visibility_target_from_entry(entry, metadata, landmarks.shape[0])
+            landmark_mask = _landmark_mask_from_entry(entry, metadata, landmark_count)
+            visibility_target, visibility_target_source = _visibility_target_from_entry(entry, metadata, landmark_count)
             conditions = _coerce_conditions(entry, metadata)
             samples.append(
                 {
@@ -529,7 +699,7 @@ class LandmarkDataset(Dataset):
                     "conditions": conditions,
                     "source_schema": schema,
                     "target_schema": target_schema,
-                    "landmark_count": int(landmarks.shape[0]),
+                    "landmark_count": int(landmark_count),
                     "head_name": head_name,
                     "split": str(entry.get("split") or metadata.get("split") or ""),
                     "split_safe_id": str(entry.get("split_safe_id") or metadata.get("split_safe_id") or ""),
@@ -543,6 +713,9 @@ class LandmarkDataset(Dataset):
                     "landmark_mask": landmark_mask,
                 }
             )
+
+        if index_dirty:
+            _write_manifest_index(manifest_path, index_records)
 
         if skipped_non_trainable_schema:
             reason = "non-trainable" if self.schema_aware_training else "non-68-point"
