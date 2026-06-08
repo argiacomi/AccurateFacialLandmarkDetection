@@ -5,7 +5,6 @@ import torch
 from torch.utils.data._utils.collate import default_collate
 
 from lib.landmarks.core.manifest_aliases import is_schema_aware_manifest_dataset
-from lib.landmarks.datasets.registry import GetDataset
 from lib.landmarks.training.domain_balanced_sampler import sample_bucket, sample_dataset, sample_schema
 
 AUXILIARY_CLASS_NAMES = {
@@ -66,6 +65,8 @@ def build_dataset(
         if is_schema_aware_manifest_dataset_name(args.data_name)
         else ""
     )
+    from lib.landmarks.datasets.registry import GetDataset
+
     return GetDataset(
         args.data_name,
         args.root_folder,
