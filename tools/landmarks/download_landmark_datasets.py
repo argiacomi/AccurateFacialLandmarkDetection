@@ -62,6 +62,40 @@ class SourceAsset:
     def is_manual(self) -> bool:
         return self.url is None and self.google_drive_file_id is None
 
+    @property
+    def source_kind(self) -> str:
+        if self.url is not None:
+            return "url"
+        if self.google_drive_file_id is not None:
+            return "google_drive"
+        return "manual"
+
+    @property
+    def source_display(self) -> str:
+        if self.url is not None:
+            return self.url
+        if self.google_drive_file_id is not None:
+            return f"gdrive:{self.google_drive_file_id}"
+        return "manual"
+
+    @property
+    def checksum_marker(self) -> str:
+        if self.sha256:
+            return "sha256"
+        if self.sha1:
+            return "sha1"
+        return "none"
+
+    @property
+    def kind_marker(self) -> str:
+        if self.is_manual:
+            return "manual"
+        if self.google_drive_file_id is not None and self.url is None:
+            return "gdrive"
+        if self.alternate:
+            return "alternate"
+        return "required" if self.required_for_builder else "optional"
+
 
 SOURCES: tuple[SourceAsset, ...] = (
     SourceAsset(
@@ -128,16 +162,41 @@ SOURCES: tuple[SourceAsset, ...] = (
     ),
     SourceAsset(
         dataset="jd-landmark",
-        name="JD-landmark 106-point source notes",
+        name="JD-landmark Test_data1",
+        filename="Test_data1.zip",
+        google_drive_file_id="12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm",
+        google_drive_view_url="https://drive.google.com/open?id=12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm",
+        required_for_builder=False,
+        note="JD-landmark Test Dataset 1 (landmark/picture/rect). Requires --include-google-drive and gdown.",
+    ),
+    SourceAsset(
+        dataset="jd-landmark",
+        name="JD-landmark corrected landmarks",
+        filename="Corrected_landmark.zip",
+        url="https://github.com/facial-landmarks-localization-challenge/facial-landmarks-localization-challenge.github.io/raw/master/Corrected_landmark.zip",
+        required_for_builder=False,
+        note="Corrected 106-point landmark overrides applied over matching annotation filenames.",
+    ),
+    SourceAsset(
+        dataset="jd-landmark",
+        name="JD-landmark training bbox",
+        filename="training_dataset_face_detection_bounding_box_v1.zip",
+        url="https://github.com/facial-landmarks-localization-challenge/facial-landmarks-localization-challenge.github.io/raw/master/training_dataset_face_detection_bounding_box_v1.zip",
+        required_for_builder=False,
+        note="Training face-detection bounding boxes attached as bbox metadata when available.",
+    ),
+    SourceAsset(
+        dataset="jd-landmark",
+        name="JD-landmark staging notes",
         filename="README_JD_LANDMARK.md",
         required_for_builder=False,
         extract=False,
-        note="Use JD annotations as an annotation layer over the existing 300W image cache.",
+        note="JD annotations are an annotation layer over the existing 300W image cache; only annotation/bbox artifacts are downloaded.",
         manual_steps=(
-            "Review https://github.com/argiacomi/faceswap/issues/98 for current source and layout details.",
-            "Stage Test_data1, Corrected_landmark, and training bbox artifacts; keep base images in data/300w/300w.",
+            "Download the base 300W images first: python tools/landmarks/download_landmark_datasets.py --datasets 300w --extract.",
             "The builder maps names like AFW_134212_1_0.jpg.txt back to afw/134212_1.jpg in the 300W cache.",
-            "Build with: python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <jd-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_jd_landmark",
+            "prepare_landmark_dataset.py stages Test_data1, Corrected_landmark, and training bbox into one source root automatically.",
+            "Manual build: python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <jd-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_jd_landmark",
         ),
     ),
     SourceAsset(
@@ -314,12 +373,41 @@ def _dataset_key(value: str) -> str:
     return aliases.get(key, key)
 
 
-def _selected_sources(dataset_arg: str, *, include_alternates: bool) -> list[SourceAsset]:
-    requested = tuple(_dataset_key(item) for item in dataset_arg.split(",") if item.strip())
-    selected = set(ALL_DATASETS if not requested or requested == ("all",) else requested)
-    unknown = sorted(selected - set(ALL_DATASETS))
+def normalize_datasets(values: T.Iterable[str]) -> list[str]:
+    """Normalize a mix of space- and comma-separated dataset tokens to canonical ids.
+
+    Accepts iterables like ``["wflw-v", "300vw,cofw-original"]`` and preserves the
+    first-seen order while de-duplicating. ``all`` expands to every dataset id.
+    """
+    out: list[str] = []
+    for value in values:
+        for token in str(value).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            key = _dataset_key(token)
+            if key == "all":
+                for dataset in ALL_DATASETS:
+                    if dataset not in out:
+                        out.append(dataset)
+                continue
+            if key not in out:
+                out.append(key)
+    return out
+
+
+def _resolve_dataset_keys(datasets: T.Sequence[str] | None) -> list[str]:
+    selected = list(datasets) if datasets else list(ALL_DATASETS)
+    unknown = sorted(set(selected) - set(ALL_DATASETS))
     if unknown:
         raise ValueError(f"unknown dataset(s): {', '.join(unknown)}")
+    return selected
+
+
+def _selected_sources(
+    datasets: T.Sequence[str] | None, *, include_alternates: bool
+) -> list[SourceAsset]:
+    selected = set(_resolve_dataset_keys(datasets))
     return [
         source
         for source in SOURCES
@@ -511,11 +599,20 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
         "required_for_builder": asset.required_for_builder,
         "alternate": asset.alternate,
         "note": asset.note,
+        "source_kind": asset.source_kind,
+        "source": asset.source_display,
+        "checksum_status": "verified" if (asset.sha256 or asset.sha1) else "none",
     }
+    if asset.url is not None:
+        result["url"] = asset.url
+    if asset.google_drive_file_id is not None:
+        result["google_drive_file_id"] = asset.google_drive_file_id
+        if asset.google_drive_view_url:
+            result["google_drive_view_url"] = asset.google_drive_view_url
 
     if asset.is_manual:
         path = _write_manual_steps(asset, dataset_dir)
-        result.update(status="manual", path=str(path))
+        result.update(status="manual", path=str(path), checksum_status="not_applicable")
         return result
 
     if asset.google_drive_file_id and not args.include_google_drive:
@@ -523,8 +620,7 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
         result.update(
             status="manual_google_drive",
             path=str(path),
-            google_drive_file_id=asset.google_drive_file_id,
-            google_drive_view_url=asset.google_drive_view_url,
+            checksum_status="not_applicable",
         )
         return result
 
@@ -537,11 +633,15 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
             path = _download_url(asset.url, destination, force=args.force)
         if not args.skip_checksum:
             _verify(path, sha256=asset.sha256, sha1=asset.sha1)
+            checksum_status = "verified" if (asset.sha256 or asset.sha1) else "none"
+        else:
+            checksum_status = "skipped"
         result.update(
             status="downloaded",
             archive=str(path),
             sha256=_sha256_file(path),
             sha1=_sha1_file(path),
+            checksum_status=checksum_status,
         )
         if args.extract and asset.extract:
             extracted = _extract_archive(path, extract_dir, force=args.force)
@@ -560,6 +660,100 @@ def _write_summary(results: list[dict[str, T.Any]], output_root: Path) -> Path:
     path = output_root / "download_summary.json"
     path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+REGISTRY_VERSION = 1
+MANUAL_STATUSES = frozenset({"manual", "manual_google_drive"})
+
+
+def registry_path(output_root: Path) -> Path:
+    return Path(output_root) / "registry.json"
+
+
+def _dataset_source_dir(output_root: Path, dataset: str) -> Path:
+    """Default extracted source root the builders consume for a dataset."""
+    return Path(output_root) / dataset / "extracted"
+
+
+def build_registry(results: list[dict[str, T.Any]], output_root: Path) -> dict[str, T.Any]:
+    output_root = Path(output_root)
+    datasets: dict[str, T.Any] = {}
+    for result in results:
+        dataset = result["dataset"]
+        entry = datasets.setdefault(
+            dataset,
+            {"source_dir": str(_dataset_source_dir(output_root, dataset)), "assets": []},
+        )
+        entry["assets"].append(
+            {
+                "name": result.get("name"),
+                "filename": result.get("filename"),
+                "status": result.get("status"),
+                "archive": result.get("archive"),
+                "extracted": result.get("extracted"),
+                "source_kind": result.get("source_kind"),
+                "source": result.get("source"),
+                "checksum_status": result.get("checksum_status"),
+                "required_for_builder": result.get("required_for_builder"),
+                "alternate": result.get("alternate"),
+                "manual": result.get("status") in MANUAL_STATUSES,
+            }
+        )
+    return {
+        "version": REGISTRY_VERSION,
+        "output_root": str(output_root.resolve()),
+        "datasets": datasets,
+    }
+
+
+def _merge_registry(existing: dict[str, T.Any], fresh: dict[str, T.Any]) -> dict[str, T.Any]:
+    """Merge a fresh registry into an existing one, replacing only touched datasets."""
+    merged = dict(existing) if existing else {}
+    merged["version"] = REGISTRY_VERSION
+    merged["output_root"] = fresh.get("output_root", merged.get("output_root"))
+    datasets = dict(merged.get("datasets") or {})
+    datasets.update(fresh.get("datasets") or {})
+    merged["datasets"] = datasets
+    return merged
+
+
+def write_registry(results: list[dict[str, T.Any]], output_root: Path) -> Path:
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    path = registry_path(output_root)
+    fresh = build_registry(results, output_root)
+    existing = load_registry(output_root)
+    payload = _merge_registry(existing, fresh) if existing else fresh
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def load_registry(output_root: Path) -> dict[str, T.Any] | None:
+    path = registry_path(output_root)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def resolve_source_dir(registry: dict[str, T.Any], dataset: str, output_root: Path) -> Path | None:
+    """Resolve the extracted source directory the builder should consume for a dataset."""
+    dataset = _dataset_key(dataset)
+    entry = (registry.get("datasets") or {}).get(dataset) if registry else None
+    candidates: list[Path] = []
+    if entry:
+        if entry.get("source_dir"):
+            candidates.append(Path(entry["source_dir"]))
+        for asset in entry.get("assets") or []:
+            if asset.get("extracted"):
+                candidates.append(Path(asset["extracted"]))
+    candidates.append(_dataset_source_dir(output_root, dataset))
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def _print_build_hints(output_root: Path) -> None:
@@ -602,10 +796,74 @@ def _print_build_hints(output_root: Path) -> None:
     )
 
 
+def format_list_table(sources: T.Sequence[SourceAsset]) -> str:
+    """Render configured sources as a stable, column-aligned table."""
+    headers = ("dataset", "asset", "source", "checksum", "kind")
+    rows: list[tuple[str, str, str, str, str]] = []
+    for asset in sources:
+        source = asset.source_display
+        if asset.is_manual:
+            source = f"manual ({asset.filename})"
+        rows.append(
+            (asset.dataset, asset.name, source, asset.checksum_marker, asset.kind_marker)
+        )
+    widths = [
+        max(len(headers[col]), *(len(row[col]) for row in rows)) if rows else len(headers[col])
+        for col in range(len(headers))
+    ]
+    # Do not pad the final column so trailing whitespace stays out of the output.
+    def fmt(values: T.Sequence[str]) -> str:
+        cells = [values[col].ljust(widths[col]) for col in range(len(widths) - 1)]
+        cells.append(values[-1])
+        return "  ".join(cells).rstrip()
+
+    lines = [fmt(headers), fmt(tuple("-" * widths[col] for col in range(len(widths))))]
+    lines.extend(fmt(row) for row in rows)
+    return "\n".join(lines)
+
+
+def download_datasets(
+    datasets: T.Sequence[str] | None,
+    *,
+    output_root: Path,
+    include_google_drive: bool = False,
+    extract: bool = True,
+    force: bool = False,
+    skip_checksum: bool = False,
+    include_alternates: bool = False,
+    keep_going: bool = True,
+) -> tuple[list[dict[str, T.Any]], dict[str, T.Any]]:
+    """Programmatic download entry point used by the preparation orchestrator.
+
+    Returns the per-asset results and the persisted registry payload.
+    """
+    output_root = Path(output_root)
+    sources = _selected_sources(datasets, include_alternates=include_alternates)
+    args = argparse.Namespace(
+        output_root=output_root,
+        include_google_drive=include_google_drive,
+        extract=extract,
+        force=force,
+        skip_checksum=skip_checksum,
+        keep_going=keep_going,
+    )
+    results = [_process_asset(asset, args) for asset in sources]
+    _write_summary(results, output_root)
+    write_registry(results, output_root)
+    return results, load_registry(output_root) or build_registry(results, output_root)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, default=Path("data/landmarks"))
-    parser.add_argument("--dataset", default="all", help="Comma-separated dataset list or 'all'.")
+    parser.add_argument("--dataset", default=None, help="Comma-separated dataset list or 'all'. Backward-compatible alias for --datasets.")
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=None,
+        metavar="DATASET",
+        help="One or more datasets, space- and/or comma-separated (e.g. --datasets wflw-v 300vw,cofw-original). Use 'all' for everything.",
+    )
     parser.add_argument("--extract", action="store_true", help="Extract downloaded archives after download.")
     parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
     parser.add_argument("--include-google-drive", action="store_true", help="Download Google Drive assets with gdown when available.")
@@ -616,29 +874,31 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_requested_datasets(args: argparse.Namespace) -> list[str] | None:
+    tokens: list[str] = []
+    if args.datasets:
+        tokens.extend(args.datasets)
+    if args.dataset:
+        tokens.append(args.dataset)
+    if not tokens:
+        return None
+    return normalize_datasets(tokens)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    sources = _selected_sources(args.dataset, include_alternates=args.include_alternates)
+    requested = _resolve_requested_datasets(args)
+    sources = _selected_sources(requested, include_alternates=args.include_alternates)
 
     if args.list:
-        for asset in sources:
-            location = asset.url or (
-                f"gdrive:{asset.google_drive_file_id}" if asset.google_drive_file_id else "manual"
-            )
-            flags = []
-            if asset.alternate:
-                flags.append("alternate")
-            if asset.sha256:
-                flags.append("sha256")
-            if asset.sha1:
-                flags.append("sha1")
-            flag_text = f" [{' '.join(flags)}]" if flags else ""
-            print(f"{asset.dataset:12s} {asset.name:32s} {location}{flag_text}")
+        print(format_list_table(sources))
         return 0
 
     results = [_process_asset(asset, args) for asset in sources]
     summary = _write_summary(results, Path(args.output_root))
+    registry = write_registry(results, Path(args.output_root))
     print(f"\nWrote summary: {summary}")
+    print(f"Wrote registry: {registry}")
     _print_build_hints(Path(args.output_root))
 
     errored = [result for result in results if result.get("status") == "error"]
