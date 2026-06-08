@@ -8,7 +8,7 @@ python tools/landmarks/tune_training_hyperparameters.py \
   --dry-run
 ```
 
-The script writes every generated config, command line, metric file, ranked trial list, finalist summary, and final recommendation under the output directory. Re-running with the same output directory resumes from existing `result.json` artifacts.
+The script writes every generated config, command line, metric file, ranked trial list, finalist summary, and final recommendation under the output directory. Re-running with the same output directory resumes from existing `result.json` artifacts and the persisted Optuna study.
 
 ## Stages
 
@@ -16,7 +16,7 @@ The staged plan is:
 
 1. **Baseline** using fixed default loss weights and learning rate.
 2. **Manual STARLoss_v2 bracket** with fixed consistency, auxiliary, and LR values.
-3. **Narrow loss-weight search** over:
+3. **Optuna narrow loss-weight search** over:
    - `star_loss_weight`
    - `schema_consistency_weight`
    - `auxiliary_loss_weight`
@@ -24,6 +24,33 @@ The staged plan is:
 5. **Learning-rate sweep** around `1e-4` with selected loss weights frozen.
 6. **Multi-seed LR finalist reruns**.
 7. **Final recommendation** in `best_training_hyperparameters.json`.
+
+## Optuna study
+
+`requirements.txt` includes Optuna. By default, the loss-weight stage creates or resumes a SQLite-backed study at:
+
+```text
+sqlite:///<output-dir>/optuna_study.db
+```
+
+The script uses Optuna's `create_study(..., load_if_exists=True)`, `study.ask()`, and `study.tell()` flow so trial commands can be launched by the orchestrator while scores are persisted back to Optuna after metrics are available.
+
+Useful options:
+
+```text
+--optuna-trials 40
+--optuna-study-name landmark_loss_weight_search
+--optuna-storage sqlite:////shared/path/landmark_tuning.db
+--optuna-workers 4
+--optuna-min-pruning-epoch 5
+--optuna-pruner-startup-trials 5
+--require-optuna
+--disable-optuna
+```
+
+For parallel workers, launch multiple script processes with the same `--output-dir` or shared `--optuna-storage`; Optuna coordinates trial assignment through the shared storage.
+
+`--require-optuna` fails fast if Optuna cannot be imported. `--disable-optuna` is only for minimal environments and uses deterministic fallback sampling instead of a real study.
 
 ## Dry-run planning
 
@@ -83,7 +110,7 @@ Missing hard slices are reported in each result's objective diagnostics instead 
 
 ## Mock metrics smoke test
 
-For planner and CI smoke tests, `--mock-metrics` writes deterministic synthetic metrics instead of launching training:
+For planner and CI smoke tests, `--mock-metrics` writes deterministic synthetic metrics instead of launching training while still exercising Optuna trial creation when Optuna is installed:
 
 ```bash
 python tools/landmarks/tune_training_hyperparameters.py \
@@ -99,6 +126,8 @@ python tools/landmarks/tune_training_hyperparameters.py \
 
 - `baseline_config.json`
 - `baseline_result.json`
+- `optuna_study.db`
+- `optuna_trial_plan.json`
 - `optuna_study.json`
 - `ranked_loss_candidates.json`
 - `loss_finalist_summary.json`
