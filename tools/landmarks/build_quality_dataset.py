@@ -35,7 +35,18 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.landmarks.core.schema import normalize_landmarks
+from lib.landmarks.core.schema import (
+    canonicalize_schema,
+    head_name_for_schema,
+    normalize_landmark_array,
+    point_count_for_schema,
+)
+from lib.landmarks.manifest.contract import (
+    TRAINING_MANIFEST_CONTRACT,
+    TRAINING_MANIFEST_VERSION,
+    manifest_summary,
+    split_safe_id_for_sample,
+)
 from lib.landmarks.datasets.sources import extract_archive_to_temp
 
 logger = logging.getLogger(__name__)
@@ -134,44 +145,56 @@ def _resolve_path(value: T.Any, *, base_dir: Path) -> Path:
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 
+def _schema_from_declared_or_count(source_schema: str | None, count: int) -> str:
+    if source_schema:
+        raw = str(source_schema).strip().lower().replace("-", "_")
+        if raw in {"3d_68", "68_3d", "lm_3d_68"}:
+            return "2d_68"
+        schema = canonicalize_schema(source_schema)
+        if point_count_for_schema(schema) != int(count):
+            raise ValueError(
+                f"declared source_schema {source_schema!r} expects "
+                f"{point_count_for_schema(schema)} points, got {count}"
+            )
+        return schema
+    return canonicalize_schema(f"2d_{int(count)}")
+
+
 def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[np.ndarray, str]:
-    """Return trainable points and the source schema label."""
+    """Return native trainable 2D points and the canonical source schema label."""
     arr = np.asarray(raw, dtype=np.float32)
 
     while arr.ndim > 2 and 1 in arr.shape:
         arr = np.squeeze(arr)
 
     if arr.ndim == 1:
-        if arr.size == 68 * 3:
-            arr = arr.reshape(68, 3)
-        elif arr.size == 39 * 2:
-            arr = arr.reshape(39, 2)
-        elif arr.size == 98 * 2:
-            arr = arr.reshape(98, 2)
-        elif arr.size == 68 * 2:
-            arr = arr.reshape(68, 2)
+        for count, dims in ((29, 2), (39, 2), (68, 3), (68, 2), (98, 2), (106, 2), (194, 2)):
+            if arr.size == count * dims:
+                arr = arr.reshape(count, dims)
+                break
         else:
             raise ValueError(f"flat landmark array has unsupported size {arr.size}")
 
     if arr.ndim != 2:
         raise ValueError(f"landmarks must be 2D, got shape {arr.shape}")
 
-    if arr.shape[0] in (2, 3) and arr.shape[1] in (39, 68, 98):
+    if arr.shape[0] in (2, 3) and arr.shape[1] in (29, 39, 68, 98, 106, 194):
         arr = arr.T
 
     if not np.all(np.isfinite(arr)):
         raise ValueError("landmarks contain NaN or infinite values")
 
-    if arr.shape == (68, 3):
-        return np.ascontiguousarray(arr[:, :2], dtype=np.float32), "3d_68"
-    if arr.shape[0] == 68 and arr.shape[1] >= 2:
-        return normalize_landmarks(arr[:, :2], source_schema="2d_68"), source_schema or "2d_68"
-    if arr.shape[0] == 98 and arr.shape[1] >= 2:
-        return normalize_landmarks(arr[:, :2], source_schema="2d_98"), source_schema or "2d_98"
-    if arr.shape[0] == 39 and arr.shape[1] >= 2:
-        return np.ascontiguousarray(arr[:, :2], dtype=np.float32), source_schema or "2d_39"
+    if arr.shape[1] < 2:
+        raise ValueError(f"landmarks must contain x/y coordinates, got shape {arr.shape}")
 
-    raise ValueError(f"unsupported landmark shape {arr.shape}; expected 39, 68, or 98 points")
+    if arr.shape[0] not in (29, 39, 68, 98, 106, 194):
+        raise ValueError(
+            f"unsupported landmark shape {arr.shape}; expected 29, 39, 68, 98, 106, or 194 points"
+        )
+
+    schema = _schema_from_declared_or_count(source_schema, int(arr.shape[0]))
+    points = normalize_landmark_array(arr[:, :2], schema=schema)
+    return points, schema
 
 
 def _parse_pts(path: Path) -> np.ndarray:
@@ -207,7 +230,7 @@ def _parse_pts(path: Path) -> np.ndarray:
 def _parse_numeric_text(path: Path) -> np.ndarray:
     text = path.read_text(encoding="utf-8", errors="ignore")
     values = [float(item) for item in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", text)]
-    for count, dims in ((68, 2), (68, 3), (98, 2)):
+    for count, dims in ((29, 2), (39, 2), (68, 3), (68, 2), (98, 2), (106, 2), (194, 2)):
         total = count * dims
         if len(values) == total:
             return np.asarray(values, dtype=np.float32).reshape(count, dims)
@@ -260,7 +283,7 @@ def _parse_mat(path: Path) -> np.ndarray:
             arr = np.asarray(value, dtype=np.float32)
         except Exception:
             continue
-        if arr.size < 68 * 2:
+        if arr.size < 29 * 2:
             continue
         try:
             _canonical_points(arr)
@@ -268,7 +291,7 @@ def _parse_mat(path: Path) -> np.ndarray:
         except Exception as err:  # noqa: BLE001
             errors.append(f"{key}: {err}")
             continue
-    raise ValueError(f"no 68/98-point landmark array found in {path}; tried {errors[:5]}")
+    raise ValueError(f"no supported landmark array found in {path}; tried {errors[:5]}")
 
 
 def _load_landmark_file(path: Path) -> tuple[np.ndarray, str]:
@@ -524,6 +547,9 @@ def _sample(
     normalizer: T.Any = None,
 ) -> dict[str, T.Any]:
     sample_id = _safe_id(sample_id)
+    source_schema = canonicalize_schema(source_schema)
+    target_schema = source_schema
+    head_name = head_name_for_schema(target_schema)
     landmarks = _save_landmarks(output_dir, sample_id, points68)
     meta = dict(metadata or {})
 
@@ -540,7 +566,20 @@ def _sample(
     else:
         meta.setdefault("normalizer_source", "explicit_manifest_normalizer")
 
+    source_block = {"dataset": dataset, "source_id": source_id or sample_id}
     meta.setdefault("source_schema", source_schema)
+    meta.setdefault("target_schema", target_schema)
+    meta.setdefault("landmark_count", int(points68.shape[0]))
+    meta.setdefault("head_name", head_name)
+    meta.setdefault(
+        "mapping_audit",
+        {
+            "status": "native",
+            "source_schema": source_schema,
+            "target_schema": target_schema,
+        },
+    )
+
     out: dict[str, T.Any] = {
         "sample_id": sample_id,
         "dataset": dataset,
@@ -549,11 +588,20 @@ def _sample(
         "image": str(image.resolve()),
         "landmarks": _relative_or_absolute(landmarks, output_dir),
         "source_schema": source_schema,
-        "target_schema": "2d_68" if points68.shape[0] in (68, 98) else source_schema,
+        "target_schema": target_schema,
+        "landmark_count": int(points68.shape[0]),
+        "head_name": head_name,
         "normalizer": normalizer_value,
-        "source": {"dataset": dataset, "source_id": source_id or sample_id},
+        "source": source_block,
         "metadata": meta,
+        "mapping_audit": dict(meta["mapping_audit"]),
     }
+    for identity_key in ("subject_id", "session_id", "video_id", "frame_id", "archive_id", "image_id"):
+        if meta.get(identity_key) not in (None, ""):
+            out[identity_key] = meta[identity_key]
+    out["split_safe_id"] = split_safe_id_for_sample(out)
+    out["metadata"].setdefault("split_safe_id", out["split_safe_id"])
+
     if visibility is not None:
         out["visibility"] = visibility
         out["metadata"].setdefault("visibility", visibility)
@@ -616,9 +664,11 @@ def _write_manifest(
         seen.add(image)
         merged.append(sample)
 
+    summary = manifest_summary(merged)
     payload = {
-        "version": 1,
-        "landmark_schema": "2d_68",
+        "version": TRAINING_MANIFEST_VERSION,
+        "manifest_contract": TRAINING_MANIFEST_CONTRACT,
+        "landmark_schema": "multi_schema",
         "metadata": {
             "builder": "AccurateFacialLandmarkDetection.tools.landmarks.build_quality_dataset",
             "dataset": dataset,
@@ -627,27 +677,21 @@ def _write_manifest(
             "sample_count": len(merged),
             "skipped_count": len(skipped or []),
         },
+        **summary,
         "samples": merged,
     }
     _write_json(manifest_path, payload)
 
-    condition_counts: dict[str, int] = {}
-    dataset_counts: dict[str, int] = {}
-    for sample in merged:
-        condition = str(sample.get("condition", "default"))
-        condition_counts[condition] = condition_counts.get(condition, 0) + 1
-        sample_dataset = str(sample.get("dataset", dataset))
-        dataset_counts[sample_dataset] = dataset_counts.get(sample_dataset, 0) + 1
     _write_json(
         output_dir / "dataset_audit.json",
         {
             "manifest": str(manifest_path),
+            "manifest_contract": TRAINING_MANIFEST_CONTRACT,
+            "version": TRAINING_MANIFEST_VERSION,
             "sample_count": len(merged),
             "skipped_count": len(skipped or []),
             "skipped_examples": (skipped or [])[:50],
-            "datasets": dataset_counts,
-            "conditions": condition_counts,
-            "landmark_schema": "2d_68",
+            **summary,
         },
     )
     return manifest_path

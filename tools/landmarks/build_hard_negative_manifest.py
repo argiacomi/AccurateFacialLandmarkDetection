@@ -25,6 +25,11 @@ from lib.landmarks.datasets.hard_negative_mining import (
     classify_hard_negative,
     source_key,
 )
+from lib.landmarks.manifest.contract import (
+    TRAINING_MANIFEST_CONTRACT,
+    TRAINING_MANIFEST_VERSION,
+    manifest_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +423,8 @@ def build_hard_negative_manifest(
             metadata = sample.setdefault("metadata", {})
             if isinstance(metadata, dict):
                 metadata["split"] = split
+                metadata.setdefault("split_safe_id", split_key)
+            sample.setdefault("split_safe_id", split_key)
         selected.extend(ordered)
 
     total_selected = len(selected)
@@ -426,8 +433,26 @@ def build_hard_negative_manifest(
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    selected_summary = manifest_summary(selected)
     (output_dir / "manifest.json").write_text(
-        json.dumps({"samples": selected}, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(
+            {
+                "version": TRAINING_MANIFEST_VERSION,
+                "manifest_contract": TRAINING_MANIFEST_CONTRACT,
+                "landmark_schema": "multi_schema",
+                "metadata": {
+                    "builder": "AccurateFacialLandmarkDetection.tools.landmarks.build_hard_negative_manifest",
+                    "sample_count": total_selected,
+                    "seed": seed,
+                },
+                **selected_summary,
+                "samples": selected,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
     mix_report = {
@@ -444,6 +469,7 @@ def build_hard_negative_manifest(
         "actual_percentages": actual_percentages,
         "ceilings": ceilings,
         "by_dataset": by_dataset,
+        "manifest_summary": selected_summary,
         "weights": dict(BUCKET_WEIGHT),
         "dataset_default_buckets": dict(DATASET_DEFAULT_BUCKET),
         "bucket_fill_rates": {

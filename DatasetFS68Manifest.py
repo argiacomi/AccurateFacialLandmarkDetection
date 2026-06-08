@@ -354,7 +354,14 @@ class LandmarkDataset(Dataset):
                 if declared_schema != detected_schema and detected_schema != "2d_68":
                     schema = declared_schema
                 landmarks = normalize_landmark_array(landmarks[:, :2], schema=schema)
-                head_name = head_name_for_schema(schema)
+                target_schema = canonicalize_schema(
+                    entry.get("target_schema") or metadata.get("target_schema") or schema
+                )
+                head_name = str(
+                    entry.get("head_name")
+                    or metadata.get("head_name")
+                    or head_name_for_schema(target_schema)
+                )
             except ValueError:
                 skipped_non_trainable_schema += 1
                 continue
@@ -375,7 +382,11 @@ class LandmarkDataset(Dataset):
                     "condition": str(entry.get("condition") or entry.get("scenario") or ""),
                     "conditions": conditions,
                     "source_schema": schema,
+                    "target_schema": target_schema,
+                    "landmark_count": int(landmarks.shape[0]),
                     "head_name": head_name,
+                    "split": str(entry.get("split") or metadata.get("split") or ""),
+                    "split_safe_id": str(entry.get("split_safe_id") or metadata.get("split_safe_id") or ""),
                     "source": source,
                     "metadata": metadata,
                     "face_bbox": entry.get("face_bbox", metadata.get("face_bbox", entry.get("bbox", metadata.get("bbox")))),
@@ -502,7 +513,11 @@ class LandmarkDataset(Dataset):
                         "condition": sample.get("condition", ""),
                         "conditions": list(sample.get("conditions", ())),
                         "source_schema": sample.get("source_schema", ""),
+                        "target_schema": sample.get("target_schema", ""),
+                        "landmark_count": sample.get("landmark_count", 0),
                         "head_name": sample.get("head_name", ""),
+                        "split": sample.get("split", ""),
+                        "split_safe_id": sample.get("split_safe_id", ""),
                         "face_bbox": sample.get("face_bbox"),
                         "bbox_format": sample.get("bbox_format", ""),
                         "visibility_target": sample.get("visibility_target").tolist()
@@ -535,7 +550,11 @@ class LandmarkDataset(Dataset):
                     "condition": sample.get("condition", ""),
                     "conditions": list(sample.get("conditions", ())),
                     "source_schema": sample.get("source_schema", ""),
+                    "target_schema": sample.get("target_schema", ""),
+                    "landmark_count": sample.get("landmark_count", 0),
                     "head_name": sample.get("head_name", ""),
+                    "split": sample.get("split", ""),
+                    "split_safe_id": sample.get("split_safe_id", ""),
                     "source": sample.get("source", {}),
                     "face_bbox": sample.get("face_bbox"),
                     "bbox_format": sample.get("bbox_format", ""),

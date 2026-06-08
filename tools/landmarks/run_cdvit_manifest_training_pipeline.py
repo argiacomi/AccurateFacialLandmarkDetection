@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Build local landmark manifests and train CD-ViT on a hard-negative 68-point mix.
+"""Build local landmark manifests and train CD-ViT on a schema-aware hard-negative mix.
 
 Pipeline stages:
 
 1. build per-dataset manifests with local ``build_quality_dataset.py``
 2. optionally build a ``production_validated`` manifest from ``--prod-dir``
 3. merge them with local ``build_hard_negative_manifest.py``
-4. validate that the final manifest contains CD-ViT-compatible 68-point samples
+4. validate that the final manifest follows the schema-aware training contract
 5. launch ``TrainHeatmapStageFP16.py --data_name FS68Manifest``
 """
 
@@ -33,13 +33,15 @@ from lib.landmarks.core.manifest_aliases import (
     MANIFEST_DATA_NAME_ALIASES,
 )
 
+from lib.landmarks.manifest.validator import validate_training_manifest
+
 
 TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
 DEFAULT_DATASETS = "wflw,cofw,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
 MINED_MANIFEST_NAME = "manifest.json"
 PROGRESS_LOG_NAME = "pipeline_progress.jsonl"
 TRAIN_COMMAND_NAME = "train_command.json"
-VALIDATION_REPORT_NAME = "cdvit_manifest_validation.json"
+VALIDATION_REPORT_NAME = "training_manifest_validation.json"
 PRODUCTION_DATASET = "production_validated"
 
 STAGES: tuple[str, ...] = (
@@ -416,119 +418,28 @@ def _run_command(argv: list[str], *, cwd: Path, dry_run: bool) -> None:
     subprocess.run(argv, cwd=str(cwd), check=True)
 
 
-def _load_manifest_samples(manifest_path: Path) -> list[dict[str, T.Any]]:
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    samples = payload.get("samples", payload.get("scenarios", []))
-    if not isinstance(samples, list):
-        raise ValueError(f"manifest samples must be a list: {manifest_path}")
-    return [sample for sample in samples if isinstance(sample, dict)]
-
-
-def _resolve_manifest_path(manifest_path: Path, raw_value: T.Any) -> Path:
-    path = Path(str(raw_value or ""))
-    if path.is_absolute():
-        return path
-    return (manifest_path.parent / path).resolve()
+def _validate_training_manifest(
+    args: argparse.Namespace, paths: PipelinePaths
+) -> dict[str, T.Any]:
+    manifest_path = paths.hard_negative_manifest
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"missing manifest: {manifest_path}")
+    return validate_training_manifest(
+        manifest_path,
+        report_path=paths.validation_report,
+        require_images=not args.skip_image_exists_check,
+        allow_legacy_68_projection=args.allow_legacy_68_projection,
+        allow_missing_projection_audit=args.allow_missing_projection_audit,
+        max_examples=args.max_validation_examples,
+        raise_on_error=True,
+    )
 
 
 def _validate_cdvit_manifest(
     args: argparse.Namespace, paths: PipelinePaths
 ) -> dict[str, T.Any]:
-    try:
-        import numpy as np
-    except ImportError as err:
-        raise RuntimeError(
-            "numpy is required to validate CD-ViT landmark manifests"
-        ) from err
-
-    manifest_path = paths.hard_negative_manifest
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"missing manifest: {manifest_path}")
-
-    samples = _load_manifest_samples(manifest_path)
-    report: dict[str, T.Any] = {
-        "manifest": str(manifest_path),
-        "manifest_sha256": _sha256_file(manifest_path),
-        "total_samples": len(samples),
-        "exact_68_samples": 0,
-        "non_68_samples": 0,
-        "missing_landmarks": 0,
-        "invalid_landmarks": 0,
-        "datasets": {},
-        "examples": {"non_68": [], "missing": [], "invalid": []},
-    }
-
-    for sample in samples:
-        raw_source = sample.get("source")
-        source = raw_source if isinstance(raw_source, dict) else {}
-        dataset = str(sample.get("dataset") or source.get("dataset") or "unknown")
-        dataset_stats = report["datasets"].setdefault(
-            dataset,
-            {"total": 0, "exact_68": 0, "non_68": 0, "missing": 0, "invalid": 0},
-        )
-        dataset_stats["total"] += 1
-        landmarks_value = sample.get("landmarks") or sample.get("ground_truth")
-        sample_id = str(sample.get("sample_id") or sample.get("id") or "")
-        if not landmarks_value:
-            report["missing_landmarks"] += 1
-            dataset_stats["missing"] += 1
-            if len(report["examples"]["missing"]) < 10:
-                report["examples"]["missing"].append(sample_id)
-            continue
-        landmarks_path = _resolve_manifest_path(manifest_path, landmarks_value)
-        if not landmarks_path.is_file():
-            report["missing_landmarks"] += 1
-            dataset_stats["missing"] += 1
-            if len(report["examples"]["missing"]) < 10:
-                report["examples"]["missing"].append(str(landmarks_path))
-            continue
-        try:
-            landmarks = np.load(landmarks_path)
-        except Exception as err:  # noqa: BLE001
-            report["invalid_landmarks"] += 1
-            dataset_stats["invalid"] += 1
-            if len(report["examples"]["invalid"]) < 10:
-                report["examples"]["invalid"].append(
-                    {"path": str(landmarks_path), "error": str(err)}
-                )
-            continue
-        if (
-            getattr(landmarks, "ndim", 0) == 2
-            and landmarks.shape[0] == int(args.lmk_num)
-            and landmarks.shape[1] >= 2
-        ):
-            report["exact_68_samples"] += 1
-            dataset_stats["exact_68"] += 1
-        else:
-            report["non_68_samples"] += 1
-            dataset_stats["non_68"] += 1
-            if len(report["examples"]["non_68"]) < 10:
-                report["examples"]["non_68"].append(
-                    {
-                        "sample_id": sample_id,
-                        "path": str(landmarks_path),
-                        "shape": list(getattr(landmarks, "shape", [])),
-                    }
-                )
-
-    _write_json(paths.validation_report, report)
-
-    if report["exact_68_samples"] <= 0:
-        raise ValueError(
-            f"manifest has no {args.lmk_num}-point samples: {manifest_path}"
-        )
-    if not args.allow_non68 and report["non_68_samples"]:
-        raise ValueError(
-            f"manifest contains {report['non_68_samples']} non-{args.lmk_num}-point samples. "
-            "Pass --allow-non68 to train on the exact-68 subset skipped by DatasetFS68Manifest, "
-            "or fix/remap those source manifests."
-        )
-    if report["missing_landmarks"] or report["invalid_landmarks"]:
-        raise ValueError(
-            "manifest contains missing or invalid landmark files. See "
-            f"{paths.validation_report}"
-        )
-    return report
+    """Compatibility wrapper for the old stage name."""
+    return _validate_training_manifest(args, paths)
 
 
 def _build_manifest_outputs(
@@ -595,8 +506,9 @@ def _run_stage(
             outputs = [str(paths.validation_report)]
             if report:
                 notes.append(
-                    f"validated {report['exact_68_samples']} exact-{args.lmk_num} sample(s) "
-                    f"from {report['total_samples']} manifest entries"
+                    f"validated {report['valid_samples']} trainable sample(s) "
+                    f"from {report['total_samples']} manifest entries "
+                    f"across {len(report.get('schemas', {}))} schema(s)"
                 )
 
         elif stage == "train_cdvit":
@@ -722,8 +634,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-non68",
         action="store_true",
-        help="Allow mixed landmark counts and train on the exact-68 subset.",
+        help="Deprecated compatibility flag; mixed-schema manifests are validated by default.",
     )
+    parser.add_argument(
+        "--allow-legacy-68-projection",
+        action="store_true",
+        help="Accept old manifests where non-68 source schemas were already projected into 68-point target files.",
+    )
+    parser.add_argument(
+        "--allow-missing-projection-audit",
+        action="store_true",
+        help="Do not fail samples whose source_schema differs from target_schema but lack mapping/projection audit metadata.",
+    )
+    parser.add_argument(
+        "--skip-image-exists-check",
+        action="store_true",
+        help="Validate landmark contract without requiring image files to exist on this machine.",
+    )
+    parser.add_argument("--max-validation-examples", type=int, default=25)
     parser.add_argument("--max-profile-occlusion", type=int, default=None)
     parser.add_argument("--max-profile", type=int, default=None)
     parser.add_argument("--max-occlusion", type=int, default=None)
