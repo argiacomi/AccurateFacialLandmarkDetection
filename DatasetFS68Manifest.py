@@ -361,20 +361,88 @@ class LandmarkDataset(Dataset):
                 raise FileNotFoundError(f"could not read landmarks for manifest entry {index}: {landmarks_path}")
             try:
                 raw_schema = str(metadata.get("source_schema") or entry.get("source_schema") or "")
-                detected_schema = infer_schema(np.asarray(landmarks)[:, :2])
-                declared_schema = canonicalize_schema(raw_schema) if raw_schema else detected_schema
-                schema = declared_schema if landmarks.shape[:2] == (68, 2) and declared_schema == "2d_68" else detected_schema
-                if declared_schema != detected_schema and detected_schema != "2d_68":
-                    schema = declared_schema
-                landmarks = normalize_landmark_array(landmarks[:, :2], schema=schema)
-                target_schema = canonicalize_schema(
-                    entry.get("target_schema") or metadata.get("target_schema") or schema
+                raw_target_schema = entry.get("target_schema") or metadata.get("target_schema")
+                sample_label = entry.get("sample_id") or entry.get("id") or index
+                raw_points = np.asarray(landmarks)
+
+                declared_schema = canonicalize_schema(raw_schema) if raw_schema else None
+                declared_source_trainable = False
+                if declared_schema is not None:
+                    try:
+                        head_name_for_schema(declared_schema)
+                        declared_source_trainable = True
+                    except ValueError:
+                        declared_source_trainable = False
+
+                try:
+                    xy_points = raw_points[:, :2]
+                except (IndexError, TypeError) as exc:
+                    raise ManifestContractError(
+                        "manifest landmark array is not a 2D landmark array: "
+                        f"sample={sample_label!r} "
+                        f"source_schema={raw_schema or None!r} "
+                        f"target_schema={raw_target_schema or None!r} "
+                        f"shape={tuple(raw_points.shape)!r}"
+                    ) from exc
+
+                try:
+                    detected_schema = infer_schema(xy_points)
+                except ValueError as exc:
+                    if raw_target_schema not in (None, "") or declared_source_trainable:
+                        raise ManifestContractError(
+                            "manifest landmark array shape is not compatible with declared schema: "
+                            f"sample={sample_label!r} "
+                            f"source_schema={raw_schema or None!r} "
+                            f"target_schema={raw_target_schema or None!r} "
+                            f"shape={tuple(raw_points.shape)!r}"
+                        ) from exc
+                    raise
+
+                if declared_schema is None:
+                    declared_schema = detected_schema
+                target_schema = (
+                    canonicalize_schema(raw_target_schema)
+                    if raw_target_schema not in (None, "")
+                    else detected_schema
                 )
+
+                if raw_schema and declared_schema != detected_schema:
+                    has_explicit_target = raw_target_schema not in (None, "")
+                    if not (has_explicit_target and target_schema == detected_schema):
+                        raise ManifestContractError(
+                            "manifest source_schema does not match loaded landmark array "
+                            "and no explicit matching target_schema was provided: "
+                            f"sample={sample_label!r} "
+                            f"source_schema={declared_schema!r} "
+                            f"detected_schema={detected_schema!r} "
+                            f"target_schema={target_schema!r} "
+                            f"shape={tuple(raw_points.shape)!r}"
+                        )
+
+                if target_schema != detected_schema:
+                    raise ManifestContractError(
+                        "manifest target_schema does not match loaded landmark array: "
+                        f"sample={sample_label!r} "
+                        f"target_schema={target_schema!r} actual_schema={detected_schema!r} "
+                        f"shape={tuple(raw_points.shape)!r}"
+                    )
+
+                try:
+                    landmarks = normalize_landmark_array(xy_points, schema=target_schema)
+                except ValueError as exc:
+                    raise ManifestContractError(
+                        "manifest landmarks failed target_schema normalization: "
+                        f"sample={sample_label!r} "
+                        f"target_schema={target_schema!r} "
+                        f"shape={tuple(raw_points.shape)!r}: {exc}"
+                    ) from exc
+
+                schema = target_schema
                 actual_schema = infer_schema(landmarks[:, :2])
                 if target_schema != actual_schema:
                     raise ManifestContractError(
-                        "manifest target_schema does not match loaded landmark array: "
-                        f"sample={entry.get('sample_id') or entry.get('id') or index!r} "
+                        "manifest target_schema does not match normalized landmark array: "
+                        f"sample={sample_label!r} "
                         f"target_schema={target_schema!r} actual_schema={actual_schema!r} "
                         f"shape={tuple(landmarks.shape)!r}"
                     )
