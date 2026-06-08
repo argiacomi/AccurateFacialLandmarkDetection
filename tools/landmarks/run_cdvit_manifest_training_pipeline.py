@@ -233,6 +233,389 @@ def _write_json(path: Path, payload: T.Mapping[str, T.Any]) -> None:
     )
 
 
+
+def _checkpoint_dir(args: argparse.Namespace, paths: PipelinePaths) -> Path:
+    return Path(args.ckpt_folder) if args.ckpt_folder else paths.checkpoint_dir
+
+
+def _normalize_path_for_signature(value: Path | str | None) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        return str(Path(value).expanduser().resolve())
+    except OSError:
+        return str(Path(value).expanduser())
+
+
+def _safe_sha256_file(path: Path) -> str | None:
+    try:
+        return _sha256_file(path) if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _pipeline_train_arg_tokens(args: argparse.Namespace) -> list[str]:
+    tokens: list[str] = []
+    for extra in args.train_arg or []:
+        tokens.extend(shlex.split(extra))
+    return tokens
+
+
+def _pipeline_train_arg_values(args: argparse.Namespace, *names: str) -> list[str]:
+    tokens = _pipeline_train_arg_tokens(args)
+    values: list[str] = []
+    for index, token in enumerate(tokens):
+        for name in names:
+            if token == name and index + 1 < len(tokens):
+                next_value = tokens[index + 1]
+                if not next_value.startswith("--"):
+                    values.append(next_value)
+                break
+            prefix = name + "="
+            if token.startswith(prefix):
+                values.append(token[len(prefix):])
+                break
+    return values
+
+
+def _pipeline_train_arg_option(
+    args: argparse.Namespace,
+    *names: str,
+    default: T.Any = None,
+) -> T.Any:
+    values = _pipeline_train_arg_values(args, *names)
+    return values[-1] if values else default
+
+
+def _pipeline_train_bool_arg(
+    args: argparse.Namespace,
+    yes_name: str,
+    no_name: str | None = None,
+    *,
+    default: bool = False,
+) -> bool:
+    tokens = _pipeline_train_arg_tokens(args)
+    if no_name and no_name in tokens:
+        return False
+    if yes_name in tokens:
+        return True
+    return bool(default)
+
+
+def _pipeline_effective_runtime_metrics_path(args: argparse.Namespace, paths: PipelinePaths) -> Path:
+    return (
+        Path(args.runtime_metrics_jsonl)
+        if args.runtime_metrics_jsonl is not None
+        else paths.run_root / "runtime_metrics.jsonl"
+    )
+
+
+def _pipeline_effective_manifest(args: argparse.Namespace, paths: PipelinePaths) -> str:
+    return _normalize_path_for_signature(
+        _pipeline_train_arg_option(
+            args,
+            "--manifest",
+            default=paths.hard_negative_manifest,
+        )
+    )
+
+
+def _pipeline_training_compat_config(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
+    """Mirror TrainHeatmapStageFP16._training_compat_config for auto-resume.
+
+    The pipeline appends --train-arg values after generated arguments, so
+    train_arg overrides are treated as effective trainer values here.
+    """
+
+    def int_opt(default: int, *names: str) -> int:
+        return int(_pipeline_train_arg_option(args, *names, default=default))
+
+    def float_opt(default: float, *names: str) -> float:
+        return float(_pipeline_train_arg_option(args, *names, default=default))
+
+    def str_opt(default: str, *names: str) -> str:
+        return str(_pipeline_train_arg_option(args, *names, default=default))
+
+    data_name = str_opt(str(args.train_data_name), "--data_name", "--data-name")
+    split_policy = str_opt("declared_or_random_hash", "--split-policy")
+    if _pipeline_train_bool_arg(args, "--respect-declared-splits", default=False):
+        split_policy = "declared"
+    if _pipeline_train_bool_arg(args, "--ignore-declared-splits", default=False):
+        split_policy = "random_hash"
+
+    return {
+        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))),
+        "train_manifest_sha256": _safe_sha256_file(
+            Path(_pipeline_train_arg_option(args, "--train_manifest", "--train-manifest", default=""))
+        ),
+        "test_manifest_sha256": _safe_sha256_file(
+            Path(_pipeline_train_arg_option(args, "--test_manifest", "--test-manifest", default=""))
+        ),
+        "batch_size": int_opt(int(args.batch_size), "--batch_size", "--batch-size"),
+        "heatmap_size": int_opt(int(args.heatmap_size), "--heatmap_size", "--heatmap-size"),
+        "lmk_num": int_opt(int(args.lmk_num), "--lmk_num", "--lmk-num"),
+        "sched_step": int_opt(200, "--sched_step", "--sched-step"),
+        "nstack": int_opt(8, "--nstack"),
+        "max_depth": int_opt(256, "--max_depth", "--max-depth"),
+        "seed": int_opt(0, "--seed"),
+        "lr": float_opt(float(args.lr), "--lr"),
+        "hw": float_opt(10.0, "--hw"),
+        "locw": float_opt(1.0, "--locw"),
+        "mul": float_opt(1.2, "--mul"),
+        "schema_consistency_weight": float_opt(
+            0.05,
+            "--schema-consistency-weight",
+            "--schema_consistency_weight",
+        ),
+        "auxiliary_loss_weight": float_opt(
+            0.1,
+            "--auxiliary-loss-weight",
+            "--auxiliary_loss_weight",
+        ),
+        "schema_aware_training": _pipeline_train_bool_arg(
+            args,
+            "--schema-aware-training",
+            "--no-schema-aware-training",
+            default=True,
+        ),
+        "domain_balanced_sampling": _pipeline_train_bool_arg(
+            args,
+            "--domain-balanced-sampling",
+            default=False,
+        ),
+        "auxiliary_heads": _pipeline_train_bool_arg(
+            args,
+            "--auxiliary-heads",
+            "--no-auxiliary-heads",
+            default=True,
+        ),
+        "data_name": data_name,
+        "eval_mode": str_opt("random_hash", "--eval-mode"),
+        "split_policy": split_policy,
+        "bucket_targets": str_opt(
+            "anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
+            "--bucket-targets",
+        ),
+        "dataset_targets": str_opt("", "--dataset-targets"),
+        "schema_targets": str_opt("", "--schema-targets"),
+        "heldout_dataset": [
+            str(item)
+            for item in _pipeline_train_arg_values(args, "--heldout-dataset")
+        ],
+    }
+
+
+def _pipeline_training_compat_digest(args: argparse.Namespace, paths: PipelinePaths) -> str:
+    payload = json.dumps(
+        _pipeline_training_compat_config(args, paths),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
+    ckpt_folder = _checkpoint_dir(args, paths)
+    runtime_metrics_jsonl = _pipeline_effective_runtime_metrics_path(args, paths)
+    return {
+        "version": 2,
+        "manifest": _pipeline_effective_manifest(args, paths),
+        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))),
+        "ckpt_folder": _normalize_path_for_signature(ckpt_folder),
+        "train_data_name": str(args.train_data_name),
+        "nproc_per_node": int(args.nproc_per_node),
+        "batch_size": int(args.batch_size),
+        "heatmap_size": int(args.heatmap_size),
+        "lmk_num": int(args.lmk_num),
+        "lr": float(args.lr),
+        "train_arg": list(args.train_arg or []),
+        "runtime": {
+            "num_workers": int(args.num_workers),
+            "preload": int(args.preload),
+            "pin_memory": bool(args.pin_memory),
+            "persistent_workers": bool(args.persistent_workers),
+            "prefetch_factor": int(args.prefetch_factor),
+            "log_every": int(args.log_every),
+        },
+        "eval": {
+            "eval_batch_size": int(args.eval_batch_size),
+            "eval_num_workers": int(args.eval_num_workers),
+            "eval_every": int(args.eval_every),
+            "full_eval_every": int(args.full_eval_every),
+            "eval_ema_every": int(args.eval_ema_every),
+            "eval_max_samples": int(args.eval_max_samples),
+        },
+        "checkpoint": {
+            "save_last_checkpoint": bool(args.save_last_checkpoint),
+            "save_legacy_epoch_state_dict": bool(args.save_legacy_epoch_state_dict),
+            "restore_rng": bool(args.restore_rng),
+            "allow_incompatible_resume": bool(args.allow_incompatible_resume),
+            "auto_resume": bool(args.auto_resume),
+            "runtime_metrics_jsonl": _normalize_path_for_signature(runtime_metrics_jsonl),
+        },
+        "training_compat_config": _pipeline_training_compat_config(args, paths),
+        "training_compat_config_digest": _pipeline_training_compat_digest(args, paths),
+    }
+
+
+def _pipeline_training_signature_digest(args: argparse.Namespace, paths: PipelinePaths) -> str:
+    payload = json.dumps(
+        _pipeline_training_signature(args, paths),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _write_pipeline_training_signature(
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+    command: list[str],
+    ckpt_folder: Path,
+) -> None:
+    sentinel = ckpt_folder / "training_complete.json"
+    payload: dict[str, T.Any] = {}
+    if sentinel.is_file():
+        try:
+            payload = json.loads(sentinel.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    payload["pipeline_training_signature"] = _pipeline_training_signature(args, paths)
+    payload["pipeline_training_signature_digest"] = _pipeline_training_signature_digest(args, paths)
+    payload["pipeline_requested_epoch"] = int(args.epoch)
+    payload["pipeline_train_command"] = command
+    payload["pipeline_manifest_sha256"] = _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths)))
+    payload["pipeline_training_compat_config"] = _pipeline_training_compat_config(args, paths)
+    payload["pipeline_training_compat_config_digest"] = _pipeline_training_compat_digest(args, paths)
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _checkpoint_metadata_path(path: Path) -> Path:
+    return Path(str(path) + ".meta.json")
+
+
+def _load_checkpoint_metadata(path: Path) -> dict[str, T.Any] | None:
+    meta_path = _checkpoint_metadata_path(path)
+    if meta_path.is_file():
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as err:
+            return {"_load_error": f"could not read checkpoint metadata sidecar: {err}"}
+        return payload if isinstance(payload, dict) else None
+
+    try:
+        import torch
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(path, map_location="cpu")
+    except Exception as err:
+        return {"_load_error": str(err)}
+    return payload if isinstance(payload, dict) else None
+
+
+def _normalize_runtime_args(args: argparse.Namespace) -> argparse.Namespace:
+    if args.restore_rng and args.persistent_workers:
+        print(
+            "warning: --restore-rng requires epoch-reseeded training workers; "
+            "forcing --no-persistent-workers for checkpoint-compatible replay",
+            flush=True,
+        )
+        args.persistent_workers = False
+    return args
+
+
+def _checkpoint_matches_pipeline_request(
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+    checkpoint_path: Path,
+) -> tuple[bool, str]:
+    payload = _load_checkpoint_metadata(checkpoint_path)
+    if not isinstance(payload, dict):
+        return False, "checkpoint is not a full PR3 training checkpoint"
+    if payload.get("_load_error"):
+        return False, f"could not load checkpoint metadata: {payload['_load_error']}"
+    if payload.get("format") != "cdvit-training-checkpoint-v1":
+        return False, "checkpoint format is not cdvit-training-checkpoint-v1"
+
+    try:
+        next_epoch = int(payload.get("next_epoch", int(payload.get("epoch", -1)) + 1))
+    except (TypeError, ValueError):
+        next_epoch = -1
+
+    ckpt_folder = _checkpoint_dir(args, paths)
+    sentinel = ckpt_folder / "training_complete.json"
+    current_signature = _pipeline_training_signature_digest(args, paths)
+    sentinel_signature = None
+    if sentinel.is_file():
+        try:
+            sentinel_payload = json.loads(sentinel.read_text(encoding="utf-8"))
+            sentinel_signature = sentinel_payload.get("pipeline_training_signature_digest")
+        except (OSError, json.JSONDecodeError):
+            sentinel_signature = None
+
+    if next_epoch >= int(args.epoch) and sentinel_signature != current_signature:
+        return (
+            False,
+            "last_checkpoint.pt has already reached the requested epoch but the "
+            "pipeline runtime/eval signature changed; increase --epoch, use --force "
+            "with a fresh checkpoint folder, or choose a checkpoint before the final epoch"
+        )
+
+    current_manifest_sha = _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths)))
+    checkpoint_manifest_sha = payload.get("manifest_sha256")
+    if current_manifest_sha and checkpoint_manifest_sha and current_manifest_sha != checkpoint_manifest_sha:
+        return False, "checkpoint manifest SHA differs from the current manifest"
+
+    expected_config = _pipeline_training_compat_config(args, paths)
+    checkpoint_config = payload.get("compat_config")
+    if isinstance(checkpoint_config, dict):
+        comparable_checkpoint = {
+            key: checkpoint_config.get(key)
+            for key in expected_config
+        }
+        if comparable_checkpoint != expected_config:
+            return False, "checkpoint training contract differs from the current pipeline request"
+        return True, "compatible"
+
+    checkpoint_digest = payload.get("compat_config_digest")
+    if checkpoint_digest:
+        if checkpoint_digest != _pipeline_training_compat_digest(args, paths):
+            return False, "checkpoint training contract digest differs from the current pipeline request"
+        return True, "compatible"
+
+    checkpoint_args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    checks = {
+        "data_name": str(args.train_data_name),
+        "batch_size": int(args.batch_size),
+        "heatmap_size": int(args.heatmap_size),
+        "lmk_num": int(args.lmk_num),
+        "lr": float(args.lr),
+        "schema_aware_training": True,
+        "auxiliary_heads": True,
+    }
+    for key, expected in checks.items():
+        if key not in checkpoint_args:
+            continue
+        actual = checkpoint_args[key]
+        try:
+            if isinstance(expected, bool):
+                matches = bool(actual) == expected
+            elif isinstance(expected, int):
+                matches = int(actual) == expected
+            elif isinstance(expected, float):
+                matches = float(actual) == expected
+            else:
+                matches = str(actual) == str(expected)
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            return False, f"checkpoint arg {key!r} differs: checkpoint={actual!r}, current={expected!r}"
+
+    return True, "compatible"
+
+
 def _append_progress(paths: PipelinePaths, result: StageResult) -> None:
     paths.progress_log.parent.mkdir(parents=True, exist_ok=True)
     with paths.progress_log.open("a", encoding="utf-8") as handle:
@@ -376,6 +759,48 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
         "--lr",
         str(args.lr),
     ]
+    argv.extend(["--preload", str(args.preload)])
+    argv.append("--pin-memory" if args.pin_memory else "--no-pin-memory")
+    argv.append("--persistent-workers" if args.persistent_workers else "--no-persistent-workers")
+    argv.extend(["--prefetch-factor", str(args.prefetch_factor)])
+    argv.extend(["--eval-batch-size", str(args.eval_batch_size)])
+    argv.extend(["--eval-num-workers", str(args.eval_num_workers)])
+    argv.extend(["--eval-every", str(args.eval_every)])
+    argv.extend(["--full-eval-every", str(args.full_eval_every)])
+    argv.extend(["--eval-ema-every", str(args.eval_ema_every)])
+    argv.extend(["--eval-max-samples", str(args.eval_max_samples)])
+    argv.extend(["--log-every", str(args.log_every)])
+    if args.save_last_checkpoint:
+        argv.append("--save-last-checkpoint")
+    else:
+        argv.append("--no-save-last-checkpoint")
+    if args.save_legacy_epoch_state_dict:
+        argv.append("--save-legacy-epoch-state-dict")
+    resume_path = Path(args.resume) if args.resume is not None else None
+    if resume_path is None and args.auto_resume and not args.force:
+        candidate = ckpt_folder / "last_checkpoint.pt"
+        if candidate.is_file():
+            compatible, reason = _checkpoint_matches_pipeline_request(args, paths, candidate)
+            if compatible:
+                resume_path = candidate
+            else:
+                raise ValueError(
+                    f"refusing to auto-resume from {candidate}: {reason}. "
+                    "Use --no-auto-resume to start a fresh run in this checkpoint folder, "
+                    "or pass --allow-incompatible-resume with an explicit --resume if this is intentional."
+                )
+    if resume_path is not None:
+        argv.extend(["--resume", str(resume_path)])
+    if args.restore_rng:
+        argv.append("--restore-rng")
+    if args.allow_incompatible_resume:
+        argv.append("--allow-incompatible-resume")
+    runtime_metrics_jsonl = (
+        Path(args.runtime_metrics_jsonl)
+        if args.runtime_metrics_jsonl is not None
+        else paths.run_root / "runtime_metrics.jsonl"
+    )
+    argv.extend(["--runtime-metrics-jsonl", str(runtime_metrics_jsonl)])
     return _append_extra(argv, args.train_arg or [])
 
 
@@ -472,7 +897,28 @@ def _stage_complete(stage: str, args: argparse.Namespace, paths: PipelinePaths) 
         ckpt_folder = (
             Path(args.ckpt_folder) if args.ckpt_folder else paths.checkpoint_dir
         )
-        return (ckpt_folder / "best_model").exists()
+        if args.resume is not None:
+            return False
+        sentinel = ckpt_folder / "training_complete.json"
+        if not sentinel.is_file():
+            return False
+        try:
+            payload = json.loads(sentinel.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if payload.get("status") != "complete":
+            return False
+        try:
+            completed_epochs = int(payload.get("requested_epochs", -1))
+        except (TypeError, ValueError):
+            return False
+        if payload.get("pipeline_training_signature_digest") != _pipeline_training_signature_digest(args, paths):
+            return False
+        if payload.get("pipeline_manifest_sha256") != _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))):
+            return False
+        if int(args.eval_every or 0) > 0 and not (ckpt_folder / "best_model").exists():
+            return False
+        return completed_epochs >= int(args.epoch)
     raise ValueError(f"unknown stage: {stage}")
 
 
@@ -524,9 +970,9 @@ def _run_stage(
                 },
             )
             _run_command(command, cwd=CDVIT_ROOT, dry_run=args.dry_run)
-            ckpt_folder = (
-                Path(args.ckpt_folder) if args.ckpt_folder else paths.checkpoint_dir
-            )
+            ckpt_folder = _checkpoint_dir(args, paths)
+            if not args.dry_run:
+                _write_pipeline_training_signature(args, paths, command, ckpt_folder)
             outputs = [str(ckpt_folder), str(paths.train_command_json)]
 
         else:
@@ -672,8 +1118,68 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--nproc-per-node", type=int, default=2)
     parser.add_argument("--ckpt-folder", type=Path, default=None)
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Resume TrainHeatmapStageFP16.py from a model state dict or full training checkpoint.",
+    )
+    parser.add_argument(
+        "--restore-rng",
+        action="store_true",
+        help="When resuming a full checkpoint, restore RNG state. For exact replay this forces --no-persistent-workers so workers are re-seeded per epoch.",
+    )
+    parser.add_argument(
+        "--allow-incompatible-resume",
+        action="store_true",
+        help="Forward --allow-incompatible-resume to TrainHeatmapStageFP16.py for intentional checkpoint migration.",
+    )
+    parser.add_argument(
+        "--auto-resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When train_cdvit is incomplete and no explicit --resume is supplied, resume from <ckpt-folder>/last_checkpoint.pt if present.",
+    )
+    parser.add_argument(
+        "--runtime-metrics-jsonl",
+        type=Path,
+        default=None,
+        help="Runtime metrics JSONL path. Defaults to <run-root>/runtime_metrics.jsonl.",
+    )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=12)
+    parser.add_argument("--preload", type=int, default=0)
+    parser.add_argument(
+        "--pin-memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Forward pinned-memory DataLoader mode to TrainHeatmapStageFP16.py.",
+    )
+    parser.add_argument(
+        "--persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Forward persistent DataLoader workers for throughput. Worker RNG is seeded once; use --no-persistent-workers for epoch-reseeded workers or --restore-rng replay.",
+    )
+    parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument("--eval-batch-size", type=int, default=8)
+    parser.add_argument("--eval-num-workers", type=int, default=0)
+    parser.add_argument("--eval-every", type=int, default=1)
+    parser.add_argument("--full-eval-every", type=int, default=0)
+    parser.add_argument("--eval-ema-every", "--eval-on-ema-every", dest="eval_ema_every", type=int, default=1)
+    parser.add_argument("--eval-max-samples", type=int, default=0)
+    parser.add_argument("--log-every", type=int, default=20)
+    parser.add_argument(
+        "--save-last-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--save-legacy-epoch-state-dict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Forward legacy epoch_N state-dict saving to TrainHeatmapStageFP16.py.",
+    )
     parser.add_argument("--epoch", type=int, default=500)
     parser.add_argument("--heatmap-size", type=int, default=32)
     parser.add_argument("--lmk-num", type=int, default=68)
@@ -693,7 +1199,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
-    args = parser.parse_args(argv)
+    args = _normalize_runtime_args(parser.parse_args(argv))
     paths = PipelinePaths(
         output_root=Path(args.output_root),
         run_name=args.run_name,
