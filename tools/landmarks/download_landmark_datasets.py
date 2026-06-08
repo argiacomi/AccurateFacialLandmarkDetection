@@ -110,7 +110,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         manual_steps=(
             "Download annotations.json from https://s3.amazonaws.com/helen-images/annotations.json.",
             "Keep Helen images in the existing 300W cache at data/300w/300w/helen/{trainset,testset}; do not duplicate them.",
-            "Build with: python tools/landmarks/build_quality_dataset.py --dataset helen-dense --source-dir <annotations-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_helen",
+            "Build with: python tools/landmarks/build_quality_dataset.py --dataset helen --source-dir <annotations-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_helen",
         ),
     ),
     SourceAsset(

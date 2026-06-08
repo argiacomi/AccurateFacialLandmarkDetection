@@ -33,8 +33,8 @@ import sys
 import typing as T
 from pathlib import Path
 
-import numpy as np
 import cv2
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -48,6 +48,7 @@ from lib.landmarks.core.schema import (
     point_count_for_schema,
     projection_audit_for_schema,
 )
+from lib.landmarks.datasets.sources import extract_archive_to_temp
 from lib.landmarks.datasets.video_frames import extract_video_frames, video_files
 from lib.landmarks.manifest.contract import (
     TRAINING_MANIFEST_CONTRACT,
@@ -55,7 +56,6 @@ from lib.landmarks.manifest.contract import (
     manifest_summary,
     split_safe_id_for_sample,
 )
-from lib.landmarks.datasets.sources import extract_archive_to_temp
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ SUPPORTED_DATASETS = (
     "cofw",
     "cofw-original",
     "helen",
-    "helen-dense",
+
     "lapa",
     "jd-landmark",
     "ffl2",
@@ -116,7 +116,6 @@ def _dataset(value: str) -> str:
         "cofw29": "cofw-original",
         "cofw-original-color": "cofw-original",
         "helen": "helen",
-        "helen-dense": "helen",
         "lapa": "lapa",
         "jd": "jd-landmark",
         "jdlandmark": "jd-landmark",

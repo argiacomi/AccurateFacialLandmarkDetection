@@ -67,7 +67,6 @@ def test_issue8_dataset_choices_and_projection_statuses_are_registered():
 
     assert {
         "helen",
-        "helen-dense",
         "lapa",
         "jd-landmark",
         "ffl2",
@@ -102,7 +101,7 @@ def test_helen_annotations_json_parser_uses_native_release_format(tmp_path):
     manifest_path = builder.build(
         _builder_args(
             "--dataset",
-            "helen-dense",
+            "helen",
             "--source-dir",
             str(source),
             "--image-root",
