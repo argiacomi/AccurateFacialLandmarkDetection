@@ -11,4 +11,5 @@ runs/
 *.pre_modularization.bak
 *.pre_stage_signatures.bak
 
-datasets/*
+datasets/
+data/
