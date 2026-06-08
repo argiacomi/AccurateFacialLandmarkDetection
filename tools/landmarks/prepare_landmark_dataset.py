@@ -297,8 +297,18 @@ def _parser() -> argparse.ArgumentParser:
         metavar="DATASET",
         help="One or more datasets, space- and/or comma-separated (e.g. --datasets wflw-v 300vw,cofw-original).",
     )
-    parser.add_argument("--data-root", type=Path, default=Path("data/landmarks"), help="Download/cache root.")
-    parser.add_argument("--output-root", type=Path, default=Path("runs/landmarks/prepare"), help="Combined manifest output root.")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=Path("data/datasets"),
+        help="Download/cache root.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/prepared"),
+        help="Combined manifest output root.",
+    )
     parser.add_argument("--image-root", default=None, help="Override image root (defaults to the 300W cache for annotation-layer datasets).")
     parser.add_argument("--manifest-mode", choices=("replace", "merge"), default="replace", help="Replace (fresh) or merge into an existing combined manifest.")
     parser.add_argument("--allow-overlap", action="store_true", help="Keep duplicate image paths across datasets.")
