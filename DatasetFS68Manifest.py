@@ -28,7 +28,7 @@ try:
     from ImageAugmentation import GetAugTransform
 except ModuleNotFoundError:
     def GetAugTransform():
-        raise ModuleNotFoundError("albumentations is required when FS68Manifest aug=True")
+        raise ModuleNotFoundError("albumentations is required when schema-aware manifest aug=True")
 
 
 HARD_NEGATIVE_BUCKET_WEIGHTS = {
@@ -263,14 +263,20 @@ def _visibility_target_from_entry(entry, metadata, landmark_count):
 
 
 class LandmarkDataset(Dataset):
-    """Faceswap-compatible 68-point landmark manifest dataset.
+    """Schema-aware landmark manifest dataset.
+
+    `FS68Manifest` is a backward-compatible data_name alias. The loader accepts
+    mixed trainable landmark schemas such as 29, 39, 68, 98, 106, and 194 points
+    when `schema_aware_training=True`.
 
     Expected manifest schema:
-      {"samples": [{"image": "...", "landmarks": "...", "metadata": {...}}]}
+      {"samples": [{"image": "...", "landmarks": "...", "source_schema": "...",
+                    "target_schema": "...", "metadata": {...}}]}
 
-    Landmarks must be .npy arrays with shape (68, 2) in pixel coordinates. Arrays
-    in [0, 1] are treated as normalized and scaled to the 256x256 CD-ViT crop.
-    faceswap hard-negative metadata is preserved as a per-sample loss weight.
+    Landmark `.npy` arrays are treated as pixel coordinates unless their values
+    are normalized to [0, 1], in which case they are scaled to the 256x256 CD-ViT
+    crop. Hard-negative and visibility metadata are preserved for weighting,
+    slicing, and auxiliary losses.
     """
 
     def __init__(
@@ -289,9 +295,9 @@ class LandmarkDataset(Dataset):
     ):
         super(LandmarkDataset, self).__init__()
         if perturbation:
-            raise ValueError("FS68Manifest does not support perturbation mode")
+            raise ValueError("schema-aware landmark manifests do not support perturbation mode")
         if not manifest_path:
-            raise ValueError("FS68Manifest requires --manifest, --train_manifest, or --test_manifest")
+            raise ValueError("schema-aware landmark manifests require --manifest, --train_manifest, or --test_manifest")
 
         self.manifest_path = Path(manifest_path)
         self.split = split
@@ -312,7 +318,7 @@ class LandmarkDataset(Dataset):
             detail = f" split={split!r} eval_mode={self.eval_mode!r}"
             if self.heldout_datasets:
                 detail += f" heldout_datasets={self.heldout_datasets!r}"
-            raise ValueError(f"no 68-point samples found in {self.manifest_path} for{detail}")
+            raise ValueError(f"no trainable schema-aware samples found in {self.manifest_path} for{detail}")
 
         self.transform = transforms.Compose(
             [transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
@@ -514,7 +520,7 @@ class LandmarkDataset(Dataset):
 
         if skipped_non_trainable_schema:
             reason = "non-trainable" if self.schema_aware_training else "non-68-point"
-            print(f"FS68Manifest skipped {skipped_non_trainable_schema} {reason} sample(s) from {manifest_path}")
+            print(f"schema-aware manifest skipped {skipped_non_trainable_schema} {reason} sample(s) from {manifest_path}")
         return samples
 
     def __len__(self):

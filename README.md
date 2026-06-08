@@ -2,7 +2,7 @@
 
 Code for the WACV 2025 paper **"Cascaded Dual Vision Transformer for Accurate Facial Landmark Detection"**.
 
-This fork also includes a local 68-point landmark manifest workflow for training CD-ViT from WFLW, COFW, 300W, AFLW2000-3D, MERL-RAV, Menpo2D, MultiPIE-style sources, and Faceswap production alignment directories.
+This fork also includes a local schema-aware landmark manifest workflow for training CD-ViT from WFLW, COFW, 300W, AFLW2000-3D, MERL-RAV, Menpo2D, MultiPIE-style sources, and Faceswap production alignment directories.
 
 ## Setup
 
@@ -27,13 +27,13 @@ Download the pre-cropped WFLW images from the HeatmapInHeatmap release, unzip `W
 torchrun --nproc_per_node=2 TrainHeatmapStageFP16.py
 ```
 
-## Local 68-point landmark workflow
+## Local schema-aware landmark workflow
 
 The local workflow has three phases:
 
 1. Download and extract dataset sources into `data/landmarks`.
 2. Prepare any dataset-specific bridges, especially MERL-RAV labels matched to native AFLW images.
-3. Build canonical 68-point manifest sources and then run the CD-ViT hard-negative training pipeline.
+3. Build schema-aware manifest sources and then run the CD-ViT hard-negative training pipeline.
 
 The convenience script performs the first three prep steps and writes copy/pasteable dataset-source arguments for the pipeline:
 
@@ -106,7 +106,7 @@ python tools/landmarks/build_quality_dataset.py \
   --output-dir runs/landmarks/quality_datasets/300w
 ```
 
-All emitted landmark files are materialized as canonical `(68, 2)` `.npy` files. Non-68/non-98 labels are skipped and reported in the dataset audit.
+Dataset manifests preserve native trainable schemas when available, including 29, 39, 68, 98, 106, and 194 point layouts. Each emitted landmark file is materialized as a `.npy` array whose shape must match its `target_schema`; unsupported or unaudited labels are skipped and reported in the dataset audit.
 
 ### Faceswap production alignment directories or zip archives
 
@@ -162,8 +162,8 @@ Pipeline stages:
 
 1. `build_dataset_manifests`: calls local `tools/landmarks/build_quality_dataset.py` once per dataset and, when `--prod-dir` is supplied, builds `production_validated` from the production source.
 2. `build_hard_negative_manifest`: calls local `tools/landmarks/build_hard_negative_manifest.py` to create a ratio-aware hard-negative mix.
-3. `validate_cdvit_manifest`: verifies that the final manifest has readable `(68, 2)` landmark `.npy` files.
-4. `train_cdvit`: launches `TrainHeatmapStageFP16.py --data_name FS68Manifest` with the mined manifest.
+3. `validate_cdvit_manifest`: compatibility stage name for schema-aware training-manifest validation. It verifies readable landmark `.npy` files, `source_schema` / `target_schema` consistency, `head_name`, `landmark_count`, split-safe identifiers, projection-audit metadata, and schema/count reports.
+4. `train_cdvit`: launches `TrainHeatmapStageFP16.py` with the mined manifest. `FS68Manifest` remains the backward-compatible default `--data_name`; `MultiSchemaLandmarkManifest` is the canonical schema-aware alias.
 
 ### Hard-negative mix defaults
 
@@ -218,3 +218,13 @@ python tools/landmarks/evaluate_cdvit_manifest.py \
 ```
 
 Visible/occluded landmark metrics are emitted when per-point visibility targets are present. JSON and CSV summaries include `NME_all`, `NME_visible`, `NME_occluded`, visibility AP/F1@0.5/ROC-AUC when visibility scores are predicted, visible/occluded landmark counts, and skipped-label counts. Per-sample records include visible/occluded counts, per-sample visible/occluded NME, the native evaluation head, and `visibility_target_source` so fields such as `visibility_mask` remain auditable. `NME_visible` and `NME_occluded` are means of per-sample visible/occluded NME values; use the reported landmark counts when interpreting slices where samples have very different numbers of labeled visible or occluded points.
+
+### Training runtime controls
+
+The pipeline forwards runtime flags to `TrainHeatmapStageFP16.py` so long runs can be resumed and profiled safely:
+
+- Data loading: `--preload 0`, `--pin-memory`, `--persistent-workers`, and `--prefetch-factor`.
+- Evaluation cadence: `--eval-every`, `--full-eval-every`, `--eval-ema-every`, and `--eval-max-samples`.
+- Checkpoints: `last_checkpoint.pt`, `best_checkpoint.pt`, metadata sidecars, manifest/config compatibility checks, and optional `--restore-rng`.
+- Metrics: `runtime_metrics.jsonl` records epoch throughput, CUDA memory, data wait, transfer, forward/backward/update, eval, checkpoint, and total epoch timing where available.
+

@@ -121,6 +121,21 @@ def _append_runtime_metrics(args, payload):
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def _empty_epoch_timing():
+    return {
+        "data_wait_seconds": 0.0,
+        "device_transfer_seconds": 0.0,
+        "forward_backward_update_seconds": 0.0,
+        "eval_seconds": 0.0,
+        "ema_eval_seconds": 0.0,
+        "checkpoint_seconds": 0.0,
+    }
+
+
+def _accumulate_timing(timing, key, started_at):
+    timing[key] = float(timing.get(key, 0.0)) + (time.time() - started_at)
+
+
 
 def _normalize_path_for_compat(value):
     if value in (None, ""):
@@ -1677,6 +1692,7 @@ def main():
                 ema.train()
             if dist.get_rank() == 0:
                 epoch_start_time = time.time()
+                epoch_timing = _empty_epoch_timing()
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats(device)
             train_sampler.set_epoch(epoch)
@@ -1687,15 +1703,22 @@ def main():
                     "use --no-persistent-workers for epoch-reseeded worker RNG",
                     flush=True,
                 )
+            batch_fetch_start_time = time.time()
             for batch_idx, batch in enumerate(train_dataloader):
+                if dist.get_rank() == 0:
+                    _accumulate_timing(epoch_timing, "data_wait_seconds", batch_fetch_start_time)
                 optimizer.zero_grad(set_to_none=True)
                 schema_batch = isinstance(batch, dict)
+                transfer_start_time = time.time()
                 if schema_batch:
                     data, schema_heads, aux_labels = _unpack_train_batch(batch, device, non_blocking=args.pin_memory)
                 else:
                     data, target, heatmap, sample_weight, landmark_mask = (
                         _unpack_train_batch(batch, device, non_blocking=args.pin_memory)
                     )
+                if dist.get_rank() == 0:
+                    _accumulate_timing(epoch_timing, "device_transfer_seconds", transfer_start_time)
+                compute_start_time = time.time()
                 loss = 0
                 loss_loc = torch.tensor(0.0, device=device)
                 loss_heatmap = torch.tensor(0.0, device=device)
@@ -1750,6 +1773,8 @@ def main():
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
+                if dist.get_rank() == 0:
+                    _accumulate_timing(epoch_timing, "forward_backward_update_seconds", compute_start_time)
 
                 #                 loss.backward()
                 #                 optimizer.step()
@@ -1766,6 +1791,7 @@ def main():
                     print(
                         f"train epoch {epoch} batch_idx {batch_idx} rank {dist.get_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} loss_aux: {loss_aux.item()}{mix_text}"
                     )
+                batch_fetch_start_time = time.time()
 
             if (
                 args.save_legacy_epoch_state_dict
@@ -1858,6 +1884,7 @@ def main():
                             non_blocking=args.pin_memory,
                         )
                     eval_seconds = time.time() - eval_start_time
+                    epoch_timing["eval_seconds"] = float(epoch_timing.get("eval_seconds", 0.0)) + eval_seconds
                     nme = model_report["overall"]["nme"]
                     if is_full_eval and nme is not None and best_nme > nme:
                         best_nme = nme
@@ -1900,6 +1927,7 @@ def main():
                     and _should_run_interval(args.eval_ema_every, epoch, final_epoch)
                 )
                 if should_eval_ema:
+                    ema_eval_start_time = time.time()
                     with torch.no_grad():
                         ema_report = _evaluate_landmark_model(
                             ema,
@@ -1907,6 +1935,11 @@ def main():
                             device,
                             non_blocking=args.pin_memory,
                         )
+                    epoch_timing["ema_eval_seconds"] = (
+                        float(epoch_timing.get("ema_eval_seconds", 0.0))
+                        + time.time()
+                        - ema_eval_start_time
+                    )
                     nme = ema_report["overall"]["nme"]
                     if is_full_eval and nme is not None and best_nme > nme:
                         best_nme = nme
@@ -1959,6 +1992,7 @@ def main():
                         write_eval_records_csv(args.eval_records_csv, records)
                 # Save last checkpoint after eval so best_nme and best_record are current.
                 if args.save_last_checkpoint:
+                    checkpoint_start_time = time.time()
                     _save_training_checkpoint(
                         Path(args.ckpt_folder) / "last_checkpoint.pt",
                         net,
@@ -1971,6 +2005,40 @@ def main():
                         best_record,
                         args,
                     )
+                    epoch_timing["checkpoint_seconds"] = (
+                        float(epoch_timing.get("checkpoint_seconds", 0.0))
+                        + time.time()
+                        - checkpoint_start_time
+                    )
+
+                final_epoch_timing = dict(epoch_timing)
+                final_epoch_timing["epoch_wall_seconds"] = time.time() - epoch_start_time
+                final_epoch_timing["unattributed_seconds"] = max(
+                    0.0,
+                    final_epoch_timing["epoch_wall_seconds"]
+                    - sum(
+                        float(final_epoch_timing.get(key, 0.0))
+                        for key in (
+                            "data_wait_seconds",
+                            "device_transfer_seconds",
+                            "forward_backward_update_seconds",
+                            "eval_seconds",
+                            "ema_eval_seconds",
+                            "checkpoint_seconds",
+                        )
+                    ),
+                )
+                _append_runtime_metrics(
+                    args,
+                    {
+                        "event": "epoch_timing",
+                        "epoch": int(epoch),
+                        "timing": {
+                            key: round(float(value), 6)
+                            for key, value in sorted(final_epoch_timing.items())
+                        },
+                    },
+                )
 
                 if epoch + 1 >= args.epoch:
                     _write_training_complete_sentinel(
