@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import typing as T
+from collections import Counter
 from pathlib import Path
 
 import cv2
@@ -69,7 +70,7 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
     output_dir.mkdir(parents=True, exist_ok=True)
     report: dict[str, T.Any] = {
         "manifest": str(manifest.resolve()),
-        "counts": {},
+        "counts": Counter(),
         "samples": [],
         "map_98_to_68_size": int(MAP_98_TO_68.size),
         "projection_to_68": {},
@@ -88,7 +89,7 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
             continue
         points = np.load(_resolve(base, landmark_value)).astype(np.float32)
         schema = _schema(entry, points)
-        report["counts"][schema] = report["counts"].get(schema, 0) + 1
+        report["counts"][schema] += 1
         try:
             projection_audit = projection_audit_for_schema(schema)
         except ValueError:

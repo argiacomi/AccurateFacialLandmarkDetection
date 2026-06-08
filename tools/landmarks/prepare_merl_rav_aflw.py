@@ -39,6 +39,7 @@ import re
 import shutil
 import sys
 import typing as T
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,11 +72,11 @@ class PrepStats:
     symlinked_images: int = 0
     duplicate_aflw_stems: int = 0
     aflw_image_count: int = 0
-    visibility_counts: dict[str, int] = field(default_factory=lambda: {
+    visibility_counts: Counter[str] = field(default_factory=lambda: Counter({
         "visible": 0,
         "externally_occluded": 0,
         "self_occluded": 0,
-    })
+    }))
 
     def to_json(self) -> dict[str, T.Any]:
         return {
@@ -366,7 +367,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
         image_value = _materialize_image(image_path, output_dir, aflw_root, mode=args.image_mode, stats=stats)
 
         for item in visibility_labels:
-            stats.visibility_counts[item] = stats.visibility_counts.get(item, 0) + 1
+            stats.visibility_counts[item] += 1
 
         bbox = _bbox_from_valid(points, in_image_mask, image_hw)
         normalizer = _normalizer(points, in_image_mask, image_hw)

@@ -11,6 +11,7 @@ import math
 import re
 import sys
 import typing as T
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -397,15 +398,14 @@ def build_hard_negative_manifest(
 
     selected: list[dict[str, T.Any]] = []
     counts: dict[str, int] = {}
-    by_dataset: dict[str, dict[str, int]] = {}
+    by_dataset: dict[str, Counter[str]] = defaultdict(Counter)
     for bucket in BUCKET_ORDER:
         ordered = _stable_order(classified[bucket], seed=seed)
         ordered = ordered[: target_counts[bucket]]
         counts[bucket] = len(ordered)
         for sample in ordered:
             dataset_label = str(sample.get("dataset", "")).strip().lower() or "unknown"
-            by_dataset.setdefault(dataset_label, {})
-            by_dataset[dataset_label][bucket] = by_dataset[dataset_label].get(bucket, 0) + 1
+            by_dataset[dataset_label][bucket] += 1
 
             sample_image_ids = _sample_image_ids(sample)
             if dataset_label == "merl-rav" and sample_image_ids:

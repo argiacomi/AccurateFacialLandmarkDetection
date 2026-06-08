@@ -76,8 +76,15 @@ def _example(report: dict[str, T.Any], kind: str, payload: T.Any, max_examples: 
         examples.append(payload)
 
 
-def _load_samples(manifest_path: Path) -> tuple[dict[str, T.Any], list[dict[str, T.Any]]]:
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+def _load_samples(
+    manifest_path: Path,
+    manifest_payload: T.Mapping[str, T.Any] | None = None,
+) -> tuple[dict[str, T.Any], list[dict[str, T.Any]]]:
+    payload = (
+        dict(manifest_payload)
+        if manifest_payload is not None
+        else json.loads(manifest_path.read_text(encoding="utf-8"))
+    )
     samples = payload.get("samples", payload.get("scenarios", []))
     if not isinstance(samples, list):
         raise ValueError(f"manifest {manifest_path} must contain a samples list")
@@ -135,6 +142,7 @@ def validate_training_manifest(
     manifest_path: str | Path,
     *,
     report_path: str | Path | None = None,
+    manifest_payload: T.Mapping[str, T.Any] | None = None,
     require_images: bool = True,
     allow_legacy_68_projection: bool = False,
     allow_missing_projection_audit: bool = False,
@@ -156,7 +164,7 @@ def validate_training_manifest(
     """
 
     manifest_path = Path(manifest_path)
-    payload, samples = _load_samples(manifest_path)
+    payload, samples = _load_samples(manifest_path, manifest_payload)
 
     report: dict[str, T.Any] = {
         "manifest": str(manifest_path),

@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import typing as T
+from collections import Counter
 import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
@@ -301,7 +302,7 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
     image_index = _build_image_index(prod_dir, fsa_path)
 
     samples: list[dict[str, T.Any]] = []
-    used_ids: dict[str, int] = {}
+    used_ids: Counter[str] = Counter()
     skipped_missing_image = 0
     skipped_invalid_face = 0
 
@@ -315,7 +316,7 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
             continue
         for face_index, face in enumerate(faces):
             sample_id = _safe_sample_id(str(frame_name), face_index)
-            used_ids[sample_id] = used_ids.get(sample_id, 0) + 1
+            used_ids[sample_id] += 1
             if used_ids[sample_id] > 1:
                 sample_id = f"{sample_id}_{used_ids[sample_id]}"
             try:

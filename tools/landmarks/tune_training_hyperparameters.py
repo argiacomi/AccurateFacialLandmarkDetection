@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.landmarks.io_utils import read_json
+from lib.landmarks.io_utils import read_json, write_json
 
 DEFAULT_STAR_BRACKET = [0.0, 0.005, 0.01, 0.02, 0.05]
 DEFAULT_LR_SWEEP = [3e-5, 5e-5, 1e-4, 2e-4, 3e-4]
@@ -80,20 +80,6 @@ def _float(value: T.Any, default: float | None = None) -> float | None:
     if not math.isfinite(out):
         return default
     return out
-
-
-def _json_default(value: T.Any) -> T.Any:
-    if isinstance(value, Path):
-        return str(value)
-    raise TypeError(f"cannot serialize {type(value)!r}")
-
-
-def _write_json(path: Path, payload: T.Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n",
-        encoding="utf-8",
-    )
 
 
 def _split_csv_floats(raw: str, default: list[float]) -> list[float]:
@@ -474,8 +460,8 @@ def generate_loss_search(args: argparse.Namespace, base: dict[str, float]) -> li
             run["optuna_source"] = source
             plan["trials"].append({"number": trial_number, "run": run, "params": params, "source": source})
 
-    _write_json(_loss_search_plan_path(args), plan)
-    _write_json(Path(args.output_dir) / "optuna_study.json", plan)
+    write_json(_loss_search_plan_path(args), plan)
+    write_json(Path(args.output_dir) / "optuna_study.json", plan)
     return [dict(item["run"]) for item in plan["trials"][: int(args.optuna_trials)]]
 
 
@@ -555,7 +541,7 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
     output_dir = Path(args.output_dir)
     run_dir = output_dir / "runs" / run["id"]
     run_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(run_dir / "config.json", run)
+    write_json(run_dir / "config.json", run)
     command = build_train_command(args, run, run_dir)
     (run_dir / "command.txt").write_text(" ".join(shlex.quote(item) for item in command) + "\n", encoding="utf-8")
 
@@ -566,7 +552,7 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
     metrics_path = run_dir / args.metrics_file_name
     if args.mock_metrics:
         metrics = synthetic_metrics_for_config(run["params"], seed=int(run["seed"]))
-        _write_json(metrics_path, metrics)
+        write_json(metrics_path, metrics)
     elif args.execute:
         subprocess.run(command, check=True, cwd=args.cwd or None, env=os.environ.copy())
     elif not metrics_path.exists():
@@ -595,7 +581,7 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
         "score": score,
         "objective": diagnostics,
     }
-    _write_json(run_dir / "result.json", result)
+    write_json(run_dir / "result.json", result)
     append_result(output_dir / "results.jsonl", result)
     tell_optuna_result(args, result)
     return result
@@ -694,14 +680,14 @@ def write_recommendation(
     }
     if baseline_result is not None:
         recommendation["rationale"]["baseline_delta"] = float(selected_lr_summary["mean_score"]) - float(baseline_result["score"])
-    _write_json(Path(args.output_dir) / "best_training_hyperparameters.json", recommendation)
+    write_json(Path(args.output_dir) / "best_training_hyperparameters.json", recommendation)
     return recommendation
 
 
 def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(output_dir / "tuning_args.json", vars(args))
+    write_json(output_dir / "tuning_args.json", vars(args))
 
     base = baseline_config(args)
     results = read_results(output_dir)
@@ -712,8 +698,8 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
         run = make_run_config(stage="baseline", params=base, seed=args.seed, index=0)
         baseline_result = run_one(args, run, baseline_metrics=None)
         if baseline_result is not None:
-            _write_json(output_dir / "baseline_config.json", run)
-            _write_json(output_dir / "baseline_result.json", baseline_result)
+            write_json(output_dir / "baseline_config.json", run)
+            write_json(output_dir / "baseline_result.json", baseline_result)
     baseline_metrics = baseline_result.get("metrics") if baseline_result else None
 
     for run in generate_star_bracket(args, base):
@@ -727,7 +713,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
     results = read_results(output_dir)
     loss_candidates = result_by_stage(results, "star_bracket") + result_by_stage(results, "optuna_loss_search")
     ranked_loss = rank_results(loss_candidates, top_k=max(int(args.loss_top_k), 1))
-    _write_json(output_dir / "ranked_loss_candidates.json", ranked_loss)
+    write_json(output_dir / "ranked_loss_candidates.json", ranked_loss)
 
     for run in generate_loss_finalists(args, ranked_loss):
         if not already_done(output_dir, run["id"]):
@@ -735,7 +721,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
 
     results = read_results(output_dir)
     loss_finalist_summaries = aggregate_by_parent(result_by_stage(results, "loss_finalist_seed"), top_k=max(int(args.loss_top_k), 1))
-    _write_json(output_dir / "loss_finalist_summary.json", loss_finalist_summaries)
+    write_json(output_dir / "loss_finalist_summary.json", loss_finalist_summaries)
     if loss_finalist_summaries:
         selected_loss = loss_finalist_summaries[0]
     elif ranked_loss:
@@ -749,7 +735,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
 
     results = read_results(output_dir)
     ranked_lr = rank_results(result_by_stage(results, "lr_sweep"), top_k=max(int(args.lr_top_k), 1))
-    _write_json(output_dir / "ranked_lr_candidates.json", ranked_lr)
+    write_json(output_dir / "ranked_lr_candidates.json", ranked_lr)
 
     for run in generate_lr_finalists(args, ranked_lr):
         if not already_done(output_dir, run["id"]):
@@ -757,7 +743,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
 
     results = read_results(output_dir)
     lr_finalist_summaries = aggregate_by_parent(result_by_stage(results, "lr_finalist_seed"), top_k=max(int(args.lr_top_k), 1))
-    _write_json(output_dir / "lr_finalist_summary.json", lr_finalist_summaries)
+    write_json(output_dir / "lr_finalist_summary.json", lr_finalist_summaries)
     if lr_finalist_summaries:
         selected_lr = lr_finalist_summaries[0]
     elif ranked_lr:
@@ -774,7 +760,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
         )
     else:
         recommendation = {"status": "planned_only", "message": "No metrics available; rerun with --execute or --mock-metrics."}
-        _write_json(output_dir / "best_training_hyperparameters.json", recommendation)
+        write_json(output_dir / "best_training_hyperparameters.json", recommendation)
 
     return recommendation
 

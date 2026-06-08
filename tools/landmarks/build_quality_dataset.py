@@ -30,6 +30,7 @@ import logging
 import re
 import sys
 import typing as T
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -498,16 +499,16 @@ def _build_image_index(root: Path) -> dict[str, list[Path]]:
 
 def _build_combined_image_index(roots: T.Iterable[Path]) -> dict[str, list[Path]]:
     index: dict[str, list[Path]] = {}
-    seen: set[Path] = set()
+    seen: set[str] = set()
     for root in roots:
         if not root.is_dir():
             continue
         for key, paths in _build_image_index(root).items():
             bucket = index.setdefault(key, [])
             for path in paths:
-                resolved = path.resolve()
-                if resolved not in seen:
-                    seen.add(resolved)
+                lexical_key = path.absolute().as_posix()
+                if lexical_key not in seen:
+                    seen.add(lexical_key)
                     bucket.append(path)
     return index
 
@@ -526,10 +527,10 @@ def _matching_image(landmarks: Path, *, root: Path | None = None, image_index: d
         if matches:
             return sorted(matches, key=lambda item: len(item.parts))[0]
     if root is not None:
-        for ext in IMAGE_EXTS:
-            matches = sorted(root.rglob(f"{landmarks.stem}{ext}"), key=lambda item: len(item.parts))
-            if matches:
-                return matches[0]
+        raise ValueError(
+            "image_index is required for root-based image matching; "
+            "build it once with _build_combined_image_index"
+        )
     return None
 
 
@@ -738,13 +739,13 @@ def _filter(samples: list[dict[str, T.Any]], scenarios: tuple[str, ...] | None, 
         samples = [sample for sample in samples if allowed.intersection(sample.get("conditions", ()))]
     if not limit:
         return samples
-    counts: dict[str, int] = {}
+    counts: Counter[str] = Counter()
     out = []
     for sample in samples:
         condition = str(sample.get("condition") or "default")
         if counts.get(condition, 0) >= limit:
             continue
-        counts[condition] = counts.get(condition, 0) + 1
+        counts[condition] += 1
         out.append(sample)
     return out
 
@@ -871,18 +872,18 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
     audit_dir = output_dir / "visual_audit"
     overlays: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    schema_counts: dict[str, int] = {}
+    schema_counts: Counter[str] = Counter()
 
     # Select up to `limit` overlay tasks per dataset deterministically, then render
     # them in parallel (image decode/encode releases the GIL). Output is organized
     # by dataset/schema and results stay input-ordered.
     tasks: list[_OverlayTask] = []
-    per_dataset_selected: dict[str, int] = {}
+    per_dataset_selected: Counter[str] = Counter()
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
         schema = str(entry.get("target_schema") or entry.get("source_schema") or "unknown")
-        schema_counts[schema] = schema_counts.get(schema, 0) + 1
+        schema_counts[schema] += 1
         dataset_name = str(entry.get("dataset") or "unknown")
         if per_dataset_selected.get(dataset_name, 0) >= int(limit):
             continue
@@ -908,7 +909,7 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
                 visibility=tuple(visibility) if visibility is not None else None,
             )
         )
-        per_dataset_selected[dataset_name] = per_dataset_selected.get(dataset_name, 0) + 1
+        per_dataset_selected[dataset_name] += 1
 
     for task, error in parallel_map(
         _draw_overlay_task, tasks, workers=max_workers, desc="Overlays", unit="overlay"
@@ -947,7 +948,7 @@ def _json_source(root: Path) -> Path | None:
             continue
         try:
             payload = read_json(path)
-        except Exception:
+        except (OSError, ValueError):
             continue
         if isinstance(payload, list) or (
             isinstance(payload, dict) and any(key in payload for key in ("samples", "entries"))
@@ -2705,6 +2706,7 @@ def _build_cofw68_original(
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
+    image_index = _build_combined_image_index([Path(image_root) if image_root else root])
     sio: T.Any | None = None
     for mat_path, declared_split in mat_files:
         try:
@@ -2765,7 +2767,11 @@ def _build_cofw68_original(
                         output_dir, sample_id, images[index]
                     )
                 else:
-                    image = _matching_image(mat_path, root=Path(image_root) if image_root else root)
+                    image = _matching_image(
+                        mat_path,
+                        root=Path(image_root) if image_root else root,
+                        image_index=image_index,
+                    )
                     if image is None:
                         raise FileNotFoundError(
                             "cofw68 original image not found in MAT or image root"
@@ -2854,7 +2860,7 @@ def _cofw68_test_bboxes(root: Path) -> np.ndarray | None:
         payload = sio.loadmat(matches[0])
         boxes = np.asarray(payload.get("bboxes"), dtype=np.float32)
         return boxes if boxes.ndim == 2 and boxes.shape[1] == 4 else None
-    except Exception:
+    except (ImportError, OSError, TypeError, ValueError, NotImplementedError):
         return None
 
 
@@ -3296,19 +3302,19 @@ def _build_wflw(
 
     image_base = Path(image_root) if image_root else _find_wflw_images(root_for_images)
     rows = []
-    counts: dict[str, int] = {}
+    counts: Counter[str] = Counter()
     for line_no, line in enumerate(annotations.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
         if not line.strip():
             continue
         row = _parse_wflw_line(line, line_no)
         rows.append(row)
-        counts[row[3]] = counts.get(row[3], 0) + 1
+        counts[row[3]] += 1
 
-    seen: dict[str, int] = {}
+    seen: Counter[str] = Counter()
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     for points98, bbox, attrs, image_rel in rows:
-        seen[image_rel] = seen.get(image_rel, 0) + 1
+        seen[image_rel] += 1
         base_id = Path(image_rel).with_suffix("").as_posix()
         sample_id = base_id if counts[image_rel] <= 1 else f"{base_id}#face-{seen[image_rel]:02d}"
         conds = tuple(name for name in WFLW_ATTRIBUTE_NAMES if attrs.get(name)) or (_label(scenario),)
@@ -3381,29 +3387,99 @@ def _candidate_frame_stems(frame_index: int) -> tuple[str, ...]:
     )
 
 
-def _find_frame_landmark_file(root: Path, video_id: str, frame_index: int) -> Path | None:
-    safe_video_id = str(video_id).replace("\\", "/").strip("/")
-    search_roots = [
-        root / "annotations" / safe_video_id,
-        root / "landmarks" / safe_video_id,
-        root / "labels" / safe_video_id,
-        root / safe_video_id,
-    ]
-    for search_root in search_roots:
-        if not search_root.is_dir():
-            continue
-        for stem in _candidate_frame_stems(frame_index):
-            for suffix in LANDMARK_EXTS:
-                candidate = search_root / f"{stem}{suffix}"
-                if candidate.is_file():
-                    return candidate
+def _candidate_frame_indices_from_stem(stem: str) -> tuple[int, ...]:
+    """Return zero-based frame indices a landmark filename could represent."""
+    values: list[int] = []
+    for token in reversed(re.findall(r"\d+", stem)):
+        raw = int(token)
+        for candidate in (raw, raw - 1):
+            if candidate >= 0 and candidate not in values:
+                values.append(candidate)
+    return tuple(values)
 
-    for stem in _candidate_frame_stems(frame_index):
-        for suffix in LANDMARK_EXTS:
-            matches = sorted(root.rglob(f"{safe_video_id}*{stem}{suffix}"), key=lambda item: len(item.parts))
-            if matches:
-                return matches[0]
-    return None
+
+def _frame_landmark_files(root: Path) -> T.Iterator[Path]:
+    for suffix in LANDMARK_EXTS:
+        yield from root.rglob(f"*{suffix}")
+
+
+def _add_frame_landmark_index_entry(
+    index: dict[tuple[str, int], Path],
+    *,
+    video_id: str,
+    frame_index: int,
+    path: Path,
+) -> None:
+    normalized_video_id = str(video_id).replace("\\", "/").strip("/")
+    if not normalized_video_id:
+        return
+    index.setdefault((normalized_video_id, int(frame_index)), path)
+
+
+def _build_frame_landmark_index(root: Path) -> dict[tuple[str, int], Path]:
+    """Build a video_id/frame_index -> landmark path index with one tree walk.
+
+    This replaces the old per-frame ``root.rglob(...)`` fallback in
+    ``_find_frame_landmark_file``. Structured layouts are still favored by
+    sorting short paths first and by indexing annotations/, landmarks/, labels/
+    directories before generic filename-prefix fallbacks.
+    """
+    index: dict[tuple[str, int], Path] = {}
+    if not root.is_dir():
+        return index
+
+    structured_roots = {"annotations", "landmarks", "labels"}
+    for path in sorted(_frame_landmark_files(root), key=lambda item: (len(item.parts), item.as_posix())):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            rel = path
+        parts = rel.parts
+        frame_indices = _candidate_frame_indices_from_stem(path.stem)
+        if not frame_indices:
+            continue
+
+        # Fast structured layouts: annotations/<video_id>/<frame>.npy and peers.
+        if len(parts) > 2 and parts[0] in structured_roots:
+            video_id = "/".join(parts[1:-1])
+            for frame_index in frame_indices:
+                _add_frame_landmark_index_entry(
+                    index, video_id=video_id, frame_index=frame_index, path=path
+                )
+
+        # Generic nested layout: <video_id>/<frame>.npy.
+        if len(parts) > 1 and parts[0] not in structured_roots:
+            video_id = "/".join(parts[:-1])
+            for frame_index in frame_indices:
+                _add_frame_landmark_index_entry(
+                    index, video_id=video_id, frame_index=frame_index, path=path
+                )
+
+        # Flat fallback layout: <video_id>_<frame>.npy or <video_id>-frame_000001.npy.
+        for frame_index in frame_indices:
+            for candidate_stem in _candidate_frame_stems(frame_index):
+                if path.stem == candidate_stem:
+                    continue
+                for separator in ("_", "-", ".", " "):
+                    suffix = f"{separator}{candidate_stem}"
+                    if not path.stem.endswith(suffix):
+                        continue
+                    video_id = path.stem[: -len(suffix)].strip("_.- /")
+                    _add_frame_landmark_index_entry(
+                        index, video_id=video_id, frame_index=frame_index, path=path
+                    )
+    return index
+
+
+def _find_frame_landmark_file(
+    landmark_index: T.Mapping[tuple[str, int], Path],
+    video_id: str,
+    frame_index: int,
+) -> Path | None:
+    safe_video_id = str(video_id).replace("\\", "/").strip("/")
+    return landmark_index.get((safe_video_id, int(frame_index)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -3484,6 +3560,7 @@ def _build_video_dataset(
     frame_root = Path(frame_output_dir) if frame_output_dir else output_dir / "frames" / dataset
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
+    frame_landmark_index = _build_frame_landmark_index(root)
 
     # Decode every video in parallel (OpenCV releases the GIL); the per-frame
     # sample assembly below stays sequential to keep manifest ordering and
@@ -3515,7 +3592,7 @@ def _build_video_dataset(
         for record in frame_records:
             frame_index = int(record["frame_index"])
             sample_id = f"{dataset}/{video_id}/frame_{frame_index:06d}"
-            landmark_path = _find_frame_landmark_file(root, video_id, frame_index)
+            landmark_path = _find_frame_landmark_file(frame_landmark_index, video_id, frame_index)
             if landmark_path is None:
                 skipped.append({"sample_id": sample_id, "reason": "matching frame landmarks not found"})
                 continue

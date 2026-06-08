@@ -1,9 +1,8 @@
 """Shared JSON / path / hashing helpers for the landmark dataset tools.
 
-These were previously duplicated verbatim across the ``tools/landmarks``
-scripts. They are intentionally dependency-light: ``jsonable`` handles NumPy
+These helpers are intentionally dependency-light: ``jsonable`` handles NumPy
 values without importing NumPy at module load, so CLIs that never touch NumPy
-(e.g. the training pipeline and tuner) keep their fast startup.
+keep their fast startup.
 """
 
 from __future__ import annotations
@@ -24,8 +23,8 @@ def jsonable(value: T.Any) -> T.Any:
         return {str(key): jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [jsonable(item) for item in value]
-    # Convert NumPy arrays/scalars without importing NumPy here; ``tolist``
-    # covers both ndarray and numpy scalar types.
+    # Convert NumPy arrays/scalars without importing NumPy here. ``tolist`` covers
+    # ndarray and NumPy scalar types.
     if type(value).__module__ == "numpy":
         to_list = getattr(value, "tolist", None)
         if to_list is not None:

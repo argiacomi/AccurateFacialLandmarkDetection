@@ -24,9 +24,9 @@ Example::
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import typing as T
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.landmarks.datasets.progress import track
+from lib.landmarks.io_utils import read_json
 from lib.landmarks.manifest.validator import validate_training_manifest
 from tools.landmarks import build_quality_dataset as builder
 from tools.landmarks import download_landmark_datasets as downloader
@@ -156,25 +157,30 @@ def _build_dataset(
     return builder.build(build_args)
 
 
-def _validate(manifest: Path, *, require_images: bool) -> dict[str, T.Any]:
+def _validate(
+    manifest: Path,
+    *,
+    require_images: bool,
+    manifest_payload: T.Mapping[str, T.Any] | None = None,
+) -> dict[str, T.Any]:
     return validate_training_manifest(
         manifest,
+        manifest_payload=manifest_payload,
         require_images=require_images,
         raise_on_error=False,
     )
 
 
-def _dataset_summary(manifest_path: Path) -> dict[str, dict[str, T.Any]]:
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+def _dataset_summary(payload: T.Mapping[str, T.Any]) -> dict[str, dict[str, T.Any]]:
     per_dataset: dict[str, dict[str, T.Any]] = {}
     for sample in payload.get("samples", []):
         if not isinstance(sample, dict):
             continue
         name = str(sample.get("dataset") or sample.get("source", {}).get("dataset") or "unknown")
-        entry = per_dataset.setdefault(name, {"samples": 0, "schemas": {}})
+        entry = per_dataset.setdefault(name, {"samples": 0, "schemas": Counter()})
         entry["samples"] += 1
         schema = str(sample.get("target_schema") or sample.get("source_schema") or "unknown")
-        entry["schemas"][schema] = entry["schemas"].get(schema, 0) + 1
+        entry["schemas"][schema] += 1
     return per_dataset
 
 
@@ -234,11 +240,16 @@ def prepare(args: argparse.Namespace) -> int:
         results.append(record)
 
     combined_manifest = output_root / "manifest.json"
+    combined_payload = read_json(combined_manifest) if combined_manifest.is_file() else None
     report: dict[str, T.Any] | None = None
     if built_any and not args.skip_validate:
-        report = _validate(combined_manifest, require_images=not args.skip_image_exists_check)
+        report = _validate(
+            combined_manifest,
+            require_images=not args.skip_image_exists_check,
+            manifest_payload=combined_payload,
+        )
 
-    _print_summary(results, report, output_root, datasets)
+    _print_summary(results, report, output_root, datasets, manifest_payload=combined_payload)
 
     errored = [r for r in results if r["status"] == "error"]
     if not built_any:
@@ -253,9 +264,11 @@ def _print_summary(
     report: dict[str, T.Any] | None,
     output_root: Path,
     datasets: list[str],
+    *,
+    manifest_payload: T.Mapping[str, T.Any] | None = None,
 ) -> None:
     combined_manifest = output_root / "manifest.json"
-    per_dataset = _dataset_summary(combined_manifest) if combined_manifest.is_file() else {}
+    per_dataset = _dataset_summary(manifest_payload) if manifest_payload is not None else {}
 
     print("\nPer-dataset summary:")
     for record in results:
