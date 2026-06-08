@@ -138,6 +138,7 @@ def validate_training_manifest(
     require_images: bool = True,
     allow_legacy_68_projection: bool = False,
     allow_missing_projection_audit: bool = False,
+    allow_legacy_missing_contract_fields: bool = False,
     max_examples: int = 25,
     raise_on_error: bool = False,
 ) -> dict[str, T.Any]:
@@ -190,8 +191,8 @@ def validate_training_manifest(
             "projection_audit": [],
             "leakage": [],
         },
+        "legacy_68_projection_samples": 0,
         "leakage": {"checked_fields": list(IDENTITY_FIELDS), "violations": []},
-        "summary": {},
     }
 
     identities: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
@@ -214,16 +215,14 @@ def validate_training_manifest(
         report["hard_negative_buckets"][bucket] += 1
 
         errors: list[str] = []
+        legacy_inferable_contract_fields = {"landmark_count", "head_name", "split_safe_id"}
         for field in REQUIRED_SAMPLE_FIELDS:
-            if field in {"landmark_count", "head_name", "split_safe_id"}:
-                # These can be inferred, but PR 2 records missingness to
-                # keep builders honest without blocking legacy manifests.
-                if _value(sample, field) in (None, ""):
-                    report["missing_required_fields"][field] += 1
+            if _value(sample, field) not in (None, ""):
                 continue
-            if _value(sample, field) in (None, ""):
-                report["missing_required_fields"][field] += 1
-                errors.append(f"missing_{field}")
+            report["missing_required_fields"][field] += 1
+            if field in legacy_inferable_contract_fields and allow_legacy_missing_contract_fields:
+                continue
+            errors.append(f"missing_{field}")
 
         image_value = sample.get("image") or sample.get("image_path")
         if image_value and require_images:
@@ -307,6 +306,8 @@ def validate_training_manifest(
                 and detected_schema == "2d_68"
                 and source_schema != target_schema
             )
+            if legacy_projection:
+                report["legacy_68_projection_samples"] += 1
             if observed_count != expected_target_count and not legacy_projection:
                 report["schema_shape_mismatches"] += 1
                 _example(
@@ -345,7 +346,7 @@ def validate_training_manifest(
                 sample,
                 source_schema=source_schema,
                 target_schema=target_schema,
-                allow_missing_projection_audit=allow_missing_projection_audit,
+                allow_missing_projection_audit=allow_missing_projection_audit or legacy_projection,
             )
             if projection_error:
                 report["projection_audit_errors"] += 1

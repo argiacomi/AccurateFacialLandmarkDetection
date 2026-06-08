@@ -16,6 +16,7 @@ from lib.landmarks.core.schema import (
     head_name_for_schema,
     infer_schema,
     normalize_landmark_array,
+    point_count_for_schema,
 )
 from lib.landmarks.evaluation.split_safe import (
     entry_in_eval_split,
@@ -124,6 +125,18 @@ def _weight_from_entry(entry, metadata, conditions):
 
 def _entry_split(entry):
     return manifest_entry_split(entry)
+
+
+def _coerce_optional_int(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid landmark_count value: {value!r}")
+
+class ManifestContractError(ValueError):
+    """Raised when a manifest entry violates the declared training contract."""
 
 
 def _as_bool_landmark_mask(value, landmark_count=68):
@@ -357,11 +370,44 @@ class LandmarkDataset(Dataset):
                 target_schema = canonicalize_schema(
                     entry.get("target_schema") or metadata.get("target_schema") or schema
                 )
+                actual_schema = infer_schema(landmarks[:, :2])
+                if target_schema != actual_schema:
+                    raise ManifestContractError(
+                        "manifest target_schema does not match loaded landmark array: "
+                        f"sample={entry.get('sample_id') or entry.get('id') or index!r} "
+                        f"target_schema={target_schema!r} actual_schema={actual_schema!r} "
+                        f"shape={tuple(landmarks.shape)!r}"
+                    )
+
+                expected_head_name = head_name_for_schema(target_schema)
                 head_name = str(
                     entry.get("head_name")
                     or metadata.get("head_name")
-                    or head_name_for_schema(target_schema)
+                    or expected_head_name
                 )
+                if head_name != expected_head_name:
+                    raise ManifestContractError(
+                        "manifest head_name does not match target_schema: "
+                        f"sample={entry.get('sample_id') or entry.get('id') or index!r} "
+                        f"head_name={head_name!r} expected={expected_head_name!r}"
+                    )
+
+                raw_landmark_count = entry.get("landmark_count")
+                if raw_landmark_count in (None, ""):
+                    raw_landmark_count = metadata.get("landmark_count")
+                try:
+                    declared_landmark_count = _coerce_optional_int(raw_landmark_count)
+                except ValueError as exc:
+                    raise ManifestContractError(str(exc)) from exc
+                expected_landmark_count = point_count_for_schema(target_schema)
+                if declared_landmark_count is not None and declared_landmark_count != expected_landmark_count:
+                    raise ManifestContractError(
+                        "manifest landmark_count does not match target_schema: "
+                        f"sample={entry.get('sample_id') or entry.get('id') or index!r} "
+                        f"landmark_count={declared_landmark_count!r} expected={expected_landmark_count!r}"
+                    )
+            except ManifestContractError:
+                raise
             except ValueError:
                 skipped_non_trainable_schema += 1
                 continue

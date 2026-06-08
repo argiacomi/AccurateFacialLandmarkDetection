@@ -430,6 +430,7 @@ def _validate_training_manifest(
         require_images=not args.skip_image_exists_check,
         allow_legacy_68_projection=args.allow_legacy_68_projection,
         allow_missing_projection_audit=args.allow_missing_projection_audit,
+        allow_legacy_missing_contract_fields=args.allow_legacy_missing_contract_fields,
         max_examples=args.max_validation_examples,
         raise_on_error=True,
     )
@@ -645,6 +646,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--allow-missing-projection-audit",
         action="store_true",
         help="Do not fail samples whose source_schema differs from target_schema but lack mapping/projection audit metadata.",
+    )
+    parser.add_argument(
+        "--allow-legacy-missing-contract-fields",
+        action="store_true",
+        help="Do not fail legacy manifests missing inferable contract fields: landmark_count, head_name, split_safe_id.",
     )
     parser.add_argument(
         "--skip-image-exists-check",

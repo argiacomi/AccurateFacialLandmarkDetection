@@ -21,6 +21,11 @@ def main() -> int:
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--allow-legacy-68-projection", action="store_true")
     parser.add_argument("--allow-missing-projection-audit", action="store_true")
+    parser.add_argument(
+        "--allow-legacy-missing-contract-fields",
+        action="store_true",
+        help="Do not fail legacy manifests missing inferable contract fields: landmark_count, head_name, split_safe_id.",
+    )
     parser.add_argument("--skip-image-exists-check", action="store_true")
     parser.add_argument("--max-examples", type=int, default=25)
     args = parser.parse_args()
@@ -31,6 +36,7 @@ def main() -> int:
         require_images=not args.skip_image_exists_check,
         allow_legacy_68_projection=args.allow_legacy_68_projection,
         allow_missing_projection_audit=args.allow_missing_projection_audit,
+        allow_legacy_missing_contract_fields=args.allow_legacy_missing_contract_fields,
         max_examples=args.max_examples,
         raise_on_error=False,
     )
