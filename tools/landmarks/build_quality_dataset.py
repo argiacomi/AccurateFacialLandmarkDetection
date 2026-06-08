@@ -821,6 +821,81 @@ def _write_manifest(
     return manifest_path
 
 
+def _draw_manifest_overlay(image_path: Path, landmarks_path: Path, output_path: Path) -> None:
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise FileNotFoundError(f"could not read overlay image: {image_path}")
+    points = np.load(landmarks_path).astype(np.float32)[:, :2]
+    height, width = image.shape[:2]
+    if points.size and float(np.nanmax(points)) <= 1.5:
+        points = points * np.asarray([width - 1, height - 1], dtype=np.float32)
+    radius = max(1, int(round(max(width, height) / 256.0 * 2.0)))
+    for index, (x, y) in enumerate(points):
+        color = (0, 255, 255) if index % 5 else (0, 0, 255)
+        cv2.circle(image, (int(round(x)), int(round(y))), radius, color, -1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(output_path), image)
+    if not ok:
+        raise OSError(f"failed to write overlay image: {output_path}")
+
+
+def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 50) -> Path:
+    payload = _read_json(manifest_path)
+    entries = payload.get("samples", [])
+    if not isinstance(entries, list):
+        raise ValueError(f"manifest {manifest_path} must contain samples list for visual audit")
+    base_dir = manifest_path.parent
+    audit_dir = output_dir / "visual_audit"
+    overlays: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    schema_counts: dict[str, int] = {}
+    emitted = 0
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        schema = str(entry.get("target_schema") or entry.get("source_schema") or "unknown")
+        schema_counts[schema] = schema_counts.get(schema, 0) + 1
+        if emitted >= int(limit):
+            continue
+        image_value = entry.get("image")
+        landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
+        sample_id = str(entry.get("sample_id") or index)
+        if not image_value or not landmarks_value:
+            skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
+            continue
+        image_path = _resolve_path(image_value, base_dir=base_dir)
+        landmarks_path = _resolve_path(landmarks_value, base_dir=base_dir)
+        overlay_name = _safe_id(sample_id).replace("/", "_").replace("#", "_")
+        overlay_path = audit_dir / "overlays" / schema / f"{overlay_name}.jpg"
+        try:
+            _draw_manifest_overlay(image_path, landmarks_path, overlay_path)
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": sample_id, "reason": str(err)})
+            continue
+        overlays.append(
+            {
+                "sample_id": sample_id,
+                "schema": schema,
+                "image": str(image_path),
+                "landmarks": str(landmarks_path),
+                "overlay": str(overlay_path),
+            }
+        )
+        emitted += 1
+
+    report = {
+        "manifest": str(manifest_path),
+        "schema_counts": dict(sorted(schema_counts.items())),
+        "overlay_count": len(overlays),
+        "overlays": overlays,
+        "skipped_count": len(skipped),
+        "skipped_examples": skipped[:50],
+    }
+    report_path = audit_dir / "visual_audit.json"
+    _write_json(report_path, report)
+    return report_path
+
+
 def _json_source(root: Path) -> Path | None:
     candidates = [root] if root.is_file() else sorted(root.rglob("*.json"))
     for path in candidates:
@@ -1035,6 +1110,635 @@ def _build_directory(
     return _write_manifest(
         output_dir,
         dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
+def _landmark_paths(root: Path) -> list[Path]:
+    return [
+        path
+        for suffix in LANDMARK_EXTS
+        for path in sorted(root.rglob(f"*{suffix}"))
+        if path.name != "manifest.json" and not path.name.startswith(".")
+    ]
+
+
+def _source_image_roots(root: Path, dataset: str) -> tuple[Path, ...]:
+    labels = {
+        "helen": ("images", "annotation", "annotations", "labels"),
+        "lapa": ("images", "landmarks", "labels", "LaPa"),
+        "jd-landmark": ("images", "landmarks", "labels"),
+        "ffl2": ("images", "landmarks", "labels"),
+        "fll3": ("images", "landmarks", "labels"),
+        "cofw-original": ("images", "annotations", "landmarks"),
+        "xm2vts": ("images", "annotations", "landmarks"),
+        "frgc": ("images", "annotations", "landmarks"),
+    }.get(dataset, ("images",))
+    roots = [root]
+    for label in labels:
+        roots.extend(path for path in root.rglob(label) if path.is_dir())
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for item in roots:
+        resolved = item.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(item)
+    return tuple(out)
+
+
+def _schema_parser_metadata(dataset: str, parser_name: str, landmark_path: Path, root: Path) -> dict[str, T.Any]:
+    metadata = _path_identity_metadata(landmark_path, root=root, dataset=dataset)
+    metadata.update(
+        {
+            "dataset_parser": parser_name,
+            "parser_type": "dataset_specific",
+        }
+    )
+    if dataset == "lapa":
+        rel_parts = {_label(part) for part in landmark_path.relative_to(root).parts}
+        for split_label in ("train", "val", "test"):
+            if split_label in rel_parts:
+                metadata.setdefault("source_split", split_label)
+                break
+    return metadata
+
+
+def _image_for_dataset_landmarks(
+    landmark_path: Path,
+    *,
+    dataset: str,
+    root: Path,
+    image_root: str | None,
+) -> Path | None:
+    roots = (Path(image_root),) if image_root else _source_image_roots(root, dataset)
+    for candidate_root in roots:
+        image_index = _build_image_index(candidate_root)
+        image = _matching_image(landmark_path, root=candidate_root, image_index=image_index)
+        if image is not None:
+            return image
+    return None
+
+
+def _build_expected_schema_dataset(
+    root: Path,
+    output_dir: Path,
+    *,
+    dataset: str,
+    expected_schema: str,
+    parser_name: str,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
+    json_path = _json_source(root)
+    if json_path is not None:
+        return _build_expected_schema_json(
+            json_path,
+            output_dir,
+            dataset=dataset,
+            expected_schema=expected_schema,
+            parser_name=parser_name,
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for landmark_path in _landmark_paths(root):
+        try:
+            points, detected_schema = _load_landmark_file(landmark_path)
+            if detected_schema != expected_schema:
+                raise ValueError(f"{parser_name} expected {expected_schema}, got {detected_schema}")
+            image = _image_for_dataset_landmarks(
+                landmark_path,
+                dataset=dataset,
+                root=root,
+                image_root=image_root,
+            )
+            if image is None:
+                raise FileNotFoundError("matching image not found")
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+            continue
+
+        sample_id = landmark_path.relative_to(root).with_suffix("").as_posix()
+        condition, conds = _condition_for_landmark_file(dataset, landmark_path.relative_to(root), scenario)
+        metadata = _schema_parser_metadata(dataset, parser_name, landmark_path, root)
+        entry_for_split: dict[str, T.Any] = {}
+        if "trainset" in conds or metadata.get("source_split") == "train":
+            entry_for_split["split"] = "train"
+        elif "testset" in conds or metadata.get("source_split") in {"val", "test"}:
+            entry_for_split["split"] = "test"
+        split = _split_from_entry_or_identity(
+            entry_for_split,
+            metadata,
+            dataset=dataset,
+            sample_id=sample_id,
+        )
+        conds = tuple(dict.fromkeys((*conds, f"{split}set")))
+        samples.append(
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset=dataset,
+                    sample_id=sample_id,
+                    image=image,
+                    points68=points,
+                    condition=condition,
+                    conditions=conds,
+                    source_schema=expected_schema,
+                    source_id=sample_id,
+                    metadata=metadata,
+                ),
+                split,
+            )
+        )
+
+    if not samples:
+        raise ValueError(f"no {dataset} samples built with {parser_name}; skipped={skipped[:10]}")
+
+    return _write_manifest(
+        output_dir,
+        dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
+def _build_expected_schema_json(
+    path: Path,
+    output_dir: Path,
+    *,
+    dataset: str,
+    expected_schema: str,
+    parser_name: str,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
+    payload = _read_json(path)
+    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        raise ValueError(f"{parser_name} JSON source must contain list, entries, or samples list: {path}")
+    image_base = Path(image_root) if image_root else path.parent
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
+        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
+        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or idx)
+        if image_value is None or landmark_value is None:
+            skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
+            continue
+        metadata = _entry_metadata(entry, dataset=dataset, source_file=path)
+        metadata["dataset_parser"] = parser_name
+        metadata["parser_type"] = "dataset_specific"
+        source_schema = str(entry.get("source_schema") or metadata.get("source_schema") or expected_schema)
+        try:
+            points, detected_schema = _load_points(
+                landmark_value,
+                base_dir=path.parent,
+                source_schema=source_schema,
+            )
+            if detected_schema != expected_schema:
+                raise ValueError(f"{parser_name} expected {expected_schema}, got {detected_schema}")
+            image_path = _resolve_path(image_value, base_dir=image_base)
+            if not image_path.is_file():
+                raise FileNotFoundError(f"image not found: {image_path}")
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": sample_id, "reason": str(err)})
+            continue
+
+        conds = _conditions(entry, scenario)
+        split = _split_from_entry_or_identity(entry, metadata, dataset=dataset, sample_id=sample_id)
+        conds = tuple(dict.fromkeys((*conds, f"{split}set")))
+        samples.append(
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset=dataset,
+                    sample_id=sample_id,
+                    image=image_path,
+                    points68=points,
+                    condition=str(entry.get("condition") or conds[0]),
+                    conditions=conds,
+                    source_schema=expected_schema,
+                    source_id=str(entry.get("source_id") or sample_id),
+                    metadata=metadata,
+                    visibility=entry.get("visibility", metadata.get("visibility")),
+                    normalizer=entry.get("normalizer", metadata.get("normalizer")),
+                ),
+                split,
+            )
+        )
+
+    if not samples:
+        raise ValueError(f"no {dataset} JSON samples built with {parser_name}; skipped={skipped[:10]}")
+    return _write_manifest(
+        output_dir,
+        dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
+def _build_helen(
+    root: Path,
+    output_dir: Path,
+    **kwargs: T.Any,
+) -> Path:
+    return _build_expected_schema_dataset(
+        root,
+        output_dir,
+        dataset="helen",
+        expected_schema="2d_194",
+        parser_name="helen_194",
+        **kwargs,
+    )
+
+
+def _build_lapa(
+    root: Path,
+    output_dir: Path,
+    **kwargs: T.Any,
+) -> Path:
+    return _build_expected_schema_dataset(
+        root,
+        output_dir,
+        dataset="lapa",
+        expected_schema="2d_106",
+        parser_name="lapa_106",
+        **kwargs,
+    )
+
+
+def _build_jd_landmark(
+    root: Path,
+    output_dir: Path,
+    **kwargs: T.Any,
+) -> Path:
+    return _build_expected_schema_dataset(
+        root,
+        output_dir,
+        dataset="jd-landmark",
+        expected_schema="2d_106",
+        parser_name="jd_landmark_106",
+        **kwargs,
+    )
+
+
+def _build_ffl_family(
+    root: Path,
+    output_dir: Path,
+    *,
+    dataset: str,
+    **kwargs: T.Any,
+) -> Path:
+    return _build_expected_schema_dataset(
+        root,
+        output_dir,
+        dataset=dataset,
+        expected_schema="2d_106",
+        parser_name=f"{dataset}_106",
+        **kwargs,
+    )
+
+
+def _build_subject_session_dataset(
+    root: Path,
+    output_dir: Path,
+    *,
+    dataset: str,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
+    json_path = _json_source(root)
+    if json_path is not None:
+        manifest = _build_json(
+            json_path,
+            output_dir,
+            dataset=dataset,
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+        payload = _read_json(manifest)
+        for sample in payload.get("samples", []):
+            if not isinstance(sample, dict):
+                continue
+            metadata = sample.setdefault("metadata", {})
+            if isinstance(metadata, dict):
+                metadata.setdefault("dataset_parser", f"{dataset}_menpo_style")
+                metadata.setdefault("parser_type", "dataset_specific")
+        _write_json(manifest, payload)
+        return manifest
+
+    image_base = Path(image_root) if image_root else root
+    image_index = _build_image_index(image_base)
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for landmark_path in _landmark_paths(root):
+        try:
+            points, source_schema = _load_landmark_file(landmark_path)
+            image = _matching_image(landmark_path, root=image_base, image_index=image_index)
+            if image is None:
+                raise FileNotFoundError("matching image not found")
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+            continue
+        rel = landmark_path.relative_to(root)
+        sample_id = rel.with_suffix("").as_posix()
+        condition, conds = _condition_for_landmark_file(dataset, rel, scenario)
+        metadata = _path_identity_metadata(landmark_path, root=root, dataset=dataset)
+        metadata.update(
+            {
+                "dataset_parser": f"{dataset}_menpo_style",
+                "parser_type": "dataset_specific",
+                "source_schema": source_schema,
+            }
+        )
+        split = _split_from_entry_or_identity({}, metadata, dataset=dataset, sample_id=sample_id)
+        conds = tuple(dict.fromkeys((*conds, f"{split}set")))
+        samples.append(
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset=dataset,
+                    sample_id=sample_id,
+                    image=image,
+                    points68=points,
+                    condition=condition,
+                    conditions=conds,
+                    source_schema=source_schema,
+                    source_id=sample_id,
+                    metadata=metadata,
+                ),
+                split,
+            )
+        )
+
+    if not samples:
+        raise ValueError(f"no {dataset} Menpo-style samples built; skipped={skipped[:10]}")
+    return _write_manifest(
+        output_dir,
+        dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
+def _cofw_original_mat_files(root: Path) -> list[tuple[Path, str]]:
+    out: list[tuple[Path, str]] = []
+    for path in sorted(root.rglob("*.mat"), key=lambda item: len(item.parts)):
+        name = path.name.lower()
+        if "cofw" not in name:
+            continue
+        if "train" in name:
+            out.append((path, "train"))
+        elif "test" in name:
+            out.append((path, "test"))
+    return out
+
+
+def _mat_first_key(payload: T.Mapping[str, T.Any], names: tuple[str, ...]) -> T.Any:
+    lowered = {key.lower(): key for key in payload if not key.startswith("__")}
+    for name in names:
+        if name.lower() in lowered:
+            return payload[lowered[name.lower()]]
+    for key in payload:
+        key_l = key.lower()
+        if key.startswith("__"):
+            continue
+        if any(name.lower() in key_l for name in names):
+            return payload[key]
+    return None
+
+
+def _cofw_original_points_array(value: T.Any) -> list[np.ndarray]:
+    if value is None:
+        return []
+    arr = np.asarray(value)
+    if arr.dtype == object:
+        out = []
+        for item in arr.reshape(-1):
+            try:
+                points, _ = _canonical_points(item, source_schema="2d_29")
+            except Exception:
+                continue
+            out.append(points)
+        return out
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.ndim == 3 and arr.shape[-2:] == (29, 2):
+        return [arr[index].astype(np.float32) for index in range(arr.shape[0])]
+    if arr.ndim == 3 and arr.shape[:2] == (29, 2):
+        return [arr[:, :, index].astype(np.float32) for index in range(arr.shape[2])]
+    if arr.ndim == 2:
+        if arr.shape[1] == 58:
+            return [row.reshape(29, 2).astype(np.float32) for row in arr]
+        if arr.shape[0] == 58:
+            return [arr[:, index].reshape(29, 2).astype(np.float32) for index in range(arr.shape[1])]
+        if arr.shape == (29, 2):
+            return [arr.astype(np.float32)]
+    return []
+
+
+def _cofw_original_image_array(value: T.Any) -> list[np.ndarray]:
+    if value is None:
+        return []
+    arr = np.asarray(value)
+    if arr.dtype == object:
+        return [np.asarray(item) for item in arr.reshape(-1)]
+    if arr.ndim == 4:
+        if arr.shape[-1] in (1, 3, 4):
+            return [arr[index] for index in range(arr.shape[0])]
+        if arr.shape[0] in (1, 3, 4):
+            return [np.moveaxis(arr[:, :, :, index], 0, -1) for index in range(arr.shape[-1])]
+        return [arr[:, :, :, index] for index in range(arr.shape[-1])]
+    if arr.ndim in (2, 3):
+        return [arr]
+    return []
+
+
+def _cofw_original_visibility(value: T.Any, count: int) -> list[list[bool]]:
+    if value is None:
+        return [[True] * 29 for _ in range(count)]
+    arr = np.asarray(value)
+    if arr.dtype == object:
+        rows = [np.asarray(item).reshape(-1) for item in arr.reshape(-1)]
+    elif arr.ndim == 2 and arr.shape[1] == 29:
+        rows = [arr[index] for index in range(arr.shape[0])]
+    elif arr.ndim == 2 and arr.shape[0] == 29:
+        rows = [arr[:, index] for index in range(arr.shape[1])]
+    elif arr.size == 29:
+        rows = [arr.reshape(-1)]
+    else:
+        rows = []
+    out: list[list[bool]] = []
+    for row in rows[:count]:
+        # COFW stores occlusion flags in common releases: 1 means occluded.
+        out.append([not bool(item) for item in np.asarray(row).reshape(-1)[:29]])
+    while len(out) < count:
+        out.append([True] * 29)
+    return out
+
+
+def _write_cofw_original_image(output_dir: Path, sample_id: str, image: np.ndarray) -> Path:
+    path = output_dir / "images" / "cofw-original" / f"{_safe_id(sample_id).replace('/', '_')}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arr = np.asarray(image)
+    if arr.ndim == 2:
+        write_arr = arr
+    else:
+        if arr.shape[-1] == 1:
+            arr = arr[:, :, 0]
+            write_arr = arr
+        else:
+            write_arr = arr[:, :, [2, 1, 0]] if arr.shape[-1] >= 3 else arr
+    write_arr = np.clip(write_arr, 0, 255).astype(np.uint8)
+    ok = cv2.imwrite(str(path), write_arr)
+    if not ok:
+        raise OSError(f"failed to write COFW original image: {path}")
+    return path
+
+
+def _build_cofw_original(
+    root: Path,
+    output_dir: Path,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
+    mat_files = _cofw_original_mat_files(root)
+    if not mat_files:
+        return _build_expected_schema_dataset(
+            root,
+            output_dir,
+            dataset="cofw-original",
+            expected_schema="2d_29",
+            parser_name="cofw_original_29",
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    try:
+        import scipy.io as sio
+    except ImportError as err:
+        raise RuntimeError("scipy is required to read COFW original .mat files") from err
+
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for mat_path, declared_split in mat_files:
+        try:
+            payload = sio.loadmat(mat_path)
+            points_rows = _cofw_original_points_array(
+                _mat_first_key(payload, ("phisTr", "phisT", "phis", "points", "landmarks"))
+            )
+            images = _cofw_original_image_array(
+                _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
+            )
+            visibility_rows = _cofw_original_visibility(
+                _mat_first_key(payload, ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded")),
+                len(points_rows),
+            )
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
+            continue
+        for index, points in enumerate(points_rows):
+            sample_id = f"cofw_original/{declared_split}/{mat_path.stem}_{index:04d}"
+            try:
+                points29 = normalize_landmark_array(points, schema="2d_29")
+                if index < len(images):
+                    image_path = _write_cofw_original_image(output_dir, sample_id, images[index])
+                else:
+                    image = _matching_image(mat_path, root=Path(image_root) if image_root else root)
+                    if image is None:
+                        raise FileNotFoundError("COFW original image not found in MAT or image root")
+                    image_path = image
+            except Exception as err:  # noqa: BLE001
+                skipped.append({"sample_id": sample_id, "reason": str(err)})
+                continue
+            visibility = visibility_rows[index] if index < len(visibility_rows) else [True] * 29
+            metadata = {
+                "dataset": "cofw-original",
+                "dataset_parser": "cofw_original_29",
+                "parser_type": "dataset_specific",
+                "annotation_file": str(mat_path.resolve()),
+                "source_schema": "2d_29",
+                "split": declared_split,
+                "cofw_original_index": index,
+                "occlusion_mask": [not bool(item) for item in visibility],
+                "landmark_score_visibility_mask": visibility,
+            }
+            condition = "occlusion" if any(not bool(item) for item in visibility) else scenario
+            samples.append(
+                _with_split(
+                    _sample(
+                        output_dir=output_dir,
+                        dataset="cofw-original",
+                        sample_id=sample_id,
+                        image=image_path,
+                        points68=points29,
+                        condition=condition,
+                        conditions=tuple(dict.fromkeys((_label(condition), f"{declared_split}set"))),
+                        source_schema="2d_29",
+                        source_id=sample_id,
+                        metadata=metadata,
+                        visibility=visibility,
+                    ),
+                    declared_split,
+                )
+            )
+
+    if not samples:
+        raise ValueError(f"no COFW original 29-point samples built; skipped={skipped[:10]}")
+    return _write_manifest(
+        output_dir,
+        "cofw-original",
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,
@@ -1753,7 +2457,7 @@ def build(args: argparse.Namespace) -> Path:
 
     with _source_context(args.source_dir, args.source_zip) as root:
         if dataset == "wflw":
-            return _build_wflw(
+            manifest_path = _build_wflw(
                 root,
                 output_dir,
                 annotation_file=args.wflw_annotations,
@@ -1764,9 +2468,9 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
             )
-        if dataset == "cofw":
+        elif dataset == "cofw":
             if args.cofw_json:
-                return _build_cofw_json_cropped(
+                manifest_path = _build_cofw_json_cropped(
                     Path(args.cofw_json),
                     output_dir,
                     scenario=args.scenario,
@@ -1776,21 +2480,22 @@ def build(args: argparse.Namespace) -> Path:
                     allow_overlap=args.allow_overlap,
                     image_root=args.image_root,
                 )
-            if root is None:
-                raise ValueError("--source-dir or --source-zip is required for COFW")
-            return _build_cofw(
-                root,
-                output_dir,
-                scenario=args.scenario,
-                scenarios=scenarios,
-                limit=limit,
-                mode=args.manifest_mode,
-                allow_overlap=args.allow_overlap,
-            )
-        if dataset == "multipie":
+            else:
+                if root is None:
+                    raise ValueError("--source-dir or --source-zip is required for COFW")
+                manifest_path = _build_cofw(
+                    root,
+                    output_dir,
+                    scenario=args.scenario,
+                    scenarios=scenarios,
+                    limit=limit,
+                    mode=args.manifest_mode,
+                    allow_overlap=args.allow_overlap,
+                )
+        elif dataset == "multipie":
             if root is None:
                 raise ValueError("--source-dir or --source-zip is required for MultiPIE")
-            return _build_multipie(
+            manifest_path = _build_multipie(
                 root,
                 output_dir,
                 scenario=args.scenario,
@@ -1799,10 +2504,90 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
             )
-        if dataset in {"300vw", "wflw-v"}:
+        elif dataset == "cofw-original":
+            if root is None:
+                raise ValueError("--source-dir or --source-zip is required for COFW original")
+            manifest_path = _build_cofw_original(
+                root,
+                output_dir,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+        elif dataset == "helen":
+            if root is None:
+                raise ValueError("--source-dir or --source-zip is required for HELEN")
+            manifest_path = _build_helen(
+                root,
+                output_dir,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+        elif dataset == "lapa":
+            if root is None:
+                raise ValueError("--source-dir or --source-zip is required for LaPa")
+            manifest_path = _build_lapa(
+                root,
+                output_dir,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+        elif dataset == "jd-landmark":
+            if root is None:
+                raise ValueError("--source-dir or --source-zip is required for JD-landmark")
+            manifest_path = _build_jd_landmark(
+                root,
+                output_dir,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+        elif dataset in {"ffl2", "fll3"}:
+            if root is None:
+                raise ValueError(f"--source-dir or --source-zip is required for {dataset}")
+            manifest_path = _build_ffl_family(
+                root,
+                output_dir,
+                dataset=dataset,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+        elif dataset in {"xm2vts", "frgc"}:
+            if root is None:
+                raise ValueError(f"--source-dir or --source-zip is required for {dataset}")
+            manifest_path = _build_subject_session_dataset(
+                root,
+                output_dir,
+                dataset=dataset,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+        elif dataset in {"300vw", "wflw-v"}:
             if root is None and not args.video_root:
                 raise ValueError("--source-dir, --source-zip, or --video-root is required for video datasets")
-            return _build_video_dataset(
+            manifest_path = _build_video_dataset(
                 root or Path(args.video_root),
                 output_dir,
                 dataset=dataset,
@@ -1817,19 +2602,24 @@ def build(args: argparse.Namespace) -> Path:
                 frame_stride=args.frame_stride,
                 max_frames_per_video=args.max_frames_per_video,
             )
-        if root is None:
-            raise ValueError("--source-dir, --source-zip, --wflw-annotations, or --cofw-json is required")
-        return _build_directory(
-            root,
-            output_dir,
-            dataset=dataset,
-            scenario=args.scenario,
-            scenarios=scenarios,
-            limit=limit,
-            mode=args.manifest_mode,
-            allow_overlap=args.allow_overlap,
-            image_root=args.image_root,
-        )
+        else:
+            if root is None:
+                raise ValueError("--source-dir, --source-zip, --wflw-annotations, or --cofw-json is required")
+            manifest_path = _build_directory(
+                root,
+                output_dir,
+                dataset=dataset,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+
+    if args.write_overlays:
+        _write_visual_audit(manifest_path, output_dir, limit=args.audit_overlay_limit)
+    return manifest_path
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1851,7 +2641,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--recursive", action="store_true", help="Accepted for compatibility; scans are recursive.")
     parser.add_argument("--wflw-annotations", default=None)
     parser.add_argument("--cofw-json", default=None)
-    parser.add_argument("--write-overlays", action="store_true", help="Accepted for compatibility; overlays are not generated.")
+    parser.add_argument("--write-overlays", action="store_true", help="Write visual landmark overlay audit images for built samples.")
+    parser.add_argument("--audit-overlay-limit", type=int, default=50)
     parser.add_argument("--no-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
     parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
     parser.add_argument("--cache-dir", default=None, help="Accepted for compatibility; explicit sources are preferred.")

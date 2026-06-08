@@ -26,9 +26,12 @@ preferred local staging layout is:
   annotations/.../<sample>.pts
 ```
 
-The builder also accepts `.txt`, `.npy`, `.mat`, and a JSON file with `samples`
-or `entries`. Image and landmark files can be same-stem siblings, or the image
-can be found recursively under `--image-root`.
+Each issue #8 dataset now enters through a dataset-specific parser function
+before any generic fallback. Those parsers accept `.txt`, `.npy`, `.mat`, `.pts`,
+and JSON files with `samples` or `entries`, but they also validate the expected
+native point count for HELEN, LaPa, JD-landmark, FFL2, FLL3, and COFW original.
+Image and landmark files can be same-stem siblings, or the image can be found
+recursively under `--image-root`.
 
 JSON entries should use:
 
@@ -104,3 +107,6 @@ Reports include per-dataset counts, split counts, source/target schema counts,
 head counts, skipped sample examples, and projection status counts. Unsupported
 or unaudited projection status is reported as `not_projectable` instead of
 silently collapsing labels to 68 points.
+
+Pass `--write-overlays` to emit `visual_audit/visual_audit.json` and schema
+native point overlays under `visual_audit/overlays/`.

@@ -593,7 +593,7 @@ def _print_build_hints(output_root: Path) -> None:
     )
     print(
         "  Issue #8 still-image datasets: "
-        "use --dataset helen|lapa|jd-landmark|ffl2|fll3|cofw-original|xm2vts|frgc with a staged root of images plus same-stem landmarks or samples JSON."
+        "use --dataset helen|lapa|jd-landmark|ffl2|fll3|cofw-original|xm2vts|frgc; each routes through a dataset-specific parser with native schema validation."
     )
     print(
         "  Issue #8 video datasets: "
