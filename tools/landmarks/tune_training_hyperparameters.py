@@ -5,7 +5,7 @@ This script implements issue #7's staged plan:
 
 1. Baseline run.
 2. Manual STARLoss_v2 bracket.
-3. Narrow loss-weight search over STAR, schema consistency, and auxiliary loss.
+3. Optuna narrow search over STAR, schema consistency, and auxiliary loss.
 4. Multi-seed reruns for top loss-weight finalists.
 5. Learning-rate sweep with selected loss weights frozen.
 6. Multi-seed reruns for top LR finalists.
@@ -18,6 +18,11 @@ The script is intentionally usable in two modes:
 - execute mode, which runs commands and reads metrics JSON emitted by training or
   evaluation.
 
+The loss-weight search uses a persisted Optuna study when Optuna is installed.
+The normal repository dependency set includes Optuna. For minimal environments,
+--disable-optuna falls back to deterministic sampled trials, while --require-optuna
+turns a missing Optuna install into a hard error.
+
 Metrics are expected as JSON files in each run directory. The objective minimizes
 heldout 68-point NME plus weighted hard-slice NME terms and regression penalties.
 """
@@ -25,6 +30,7 @@ heldout 68-point NME plus weighted hard-slice NME terms and regression penalties
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import os
@@ -101,6 +107,55 @@ def _split_csv_ints(raw: str, default: list[int]) -> list[int]:
     if not raw:
         return list(default)
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
+
+
+def _load_optuna(*, required: bool = False):
+    try:
+        return importlib.import_module("optuna")
+    except ImportError as exc:
+        if required:
+            raise TuningError(
+                "Optuna is required for --require-optuna. Install dependencies with `pip install -r requirements.txt`."
+            ) from exc
+        return None
+
+
+def optuna_storage_url(args: argparse.Namespace) -> str:
+    if getattr(args, "optuna_storage", ""):
+        return str(args.optuna_storage)
+    db_path = Path(args.output_dir) / "optuna_study.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{db_path.resolve()}"
+
+
+def create_or_load_optuna_study(args: argparse.Namespace):
+    if getattr(args, "disable_optuna", False):
+        return None
+    optuna = _load_optuna(required=bool(getattr(args, "require_optuna", False)))
+    if optuna is None:
+        return None
+    sampler = optuna.samplers.TPESampler(seed=int(args.optuna_seed))
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=int(args.optuna_pruner_startup_trials),
+        n_warmup_steps=int(args.optuna_min_pruning_epoch),
+    )
+    study = optuna.create_study(
+        study_name=str(args.optuna_study_name),
+        storage=optuna_storage_url(args),
+        direction="minimize",
+        load_if_exists=True,
+        sampler=sampler,
+        pruner=pruner,
+    )
+    try:
+        study.set_user_attr("objective", "heldout_68_nme_plus_hard_slices")
+        study.set_user_attr("search_space", DEFAULT_OPTUNA_RANGES)
+        study.set_user_attr("min_pruning_epoch", int(args.optuna_min_pruning_epoch))
+        study.set_user_attr("workers", int(args.optuna_workers))
+    except Exception:
+        # Older/fake Optuna implementations used in tests may not expose attrs.
+        pass
+    return study
 
 
 def config_id(stage: str, params: dict[str, T.Any], *, seed: int | None = None, index: int | None = None) -> str:
@@ -190,11 +245,7 @@ def objective_score(
     max_easy_regression: float = 0.0,
     required_slices: tuple[str, ...] = ("profile_nme", "occlusion_nme", "profile_occlusion_nme"),
 ) -> tuple[float, dict[str, T.Any]]:
-    """Return lower-is-better score plus diagnostics.
-
-    Missing hard slices are explicitly reported and skipped. The objective is
-    anchored on heldout/overall 68-point NME and adds available hard-slice terms.
-    """
+    """Return lower-is-better score plus diagnostics."""
 
     overall = select_metric(metrics, OVERALL_KEYS)
     if overall is None:
@@ -286,26 +337,96 @@ def _sample_range(rng: random.Random, low: float, high: float) -> float:
     return low + (high - low) * rng.random()
 
 
-def generate_loss_search(args: argparse.Namespace, base: dict[str, float]) -> list[dict[str, T.Any]]:
-    rng = random.Random(int(args.optuna_seed))
-    ranges = dict(DEFAULT_OPTUNA_RANGES)
-    out = []
-    study_records = {
+def _trial_suggest_params(trial, base: dict[str, float], ranges: dict[str, tuple[float, float]]) -> dict[str, float]:
+    params = dict(base)
+    for name, (low, high) in ranges.items():
+        params[name] = float(trial.suggest_float(name, low, high))
+    return params
+
+
+def _fallback_trial_params(rng: random.Random, base: dict[str, float], ranges: dict[str, tuple[float, float]]) -> dict[str, float]:
+    params = dict(base)
+    for name, (low, high) in ranges.items():
+        params[name] = _sample_range(rng, low, high)
+    return params
+
+
+def _loss_search_plan_path(args: argparse.Namespace) -> Path:
+    return Path(args.output_dir) / "optuna_trial_plan.json"
+
+
+def _load_loss_search_plan(args: argparse.Namespace) -> dict[str, T.Any]:
+    path = _loss_search_plan_path(args)
+    if path.exists():
+        return _read_json(path)
+    return {
         "study_name": args.optuna_study_name,
-        "storage": str(Path(args.output_dir) / "optuna_study.json"),
-        "ranges": ranges,
+        "storage": optuna_storage_url(args),
+        "ranges": DEFAULT_OPTUNA_RANGES,
         "trials": [],
-        "note": "Deterministic sampled trial plan; execution can tell scores into this persisted study JSON.",
+        "uses_real_optuna": False,
     }
-    for index in range(int(args.optuna_trials)):
-        params = dict(base)
-        for name, (low, high) in ranges.items():
-            params[name] = _sample_range(rng, low, high)
-        run = make_run_config(stage="optuna_loss_search", params=params, seed=args.seed, index=index)
-        out.append(run)
-        study_records["trials"].append({"number": index, "run_id": run["id"], "params": params})
-    _write_json(Path(args.output_dir) / "optuna_study.json", study_records)
-    return out
+
+
+def generate_loss_search(args: argparse.Namespace, base: dict[str, float]) -> list[dict[str, T.Any]]:
+    ranges = dict(DEFAULT_OPTUNA_RANGES)
+    plan = _load_loss_search_plan(args)
+    plan["study_name"] = args.optuna_study_name
+    plan["storage"] = optuna_storage_url(args)
+    plan["ranges"] = ranges
+    plan.setdefault("trials", [])
+
+    if len(plan["trials"]) < int(args.optuna_trials):
+        study = create_or_load_optuna_study(args)
+        rng = random.Random(int(args.optuna_seed))
+        if study is not None:
+            plan["uses_real_optuna"] = True
+        elif getattr(args, "require_optuna", False):
+            _load_optuna(required=True)
+
+        for index in range(len(plan["trials"]), int(args.optuna_trials)):
+            if study is not None:
+                trial = study.ask()
+                params = _trial_suggest_params(trial, base, ranges)
+                trial_number = int(trial.number)
+                source = "optuna"
+            else:
+                params = _fallback_trial_params(rng, base, ranges)
+                trial_number = index
+                source = "deterministic_fallback"
+            run = make_run_config(stage="optuna_loss_search", params=params, seed=args.seed, index=trial_number)
+            run["optuna_trial_number"] = trial_number
+            run["optuna_study_name"] = args.optuna_study_name
+            run["optuna_storage"] = optuna_storage_url(args)
+            run["optuna_source"] = source
+            plan["trials"].append({"number": trial_number, "run": run, "params": params, "source": source})
+
+    _write_json(_loss_search_plan_path(args), plan)
+    _write_json(Path(args.output_dir) / "optuna_study.json", plan)
+    return [dict(item["run"]) for item in plan["trials"][: int(args.optuna_trials)]]
+
+
+def tell_optuna_result(args: argparse.Namespace, result: dict[str, T.Any]) -> None:
+    if result.get("stage") != "optuna_loss_search":
+        return
+    if result.get("optuna_source") != "optuna":
+        return
+    trial_number = result.get("optuna_trial_number")
+    if trial_number is None:
+        return
+    study = create_or_load_optuna_study(args)
+    if study is None:
+        return
+    try:
+        for trial in study.get_trials(deepcopy=False):
+            if int(trial.number) == int(trial_number) and getattr(trial.state, "is_finished", lambda: False)():
+                return
+    except Exception:
+        pass
+    try:
+        study.tell(int(trial_number), float(result["score"]))
+    except Exception as exc:
+        print(f"warning: could not tell Optuna score for trial {trial_number}: {exc}", file=sys.stderr)
 
 
 def generate_loss_finalists(
@@ -401,6 +522,7 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
     }
     _write_json(run_dir / "result.json", result)
     append_result(output_dir / "results.jsonl", result)
+    tell_optuna_result(args, result)
     return result
 
 
@@ -418,7 +540,6 @@ def read_results(output_dir: Path) -> list[dict[str, T.Any]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             out.append(json.loads(line))
-    # Keep latest result per run id for resume/idempotence.
     dedup: dict[str, dict[str, T.Any]] = {}
     for result in out:
         dedup[str(result["id"])] = result
@@ -524,7 +645,6 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
         if not already_done(output_dir, run["id"]):
             run_one(args, run, baseline_metrics=baseline_metrics)
 
-    # Loss search: manual STAR bracket plus narrow sampled search.
     for run in generate_loss_search(args, base):
         if not already_done(output_dir, run["id"]):
             run_one(args, run, baseline_metrics=baseline_metrics)
@@ -609,6 +729,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--optuna-trials", type=int, default=20)
     parser.add_argument("--optuna-seed", type=int, default=2026)
     parser.add_argument("--optuna-study-name", default="landmark_loss_weight_search")
+    parser.add_argument("--optuna-storage", default="", help="Optuna storage URL. Defaults to sqlite:///<output-dir>/optuna_study.db.")
+    parser.add_argument("--optuna-workers", type=int, default=1, help="Documented worker count for shared Optuna storage; launch multiple processes with same output dir/storage for parallelism.")
+    parser.add_argument("--optuna-pruner-startup-trials", type=int, default=5)
+    parser.add_argument("--optuna-min-pruning-epoch", type=int, default=5)
+    parser.add_argument("--require-optuna", action="store_true", help="Fail if Optuna cannot be imported.")
+    parser.add_argument("--disable-optuna", action="store_true", help="Use deterministic sampled fallback instead of a real Optuna study.")
     parser.add_argument("--loss-top-k", type=int, default=3)
     parser.add_argument("--loss-finalist-seeds", default=",".join(str(x) for x in DEFAULT_LOSS_SEEDS))
     parser.add_argument("--lr-sweep", default=",".join(str(x) for x in DEFAULT_LR_SWEEP))
