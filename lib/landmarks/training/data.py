@@ -6,6 +6,7 @@ from torch.utils.data._utils.collate import default_collate
 
 from lib.landmarks.core.manifest_aliases import is_schema_aware_manifest_dataset
 from lib.landmarks.datasets.registry import GetDataset
+from lib.landmarks.training.domain_balanced_sampler import sample_bucket, sample_dataset, sample_schema
 
 AUXILIARY_CLASS_NAMES = {
     "pose_bucket": ("frontal", "profile", "profile_left", "profile_right"),
@@ -21,6 +22,15 @@ AUXILIARY_CLASS_INDEX = {
     name: {label: index for index, label in enumerate(labels)}
     for name, labels in AUXILIARY_CLASS_NAMES.items()
 }
+
+class LegacyBatchWithMix(tuple):
+    """Tuple-compatible legacy batch with domain-mix diagnostics attached."""
+
+    def __new__(cls, values, mix):
+        obj = super().__new__(cls, values)
+        obj.mix = mix
+        return obj
+
 
 def is_schema_aware_manifest_dataset_name(data_name):
     return is_schema_aware_manifest_dataset(data_name)
@@ -98,7 +108,9 @@ def unpack_train_batch(batch, device, non_blocking=False):
         }
         return data, heads, aux_labels
 
-    if len(batch) == 5:
+    if len(batch) == 6:
+        data, target, heatmap, sample_weight, landmark_mask, _metadata = batch
+    elif len(batch) == 5:
         data, target, heatmap, sample_weight, landmark_mask = batch
     elif len(batch) == 4:
         data, target, heatmap, sample_weight = batch
@@ -123,6 +135,35 @@ def unpack_train_batch(batch, device, non_blocking=False):
     else:
         landmark_mask = landmark_mask.to(device, non_blocking=non_blocking).float()
     return data, target, heatmap, sample_weight, landmark_mask
+
+def mix_for_samples(samples):
+    mix = {"bucket": {}, "dataset": {}, "schema": {}}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            sample = {}
+        merged = dict(sample)
+        merged["metadata"] = sample
+        for key, label in (
+            ("bucket", sample_bucket(merged)),
+            ("dataset", sample_dataset(merged)),
+            ("schema", sample_schema(merged)),
+        ):
+            mix[key][label] = mix[key].get(label, 0) + 1
+    return mix
+
+def batch_mix(batch):
+    if isinstance(batch, dict):
+        return batch.get("mix")
+    return getattr(batch, "mix", None)
+
+def legacy_domain_balanced_collate(batch):
+    if batch and isinstance(batch[0], tuple) and len(batch[0]) == 6:
+        metadata = [item[5] if isinstance(item[5], dict) else {} for item in batch]
+        values = [item[:5] for item in batch]
+    else:
+        metadata = []
+        values = batch
+    return LegacyBatchWithMix(default_collate(values), mix_for_samples(metadata))
 
 def schema_aware_collate(batch):
     images = default_collate([item["image"] for item in batch])
@@ -161,13 +202,12 @@ def schema_aware_collate(batch):
     aux_labels = {name: [] for name in AUXILIARY_CLASS_NAMES}
     for item in batch:
         metadata = item.get("metadata", {})
-        bucket = str(
-            metadata.get("hard_negative_bucket")
-            or metadata.get("condition")
-            or "unknown"
-        )
-        dataset = str(metadata.get("dataset") or "unknown")
-        schema = str(item.get("schema") or metadata.get("source_schema") or "unknown")
+        sample = dict(metadata)
+        sample["metadata"] = metadata
+        sample["source_schema"] = item.get("schema") or metadata.get("source_schema")
+        bucket = sample_bucket(sample)
+        dataset = sample_dataset(sample)
+        schema = sample_schema(sample)
         mix["bucket"][bucket] = mix["bucket"].get(bucket, 0) + 1
         mix["dataset"][dataset] = mix["dataset"].get(dataset, 0) + 1
         mix["schema"][schema] = mix["schema"].get(schema, 0) + 1
@@ -291,6 +331,9 @@ __all__ = [
     "manifest_for_split",
     "build_dataset",
     "unpack_train_batch",
+    "batch_mix",
+    "legacy_domain_balanced_collate",
+    "mix_for_samples",
     "schema_aware_collate",
     "auxiliary_label",
 ]

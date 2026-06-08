@@ -911,6 +911,37 @@ class LandmarkDataset(Dataset):
                     "head_name": sample["head_name"],
                     "metadata": metadata,
                 }
+            if self.include_metadata:
+                metadata = dict(sample.get("metadata", {}))
+                metadata.update(
+                    {
+                        "sample_id": sample.get("sample_id", ""),
+                        "dataset": sample.get("dataset", ""),
+                        "condition": sample.get("condition", ""),
+                        "conditions": list(sample.get("conditions", ())),
+                        "source_schema": sample.get("source_schema", ""),
+                        "target_schema": sample.get("target_schema", ""),
+                        "landmark_count": sample.get("landmark_count", 0),
+                        "head_name": sample.get("head_name", ""),
+                        "split": sample.get("split", ""),
+                        "split_safe_id": sample.get("split_safe_id", ""),
+                        "face_bbox": sample.get("face_bbox"),
+                        "bbox_format": sample.get("bbox_format", ""),
+                        "visibility_target": sample.get("visibility_target").tolist()
+                        if sample.get("visibility_target") is not None
+                        else None,
+                        "visibility_target_source": sample.get("visibility_target_source", ""),
+                        "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
+                    }
+                )
+                return (
+                    img,
+                    lmk,
+                    heatmap,
+                    torch.tensor(sample["sample_weight"], dtype=torch.float32),
+                    landmark_mask_t,
+                    metadata,
+                )
             return img, lmk, heatmap, torch.tensor(sample["sample_weight"], dtype=torch.float32), landmark_mask_t
 
         if self.include_metadata:

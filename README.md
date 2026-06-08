@@ -106,7 +106,7 @@ python tools/landmarks/build_quality_dataset.py \
   --output-dir runs/landmarks/quality_datasets/300w
 ```
 
-Dataset manifests preserve native trainable schemas when available, including 29, 39, 68, 98, 106, and 194 point layouts. Each emitted landmark file is materialized as a `.npy` array whose shape must match its `target_schema`; unsupported or unaudited labels are skipped and reported in the dataset audit.
+Dataset manifests preserve native trainable schemas when available, including 29, 39, 68, 98, 106, and 194 point layouts. Each emitted landmark file is materialized as a `.npy` array whose shape must match its `target_schema`; `source_schema` records the original annotation source and `target_schema` records the saved training target. Unsupported or unaudited labels are skipped and reported in the dataset audit.
 
 ### Faceswap production alignment directories or zip archives
 
@@ -205,7 +205,13 @@ python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
   --start-at validate_cdvit_manifest
 ```
 
-Schema-aware CD-ViT training and evaluation use native heads for supported manifest schemas instead of forcing every sample through the 68-point output. The default head registry covers `landmarks_68`, `landmarks_98`, `landmarks_106`, `landmarks_194`, `profile39`, and `landmarks_29`; production inference still consumes `landmarks_68`. Schemas without audited flip maps are not randomly flipped during augmentation until a schema-specific flip map is registered.
+Schema-aware CD-ViT training and evaluation use native heads for supported manifest schemas instead of forcing every sample through the 68-point output. The default head registry covers `landmarks_68`, `landmarks_98`, `landmarks_106`, `landmarks_194`, `profile39`, and `landmarks_29`; production inference still consumes `landmarks_68`. Schemas without audited flip maps are not randomly flipped during augmentation until a schema-specific flip map is registered. That currently disables horizontal flipping for `2d_39`, `menpo2d_profile_39`, and `multipie_profile_39`; `2d_68` and WFLW-style `2d_98` have registered flip maps.
+
+Mixed-schema training defaults to sample-count-weighted head losses (`--schema-head-loss-weighting sample_count`) so a head with one sample does not contribute the same as a head with many samples. Optional per-head multipliers can be supplied with `--schema-head-loss-weights`, for example `landmarks_98=1.0,profile39=0.5`. True 98-point samples train `landmarks_98` directly and can also regularize the production `landmarks_68` head through `--schema-consistency-weight`; the consistency projection uses `MAP_98_TO_68` from the 98-head prediction and detaches that projection, so the consistency term updates the 68 head without replacing native 98 supervision.
+
+`STARLoss_v2` can be added as a small regularizer for active supervised schema heads with `--star-loss-weight`. It is disabled by default; start with small values such as `0.005`, `0.01`, `0.02`, or `0.05` and evaluate hard-case slices. STAR loss is applied after sample weights and landmark masks, and training logs report coordinate, heatmap, consistency, STAR, auxiliary, per-head counts, and per-head contributions separately.
+
+Schema-aware checkpoints resume strictly by default. To intentionally resume an older 68-only checkpoint into a schema-aware model, pass `--allow-missing-schema-heads`; only missing schema/auxiliary head parameters are tolerated and they are initialized from the current model. Use `--no-schema-aware-training` for a legacy 68-only run, and keep strict resume behavior for schema-aware checkpoints unless the missing-head migration is intentional.
 
 For standalone checkpoint evaluation, pass `--schema-aware-model` to construct the native heads. `--schema-aware-eval` defaults to the same value and makes the evaluator load non-68 samples with their native schema/head metadata:
 
@@ -229,4 +235,3 @@ The pipeline forwards runtime flags to `TrainHeatmapStageFP16.py` so long runs c
 - Evaluation cadence: `--eval-every`, `--full-eval-every`, `--eval-ema-every`, and `--eval-max-samples`.
 - Checkpoints: `last_checkpoint.pt`, `best_checkpoint.pt`, metadata sidecars, manifest/config compatibility checks, and optional `--restore-rng`.
 - Metrics: `runtime_metrics.jsonl` records epoch throughput, CUDA memory, data wait, device transfer, forward/loss, backward, optimizer step, scaler update, eval, EMA eval, checkpoint, aggregate compute, unattributed, and total epoch timing. CUDA transfer/compute/eval sections use CUDA event timing by default through `--synchronize-runtime-timing`; pass `--no-synchronize-runtime-timing` for low-overhead CPU wall-clock timing. Checkpoint timing includes periodic, legacy, best, EMA-best, and last-checkpoint writes.
-

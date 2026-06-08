@@ -91,6 +91,8 @@ class DatasetBuildConfig:
     bucket_targets: str
     dataset_targets: str
     schema_targets: str
+    auto_dataset_balancing: bool
+    auto_schema_balancing: bool
 
     @classmethod
     def from_args(cls, args: T.Any) -> "DatasetBuildConfig":
@@ -107,6 +109,8 @@ class DatasetBuildConfig:
             bucket_targets=str(args.bucket_targets),
             dataset_targets=str(args.dataset_targets),
             schema_targets=str(args.schema_targets),
+            auto_dataset_balancing=bool(getattr(args, "auto_dataset_balancing", True)),
+            auto_schema_balancing=bool(getattr(args, "auto_schema_balancing", True)),
         )
 
 

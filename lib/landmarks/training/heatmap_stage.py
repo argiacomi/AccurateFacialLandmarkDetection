@@ -61,6 +61,7 @@ from lib.landmarks.training.config import (
 )
 from lib.landmarks.training.data import (
     AUXILIARY_CLASS_NAMES,
+    batch_mix,
     build_dataset,
     landmark_count_for_dataset,
     schema_aware_collate,
@@ -107,6 +108,7 @@ from lib.landmarks.training.runtime import (
 )
 from lib.landmarks.training.seed import setup_seed
 from loss import AWingLoss
+from loss import STARLoss_v2
 
 # from torch.cuda.amp import autocast as autocast
 
@@ -118,6 +120,7 @@ FS68_DATASET_NAME = LEGACY_FS68_DATASET_NAME
 # Legacy private helper aliases kept for TrainHeatmapStageFP16.py and older tests/tools.
 _landmark_count_for_dataset = landmark_count_for_dataset
 _build_dataset = build_dataset
+_batch_mix = batch_mix
 _schema_aware_collate = schema_aware_collate
 _unpack_train_batch = unpack_train_batch
 _eval_collate = eval_collate
@@ -163,6 +166,36 @@ def _save_best_weights(state_dict, ckpt_folder: str | os.PathLike[str]) -> None:
     ckpt_path.mkdir(parents=True, exist_ok=True)
     torch.save(state_dict, ckpt_path / "best.weights.pt")
     torch.save(state_dict, ckpt_path / "best_model")
+
+
+def _is_schema_extension_key(key: str) -> bool:
+    return key.startswith(("schema_output_layers.", "auxiliary_output_layers."))
+
+
+def _load_resume_model_state(net, state_dict, args) -> None:
+    if not getattr(args, "allow_missing_schema_heads", False):
+        net.load_state_dict(state_dict)
+        return
+
+    missing, unexpected = net.load_state_dict(state_dict, strict=False)
+    bad_missing = [key for key in missing if not _is_schema_extension_key(key)]
+    if bad_missing or unexpected:
+        raise ValueError(
+            "checkpoint is not compatible with --allow-missing-schema-heads: "
+            f"unexpected={unexpected[:10]!r} non_schema_missing={bad_missing[:10]!r}"
+        )
+    if missing:
+        print(
+            "resume checkpoint missing schema/auxiliary head keys initialized from current model: "
+            f"{len(missing)} missing ({missing[:10]})",
+            flush=True,
+        )
+    if unexpected:
+        print(
+            "resume checkpoint unexpected keys ignored: "
+            f"{len(unexpected)} unexpected ({unexpected[:10]})",
+            flush=True,
+        )
 
 
 def main():
@@ -246,7 +279,7 @@ def main():
                         + "; ".join(compat_errors)
                         + ". Pass --allow-incompatible-resume only if this is intentional."
                     )
-                net.load_state_dict(resume_checkpoint["model"])
+                _load_resume_model_state(net, resume_checkpoint["model"], args)
                 start_epoch = int(
                     resume_checkpoint.get(
                         "next_epoch",
@@ -254,7 +287,7 @@ def main():
                     )
                 )
             else:
-                net.load_state_dict(resume_checkpoint)
+                _load_resume_model_state(net, resume_checkpoint, args)
         net = torch.nn.parallel.DistributedDataParallel(
             net,
             device_ids=[args.local_rank],
@@ -271,7 +304,7 @@ def main():
 
         # heatmap_loss_func = HeatMapLoss2
         heatmap_loss_func = AWingLoss()
-        # vertex_loss_func = STARLoss_v2()
+        vertex_loss_func = STARLoss_v2() if args.star_loss_weight > 0 else None
         ema = EMA(net.module, 0.99, 100, 10) if is_rank_zero() else None
         scaler = torch.amp.GradScaler("cuda")
         if isinstance(resume_checkpoint, dict) and "model" in resume_checkpoint:
@@ -374,23 +407,37 @@ def main():
                 loss_loc = torch.tensor(0.0, device=device)
                 loss_heatmap = torch.tensor(0.0, device=device)
                 loss_aux = torch.tensor(0.0, device=device)
+                loss_consistency = torch.tensor(0.0, device=device)
+                loss_star = torch.tensor(0.0, device=device)
+                loss_details = None
                 # if True:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     pred_info = net(data)
                     for i in range(len(pred_info)):
                         if schema_batch:
-                            stage_loss, stage_loc, stage_heatmap, stage_aux = (
+                            (
+                                stage_loss,
+                                stage_loc,
+                                stage_heatmap,
+                                stage_aux,
+                                stage_details,
+                            ) = (
                                 schema_head_loss(
                                     pred_info[i],
                                     schema_heads,
                                     aux_labels,
                                     heatmap_loss_func,
                                     args,
+                                    return_details=True,
+                                    star_loss_func=vertex_loss_func,
                                 )
                             )
                             loss_loc = stage_loc
                             loss_heatmap = stage_heatmap
                             loss_aux = stage_aux
+                            loss_details = stage_details
+                            loss_consistency = stage_details["loss_consistency"]
+                            loss_star = stage_details["loss_star"]
                             loss = loss + stage_loss * weights[i]
                         else:
                             pred_loc, pred_heatmap = pred_info[i]
@@ -480,15 +527,42 @@ def main():
                     and batch_idx % args.log_every == 0
                     and is_rank_zero()
                 ):
-                    mix_text = (
-                        f" mix: {batch.get('mix')}"
-                        if isinstance(batch, dict) and "mix" in batch
-                        else ""
-                    )
+                    mix = batch_mix(batch)
+                    mix_text = f" mix: {mix}" if mix else ""
                     print(
-                        f"train epoch {epoch} batch_idx {batch_idx} rank {distributed_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} loss_aux: {loss_aux.item()}{mix_text}"
+                        f"train epoch {epoch} batch_idx {batch_idx} rank {distributed_rank()}  {n}/{len(train_dataset)} "
+                        f"loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} "
+                        f"loss_consistency: {loss_consistency.item()} loss_star: {loss_star.item()} "
+                        f"loss_aux: {loss_aux.item()}{mix_text}"
                     )
+                    if loss_details is not None:
+                        head_counts = loss_details.get("head_sample_counts", {})
+                        head_losses = {
+                            name: float(value.item())
+                            for name, value in loss_details.get(
+                                "head_loss_contributions", {}
+                            ).items()
+                        }
+                        print(
+                            f"schema head loss details counts={head_counts} contributions={head_losses}",
+                            flush=True,
+                        )
                 batch_fetch_start_time = time.time()
+
+            if is_rank_zero() and hasattr(train_sampler, "last_epoch_diagnostics"):
+                sampler_diagnostics = train_sampler.last_epoch_diagnostics
+                print(
+                    f"domain-balanced sampler epoch {epoch}: {sampler_diagnostics}",
+                    flush=True,
+                )
+                append_runtime_metrics(
+                    args,
+                    {
+                        "event": "domain_balanced_sampler_epoch",
+                        "epoch": int(epoch),
+                        **sampler_diagnostics,
+                    },
+                )
 
             if (
                 args.save_legacy_epoch_state_dict

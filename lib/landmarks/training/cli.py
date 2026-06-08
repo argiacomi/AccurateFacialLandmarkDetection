@@ -110,6 +110,11 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow loading a full checkpoint even when manifest/config compatibility metadata differs.",
     )
+    parser.add_argument(
+        "--allow-missing-schema-heads",
+        action="store_true",
+        help="Allow intentionally resuming an older 68-only checkpoint into a schema-aware model by initializing missing schema/auxiliary heads.",
+    )
     parser.add_argument("--hw", type=float, default="10")
     parser.add_argument("--locw", type=float, default="1")
     parser.add_argument("--nstack", type=int, default="8")
@@ -175,7 +180,31 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         help="For schema-aware manifest aliases, train schema-specific heads from mixed-schema manifests.",
     )
     parser.add_argument("--schema-consistency-weight", type=float, default=0.05)
-    parser.add_argument("--domain-balanced-sampling", action="store_true")
+    parser.add_argument(
+        "--schema-head-loss-weighting",
+        choices=("sample_count", "per_head"),
+        default="sample_count",
+        help="Weight mixed schema-head losses by supervised sample count or by one mean loss per active head.",
+    )
+    parser.add_argument(
+        "--schema-head-loss-weights",
+        default="",
+        help="Optional comma-separated per-head multipliers, e.g. landmarks_98=1.0,profile39=0.5.",
+    )
+    parser.add_argument(
+        "--star-loss-weight",
+        type=float,
+        default=0.0,
+        help="Optional small STARLoss_v2 regularizer for active supervised schema heads; try 0.005, 0.01, 0.02, or 0.05 on hard-case slices.",
+    )
+    parser.add_argument(
+        "--domain-balanced-sampling",
+        action="store_true",
+        help=(
+            "Use balanced per-rank batches under DDP; --batch_size remains the "
+            "per-rank batch size and all ranks get the same number of steps."
+        ),
+    )
     parser.add_argument(
         "--bucket-targets",
         default="anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
@@ -183,6 +212,18 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dataset-targets", default="", help="Comma-separated dataset target weights.")
     parser.add_argument("--schema-targets", default="", help="Comma-separated schema target weights.")
+    parser.add_argument(
+        "--auto-dataset-balancing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Infer uniform dataset targets from observed train samples when --dataset-targets is empty.",
+    )
+    parser.add_argument(
+        "--auto-schema-balancing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Infer uniform schema/head targets from observed train samples when --schema-targets is empty.",
+    )
     parser.add_argument(
         "--auxiliary-heads",
         action=argparse.BooleanOptionalAction,

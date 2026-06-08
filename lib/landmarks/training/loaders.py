@@ -9,11 +9,16 @@ import torch
 
 from lib.landmarks.core.manifest_aliases import is_schema_aware_manifest_dataset
 from lib.landmarks.evaluation.split_safe import validate_no_train_test_leakage
-from lib.landmarks.training.data import build_dataset, schema_aware_collate
+from lib.landmarks.training.data import (
+    build_dataset,
+    legacy_domain_balanced_collate,
+    schema_aware_collate,
+)
 from lib.landmarks.training.domain_balanced_sampler import (
     DEFAULT_BUCKET_TARGETS,
     DomainBalancedBatchSampler,
     parse_target_spec,
+    parse_target_spec_for_kind,
 )
 from lib.landmarks.training.evaluator import eval_collate
 from lib.landmarks.training.runtime import dataloader_kwargs, maybe_limit_eval_dataset
@@ -44,11 +49,13 @@ def build_training_loaders(
     up distributed training or constructing the model.
     """
 
+    schema_manifest = is_schema_aware_manifest_dataset(args.data_name)
     train_dataset = build_dataset(
         args,
         "train",
         aug=True,
         heatmap_size=args.heatmap_size,
+        include_metadata=bool(args.domain_balanced_sampling and schema_manifest),
         schema_aware_training=schema_aware_training,
     )
     test_dataset = build_dataset(
@@ -59,7 +66,7 @@ def build_training_loaders(
         include_metadata=True,
         schema_aware_training=schema_aware_training,
     )
-    if is_schema_aware_manifest_dataset(args.data_name):
+    if schema_manifest:
         validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
 
     eval_dataset = maybe_limit_eval_dataset(
@@ -82,21 +89,25 @@ def build_training_loaders(
             **dataloader_kwargs(args, eval_loader=True),
         )
 
-    if args.domain_balanced_sampling and is_schema_aware_manifest_dataset(args.data_name):
+    if args.domain_balanced_sampling and schema_manifest:
         train_sampler = DomainBalancedBatchSampler(
             train_dataset.samples,
             bucket_targets=parse_target_spec(args.bucket_targets, DEFAULT_BUCKET_TARGETS),
-            dataset_targets=parse_target_spec(args.dataset_targets),
-            schema_targets=parse_target_spec(args.schema_targets),
+            dataset_targets=parse_target_spec_for_kind(args.dataset_targets, kind="dataset"),
+            schema_targets=parse_target_spec_for_kind(args.schema_targets, kind="schema"),
             batch_size=args.batch_size,
             seed=args.seed,
             rank=rank,
             world_size=world_size,
+            auto_balance_datasets=bool(getattr(args, "auto_dataset_balancing", True)),
+            auto_balance_schemas=bool(getattr(args, "auto_schema_balancing", True) and schema_aware_training),
         )
+        if rank == 0:
+            print(f"domain-balanced sampler targets: {train_sampler.resolved_targets()}", flush=True)
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
             batch_sampler=train_sampler,
-            collate_fn=schema_aware_collate if schema_aware_training else None,
+            collate_fn=schema_aware_collate if schema_aware_training else legacy_domain_balanced_collate,
             **dataloader_kwargs(args),
         )
     else:

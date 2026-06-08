@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from lib.landmarks.core.schema import MAP_98_TO_68
+from loss import STARLoss_v2
 
 
 def weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
@@ -19,11 +20,79 @@ def weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.00
         return (per_sample * sample_weight).mean()
     return per_sample.mean()
 
-def schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
+def _schema_head_weight_map(raw):
+    weights = {}
+    for item in str(raw or "").split(","):
+        if not item.strip() or "=" not in item:
+            continue
+        name, value = item.split("=", 1)
+        try:
+            weights[name.strip()] = float(value)
+        except ValueError:
+            continue
+    return weights
+
+
+def _star_loss_v2_per_point(star_loss_func, pred_heatmap, target):
+    bs, npoints, h, w = pred_heatmap.shape
+    heatmap = torch.softmax(
+        pred_heatmap.reshape((bs, npoints, -1)), dim=-1
+    ).reshape((bs, npoints, h, w))
+    means = star_loss_func.weighted_mean(heatmap)
+    covars = star_loss_func.unbiased_weighted_covariance(heatmap, means)
+    covars_cpu = covars.reshape(bs * npoints, 2, 2).cpu()
+    evalues, evectors = torch.linalg.eigh(covars_cpu, UPLO="U")
+    evalues = evalues.reshape(bs, npoints, 2).to(heatmap).clamp_min(
+        float(getattr(star_loss_func, "EPSILON", 1e-5))
+    )
+    evectors = evectors.reshape(bs, npoints, 2, 2).to(heatmap)
+    loss_trans = star_loss_func.ambiguity_guided_decompose(
+        target - means, evalues, evectors
+    )
+    loss_eigen = star_loss_func.eigenvalue_restriction(evalues, bs, npoints)
+    return loss_trans + star_loss_func.w * loss_eigen
+
+
+def _weighted_star_loss_v2(star_loss_func, pred_heatmap, target, sample_weight, landmark_mask):
+    per_point = _star_loss_v2_per_point(star_loss_func, pred_heatmap, target)
+    point_weights = landmark_mask.to(per_point.device).to(per_point.dtype)
+    if sample_weight is not None:
+        point_weights = point_weights * sample_weight.to(per_point.device).to(
+            per_point.dtype
+        ).reshape(-1, 1)
+    return (per_point * point_weights).sum() / point_weights.sum().clamp_min(1.0)
+
+
+def schema_head_loss(
+    stage_pred,
+    heads,
+    aux_labels,
+    heatmap_loss_func,
+    args,
+    *,
+    return_details=False,
+    star_loss_func=None,
+):
     loss = torch.tensor(0.0, device=next(iter(heads.values()))["target"].device)
     loss_loc = torch.tensor(0.0, device=loss.device)
     loss_heatmap = torch.tensor(0.0, device=loss.device)
     loss_aux = torch.tensor(0.0, device=loss.device)
+    loss_consistency = torch.tensor(0.0, device=loss.device)
+    loss_star = torch.tensor(0.0, device=loss.device)
+    details = {
+        "head_sample_counts": {},
+        "head_loss_contributions": {},
+        "loss_consistency": loss_consistency,
+        "loss_star": loss_star,
+    }
+    head_weight_map = _schema_head_weight_map(
+        getattr(args, "schema_head_loss_weights", "")
+    )
+    total_head_samples = max(
+        1,
+        sum(int(payload["indices"].numel()) for payload in heads.values()),
+    )
+    weighting = str(getattr(args, "schema_head_loss_weighting", "sample_count"))
     for head_name, payload in heads.items():
         pred_loc, pred_heatmap = stage_pred[head_name]
         indices = payload["indices"]
@@ -53,9 +122,32 @@ def schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
             )
             * args.hw
         )
-        loss = loss + head_loc + head_heatmap
+        head_star = torch.tensor(0.0, device=loss.device)
+        if float(getattr(args, "star_loss_weight", 0.0)) > 0.0:
+            if star_loss_func is None:
+                star_loss_func = STARLoss_v2()
+            head_star = (
+                _weighted_star_loss_v2(
+                    star_loss_func,
+                    pred_heatmap,
+                    target,
+                    sample_weight,
+                    landmark_mask,
+                )
+                * float(args.star_loss_weight)
+            )
+
+        head_samples = int(indices.numel())
+        head_scale = float(head_weight_map.get(head_name, 1.0))
+        if weighting == "sample_count":
+            head_scale *= float(head_samples) / float(total_head_samples)
+        head_loss = (head_loc + head_heatmap + head_star) * head_scale
+        loss = loss + head_loss
         loss_loc = loss_loc + head_loc.detach()
         loss_heatmap = loss_heatmap + head_heatmap.detach()
+        loss_star = loss_star + head_star.detach()
+        details["head_sample_counts"][head_name] = head_samples
+        details["head_loss_contributions"][head_name] = head_loss.detach()
 
     if (
         args.schema_consistency_weight > 0
@@ -67,9 +159,10 @@ def schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
         pred_98 = stage_pred["landmarks_98"][0].index_select(0, indices)
         pred_68 = stage_pred["landmarks_68"][0].index_select(0, indices)
         projected = pred_98[:, torch.as_tensor(MAP_98_TO_68, device=pred_98.device), :]
-        loss = loss + float(args.schema_consistency_weight) * F.smooth_l1_loss(
+        loss_consistency = float(args.schema_consistency_weight) * F.smooth_l1_loss(
             pred_68, projected.detach(), beta=0.001
         )
+        loss = loss + loss_consistency
 
     aux_outputs = stage_pred.get("_aux", {}) if isinstance(stage_pred, dict) else {}
     if args.auxiliary_loss_weight > 0 and aux_outputs:
@@ -84,6 +177,10 @@ def schema_head_loss(stage_pred, heads, aux_labels, heatmap_loss_func, args):
                 ) * float(args.auxiliary_loss_weight)
         loss = loss + loss_aux
 
+    details["loss_consistency"] = loss_consistency.detach()
+    details["loss_star"] = loss_star.detach()
+    if return_details:
+        return loss, loss_loc, loss_heatmap, loss_aux, details
     return loss, loss_loc, loss_heatmap, loss_aux
 
 def heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
@@ -107,6 +204,7 @@ __all__ = [
     "weighted_smooth_l1",
     "schema_head_loss",
     "heatmap_batch_weight",
+    "_weighted_star_loss_v2",
 ]
 
 # Legacy private aliases kept for TrainHeatmapStageFP16.py and older tests/tools.

@@ -24,10 +24,13 @@ FLOAT_COMPAT_KEYS = {
     "locw",
     "mul",
     "schema_consistency_weight",
+    "star_loss_weight",
     "auxiliary_loss_weight",
 }
 
 BOOL_COMPAT_KEYS = {
+    "auto_dataset_balancing",
+    "auto_schema_balancing",
     "schema_aware_training",
     "domain_balanced_sampling",
     "auxiliary_heads",
@@ -40,6 +43,8 @@ STRING_COMPAT_KEYS = {
     "bucket_targets",
     "dataset_targets",
     "schema_targets",
+    "schema_head_loss_weighting",
+    "schema_head_loss_weights",
 }
 
 
@@ -78,13 +83,13 @@ def build_training_compat_config_from_args(args: T.Any) -> dict[str, T.Any]:
 
     for key in sorted(INT_COMPAT_KEYS):
         try:
-            config[key] = int(getattr(args, key))
+            config[key] = int(getattr(args, key, None))
         except (TypeError, ValueError):
             config[key] = getattr(args, key, None)
 
     for key in sorted(FLOAT_COMPAT_KEYS):
         try:
-            config[key] = float(getattr(args, key))
+            config[key] = float(getattr(args, key, None))
         except (TypeError, ValueError):
             config[key] = getattr(args, key, None)
 
@@ -157,6 +162,11 @@ def build_pipeline_training_compat_config(
             "--schema-consistency-weight",
             "--schema_consistency_weight",
         ),
+        "star_loss_weight": float_opt(
+            0.0,
+            "--star-loss-weight",
+            "--star_loss_weight",
+        ),
         "auxiliary_loss_weight": float_opt(
             0.1,
             "--auxiliary-loss-weight",
@@ -173,6 +183,18 @@ def build_pipeline_training_compat_config(
             "--domain-balanced-sampling",
             default=False,
         ),
+        "auto_dataset_balancing": train_bool_arg(
+            args,
+            "--auto-dataset-balancing",
+            "--no-auto-dataset-balancing",
+            default=True,
+        ),
+        "auto_schema_balancing": train_bool_arg(
+            args,
+            "--auto-schema-balancing",
+            "--no-auto-schema-balancing",
+            default=True,
+        ),
         "auxiliary_heads": train_bool_arg(
             args,
             "--auxiliary-heads",
@@ -188,6 +210,16 @@ def build_pipeline_training_compat_config(
         ),
         "dataset_targets": str_opt("", "--dataset-targets"),
         "schema_targets": str_opt("", "--schema-targets"),
+        "schema_head_loss_weighting": str_opt(
+            "sample_count",
+            "--schema-head-loss-weighting",
+            "--schema_head_loss_weighting",
+        ),
+        "schema_head_loss_weights": str_opt(
+            "",
+            "--schema-head-loss-weights",
+            "--schema_head_loss_weights",
+        ),
         "heldout_dataset": [str(item) for item in train_arg_values(args, "--heldout-dataset")],
     }
 

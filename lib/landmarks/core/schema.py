@@ -108,10 +108,11 @@ WFLW_98_FLIP = np.array([
     92, 91, 90, 89, 88, 95, 94, 93, 97, 96,
 ], dtype=np.int64)
 
+SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS = frozenset(
+    {"2d_39", "menpo2d_profile_39", "multipie_profile_39"}
+)
+
 SCHEMA_FLIP_MAPS: dict[str, np.ndarray] = {
-    "2d_39": np.arange(39, dtype=np.int64),
-    "menpo2d_profile_39": np.arange(39, dtype=np.int64),
-    "multipie_profile_39": np.arange(39, dtype=np.int64),
     "2d_68": np.array([
         16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
         26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
@@ -266,6 +267,11 @@ def flip_map_for_schema(schema: str | object) -> np.ndarray:
     if schema_name not in SCHEMA_FLIP_MAPS:
         raise ValueError(f"No flip map registered for schema '{schema_name}'")
     return SCHEMA_FLIP_MAPS[schema_name].copy()
+
+
+def has_verified_flip_map(schema: str | object) -> bool:
+    schema_name = canonicalize_schema(schema)
+    return schema_name in SCHEMA_FLIP_MAPS
 
 
 def head_name_for_schema(schema: str | object) -> str:

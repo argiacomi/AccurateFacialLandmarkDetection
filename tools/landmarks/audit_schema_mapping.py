@@ -11,7 +11,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from lib.landmarks.core.schema import MAP_98_TO_68, canonicalize_schema
+from lib.landmarks.core.schema import (
+    MAP_98_TO_68,
+    SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS,
+    canonicalize_schema,
+    has_verified_flip_map,
+)
 
 
 def _load_manifest(path: Path) -> list[dict[str, T.Any]]:
@@ -67,6 +72,11 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
         "samples": [],
         "map_98_to_68_size": int(MAP_98_TO_68.size),
         "profile39_overlap": "manual_overlay_required",
+        "flip_map_audit": {
+            "schemas_without_verified_flip_maps": sorted(SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS),
+            "unverified_identity_flip_maps": [],
+            "schemas_seen_without_verified_flip_maps": [],
+        },
     }
 
     emitted = 0
@@ -78,6 +88,14 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
         points = np.load(_resolve(base, landmark_value)).astype(np.float32)
         schema = _schema(entry, points)
         report["counts"][schema] = report["counts"].get(schema, 0) + 1
+        try:
+            verified_flip_map = has_verified_flip_map(schema)
+        except ValueError:
+            verified_flip_map = False
+        if not verified_flip_map:
+            seen_without_verified = report["flip_map_audit"]["schemas_seen_without_verified_flip_maps"]
+            if schema not in seen_without_verified:
+                seen_without_verified.append(schema)
         if schema not in {"2d_98", "2d_39", "menpo2d_profile_39", "multipie_profile_39"}:
             continue
         sample_id = str(entry.get("sample_id") or entry.get("id") or index)

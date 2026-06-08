@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 import torch
 
 import TrainHeatmapStageFP16 as train
@@ -219,6 +220,46 @@ def test_heatmap_stage_cli_builder_preserves_eval_flags():
     assert args.eval_ema_scope == "full-only"
     assert args.eval_progress is False
     assert args.respect_declared_splits is True
+
+
+def test_heatmap_stage_cli_builder_exposes_schema_loss_and_resume_flags():
+    parser = build_heatmap_stage_arg_parser()
+    args = parser.parse_args(
+        [
+            "--allow-missing-schema-heads",
+            "--schema-head-loss-weighting",
+            "per_head",
+            "--schema-head-loss-weights",
+            "landmarks_98=1.5",
+            "--star-loss-weight",
+            "0.01",
+        ]
+    )
+
+    assert args.allow_missing_schema_heads is True
+    assert args.schema_head_loss_weighting == "per_head"
+    assert args.schema_head_loss_weights == "landmarks_98=1.5"
+    assert args.star_loss_weight == 0.01
+
+
+def test_allow_missing_schema_heads_only_accepts_schema_extension_keys():
+    net = torch.nn.Module()
+    net.output_layers = torch.nn.ModuleList([torch.nn.Linear(1, 1)])
+    net.schema_output_layers = torch.nn.ModuleDict(
+        {"landmarks_98": torch.nn.ModuleList([torch.nn.Linear(1, 1)])}
+    )
+    args = argparse.Namespace(allow_missing_schema_heads=True)
+    legacy_state = {
+        key: value.clone()
+        for key, value in net.state_dict().items()
+        if not key.startswith("schema_output_layers.")
+    }
+
+    train._load_resume_model_state(net, legacy_state, args)
+
+    bad_state = {}
+    with pytest.raises(ValueError, match="non_schema_missing"):
+        train._load_resume_model_state(net, bad_state, args)
 
 
 def test_save_best_weights_writes_explicit_and_legacy_names(tmp_path):

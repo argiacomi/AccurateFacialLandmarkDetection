@@ -14,12 +14,16 @@ sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 from lib.landmarks.core.schema import (
     DEFAULT_SCHEMA_HEADS,
+    MAP_98_TO_68,
     flip_map_for_schema,
     head_name_for_schema,
 )
 from lib.landmarks.datasets.manifest import LandmarkDataset
 from lib.landmarks.training.data import _schema_aware_collate
 from lib.landmarks.training.evaluator import _eval_collate, _evaluate_landmark_model
+from lib.landmarks.training.losses import _weighted_star_loss_v2, schema_head_loss
+from loss import STARLoss_v2
+from tools.landmarks.build_quality_dataset import _load_landmark_file, _sample
 from tools.landmarks.evaluate_cdvit_manifest import _dataset as standalone_eval_dataset
 
 
@@ -62,7 +66,37 @@ def test_schema_registry_has_required_training_heads_and_flip_maps():
     assert DEFAULT_SCHEMA_HEADS["landmarks_29"] == 29
     assert flip_map_for_schema("2d_68").shape == (68,)
     assert flip_map_for_schema("2d_98").shape == (98,)
-    assert flip_map_for_schema("multipie_profile_39").shape == (39,)
+    with pytest.raises(ValueError, match="No flip map registered"):
+        flip_map_for_schema("multipie_profile_39")
+
+
+def test_profile39_schema_aware_augmentation_skips_horizontal_flip_without_audited_map(
+    tmp_path, monkeypatch
+):
+    class IdentityAug:
+        def __call__(self, *, image, keypoints):
+            return {"image": image, "keypoints": keypoints}
+
+    import lib.landmarks.datasets.manifest as manifest_module
+
+    monkeypatch.setattr(manifest_module, "GetAugTransform", lambda: IdentityAug())
+    monkeypatch.setattr(np.random, "random", lambda: 0.0)
+
+    points = np.stack([np.linspace(32, 224, 39), np.linspace(40, 216, 39)], axis=1)
+    manifest_path = _write_manifest(tmp_path, points, schema="multipie_profile_39")
+
+    dataset = LandmarkDataset(
+        manifest_path=str(manifest_path),
+        split="train",
+        preload=False,
+        aug=True,
+        heatmap_size=8,
+        schema_aware_training=True,
+    )
+
+    item = dataset[0]
+
+    assert item["target"][:, 0].numpy() == pytest.approx(points[:, 0] / 255.0)
 
 
 def test_fs68_schema_aware_loader_accepts_profile39(tmp_path):
@@ -236,3 +270,159 @@ def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
     assert records["sample-68"]["evaluation_head"] == "landmarks_68"
     assert records["sample-98"]["evaluation_head"] == "landmarks_98"
     assert records["sample-98"]["visibility_target_source"] == "metadata.landmark_visibility"
+
+
+def test_builder_materializes_native_98_landmarks_and_schema_metadata(tmp_path):
+    image = np.full((256, 256, 3), 127, dtype=np.uint8)
+    image_path = tmp_path / "image.jpg"
+    cv2.imwrite(str(image_path), image)
+    points = np.stack([np.linspace(32, 224, 98), np.linspace(40, 216, 98)], axis=1)
+
+    sample = _sample(
+        output_dir=tmp_path / "out",
+        dataset="wflw",
+        sample_id="wflw/native-98",
+        image=image_path,
+        points68=points.astype(np.float32),
+        condition="normal",
+        conditions=("normal",),
+        source_schema="2d_98",
+    )
+
+    saved = np.load((tmp_path / "out" / sample["landmarks"]).resolve())
+    assert saved.shape == (98, 2)
+    assert sample["source_schema"] == "2d_98"
+    assert sample["target_schema"] == "2d_98"
+    assert sample["head_name"] == "landmarks_98"
+    assert sample["metadata"]["source_schema"] == "2d_98"
+    assert sample["metadata"]["target_schema"] == "2d_98"
+
+
+def test_landmark_file_parser_accepts_39_point_text_pts_npy_and_mat(tmp_path):
+    points = np.stack([np.linspace(1, 39, 39), np.linspace(2, 40, 39)], axis=1).astype(
+        np.float32
+    )
+    npy_path = tmp_path / "profile.npy"
+    txt_path = tmp_path / "profile.txt"
+    pts_path = tmp_path / "profile.pts"
+    mat_path = tmp_path / "profile.mat"
+    np.save(npy_path, points)
+    txt_path.write_text(" ".join(str(float(v)) for v in points.reshape(-1)), encoding="utf-8")
+    pts_path.write_text(
+        "version: 1\nn_points: 39\n{\n"
+        + "\n".join(f"{x} {y}" for x, y in points)
+        + "\n}\n",
+        encoding="utf-8",
+    )
+    scipy = pytest.importorskip("scipy.io")
+    scipy.savemat(mat_path, {"landmarks": points})
+
+    for path in (npy_path, txt_path, pts_path, mat_path):
+        loaded, schema = _load_landmark_file(path)
+        assert loaded.shape == (39, 2)
+        assert schema == "2d_39"
+
+
+def test_schema_head_loss_routes_true_98_to_native_head_and_consistency_to_68():
+    args = SimpleNamespace(
+        locw=1.0,
+        hw=0.0,
+        schema_consistency_weight=0.5,
+        auxiliary_loss_weight=0.0,
+        schema_head_loss_weighting="sample_count",
+        schema_head_loss_weights="",
+        star_loss_weight=0.0,
+    )
+    target_98 = torch.stack(
+        (torch.linspace(0.1, 0.9, 98), torch.linspace(0.2, 0.8, 98)), dim=1
+    ).unsqueeze(0)
+    pred_98 = (target_98 + 0.1).clone().requires_grad_()
+    pred_68 = torch.zeros(1, 68, 2, requires_grad=True)
+    stage_pred = {
+        "landmarks_98": (pred_98, torch.zeros(1, 98, 4, 4, requires_grad=True)),
+        "landmarks_68": (pred_68, torch.zeros(1, 68, 4, 4, requires_grad=True)),
+    }
+    heads = {
+        "landmarks_98": {
+            "indices": torch.tensor([0]),
+            "target": target_98,
+            "heatmap": torch.zeros(1, 98, 4, 4),
+            "landmark_mask": torch.ones(1, 98),
+            "sample_weight": torch.ones(1),
+        }
+    }
+
+    loss, _, _, _, details = schema_head_loss(
+        stage_pred,
+        heads,
+        {},
+        lambda *args, **kwargs: torch.tensor(0.0),
+        args,
+        return_details=True,
+    )
+    loss.backward()
+
+    assert details["loss_consistency"].item() > 0
+    assert pred_68.grad.abs().sum().item() > 0
+    assert pred_98.grad.abs().sum().item() > 0
+    assert details["head_sample_counts"] == {"landmarks_98": 1}
+
+
+def test_schema_head_loss_detaches_98_projection_for_consistency_only():
+    args = SimpleNamespace(
+        locw=0.0,
+        hw=0.0,
+        schema_consistency_weight=1.0,
+        auxiliary_loss_weight=0.0,
+        schema_head_loss_weighting="sample_count",
+        schema_head_loss_weights="",
+        star_loss_weight=0.0,
+    )
+    pred_98 = torch.rand(1, 98, 2, requires_grad=True)
+    pred_68 = torch.zeros(1, 68, 2, requires_grad=True)
+    stage_pred = {
+        "landmarks_98": (pred_98, torch.zeros(1, 98, 4, 4, requires_grad=True)),
+        "landmarks_68": (pred_68, torch.zeros(1, 68, 4, 4, requires_grad=True)),
+    }
+    heads = {
+        "landmarks_98": {
+            "indices": torch.tensor([0]),
+            "target": pred_98.detach().clone(),
+            "heatmap": torch.zeros(1, 98, 4, 4),
+            "landmark_mask": torch.ones(1, 98),
+            "sample_weight": torch.ones(1),
+        }
+    }
+
+    loss, *_ = schema_head_loss(
+        stage_pred,
+        heads,
+        {},
+        lambda *args, **kwargs: torch.tensor(0.0),
+        args,
+    )
+    loss.backward()
+
+    assert pred_68.grad.abs().sum().item() > 0
+    assert pred_98.grad is None or pred_98.grad.abs().sum().item() == pytest.approx(0.0)
+
+
+def test_weighted_star_loss_v2_respects_masks_and_sample_weights():
+    star = STARLoss_v2()
+    heatmap = torch.randn(2, 3, 4, 4, requires_grad=True)
+    target = torch.full((2, 3, 2), 0.5)
+    mask = torch.tensor([[1.0, 0.0, 1.0], [0.0, 0.0, 0.0]])
+    weights = torch.tensor([2.0, 10.0])
+
+    loss = _weighted_star_loss_v2(star, heatmap, target, weights, mask)
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert heatmap.grad[0, 0].abs().sum().item() > 0
+    assert heatmap.grad[0, 1].abs().sum().item() == pytest.approx(0.0)
+    assert heatmap.grad[1].abs().sum().item() == pytest.approx(0.0)
+
+
+def test_map_98_to_68_projection_has_expected_direction():
+    assert MAP_98_TO_68.shape == (68,)
+    assert int(MAP_98_TO_68.max()) < 98
