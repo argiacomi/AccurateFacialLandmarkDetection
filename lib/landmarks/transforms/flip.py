@@ -232,7 +232,11 @@ def check_size(imgs, config):
     for i in range(len(imgs)):
         img = imgs[i]
         if img.height != config.input_size or img.width != config.input_size:
-            print("{}th Image is not applicable ({},{}),need delete or resize.".format(i + 1, img.height, img.width))
+            print(
+                "{}th Image is not applicable ({},{}),need delete or resize.".format(
+                    i + 1, img.height, img.width
+                )
+            )
             exit(-1)
 
 

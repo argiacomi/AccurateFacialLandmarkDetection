@@ -80,8 +80,12 @@ def video_NME(model_kpts, gt_kpts):
     model_kpts.shape = gt_kpts.shape = (n_frames, n_kpts, 2)
     """
 
-    inter_occ_norms = np.linalg.norm(gt_kpts[:, 60, :] - gt_kpts[:, 72, :], axis=1, keepdims=True) # (n_frames, 1)
-    NMEs = 100 * np.linalg.norm(gt_kpts - model_kpts, axis=2) / inter_occ_norms  # (n_frames, n_kpts)
+    inter_occ_norms = np.linalg.norm(
+        gt_kpts[:, 60, :] - gt_kpts[:, 72, :], axis=1, keepdims=True
+    )  # (n_frames, 1)
+    NMEs = (
+        100 * np.linalg.norm(gt_kpts - model_kpts, axis=2) / inter_occ_norms
+    )  # (n_frames, n_kpts)
     NME = np.mean(np.mean(NMEs, axis=1), axis=0)
 
     return NME
@@ -95,10 +99,14 @@ def video_NMJ(model_kpts, gt_kpts):
 
     x_scales = np.max(gt_kpts[:, :, 0], axis=1) - np.min(gt_kpts[:, :, 0], axis=1)
     y_scales = np.max(gt_kpts[:, :, 1], axis=1) - np.min(gt_kpts[:, :, 1], axis=1)
-    faces_scales = np.sqrt(x_scales * y_scales / (256 ** 2)).reshape(-1, 1)  # normalize in units of standard areas
+    faces_scales = np.sqrt(x_scales * y_scales / (256**2)).reshape(
+        -1, 1
+    )  # normalize in units of standard areas
 
     delta = gt_kpts - model_kpts  # (n_frames, n_kpts, 2)
-    NMJs = 100 * np.linalg.norm(delta[:-1] - delta[1:], axis=2) / faces_scales[1:]  # this is always the same, as one value per kpt. What changes is aggregation across all kpts and across all frames
+    NMJs = (
+        100 * np.linalg.norm(delta[:-1] - delta[1:], axis=2) / faces_scales[1:]
+    )  # this is always the same, as one value per kpt. What changes is aggregation across all kpts and across all frames
     NMJ = rms(rms(NMJs, axis=1), axis=0)
 
     return NMJ

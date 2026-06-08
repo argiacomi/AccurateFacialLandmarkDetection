@@ -29,8 +29,11 @@ from lib.landmarks.transforms.flip import flip_points
 try:
     from lib.landmarks.training.augmentation import GetAugTransform
 except ModuleNotFoundError:
+
     def GetAugTransform():
-        raise ModuleNotFoundError("albumentations is required when schema-aware manifest aug=True")
+        raise ModuleNotFoundError(
+            "albumentations is required when schema-aware manifest aug=True"
+        )
 
 
 HARD_NEGATIVE_BUCKET_WEIGHTS = {
@@ -100,7 +103,9 @@ def _clamp_weight(value):
         return DEFAULT_HARD_NEGATIVE_WEIGHT
     if not np.isfinite(weight) or weight <= 0.0:
         return DEFAULT_HARD_NEGATIVE_WEIGHT
-    return float(min(max(weight, DEFAULT_HARD_NEGATIVE_WEIGHT), MAX_HARD_NEGATIVE_WEIGHT))
+    return float(
+        min(max(weight, DEFAULT_HARD_NEGATIVE_WEIGHT), MAX_HARD_NEGATIVE_WEIGHT)
+    )
 
 
 def _weight_from_entry(entry, metadata, conditions):
@@ -112,8 +117,14 @@ def _weight_from_entry(entry, metadata, conditions):
         return HARD_NEGATIVE_BUCKET_WEIGHTS[bucket]
 
     labels = set(conditions)
-    is_profile = any("profile" in label or "large_yaw" in label or label.startswith("yaw_") for label in labels)
-    is_occlusion = any("occlusion" in label or "occluded" in label or "occlud" in label for label in labels)
+    is_profile = any(
+        "profile" in label or "large_yaw" in label or label.startswith("yaw_")
+        for label in labels
+    )
+    is_occlusion = any(
+        "occlusion" in label or "occluded" in label or "occlud" in label
+        for label in labels
+    )
     if is_profile and is_occlusion:
         return HARD_NEGATIVE_BUCKET_WEIGHTS["profile_occlusion"]
     if is_profile:
@@ -149,12 +160,12 @@ def _schemas_share_trainable_head_and_count(left_schema, right_schema):
     if left_schema == right_schema:
         return True
     try:
-        return (
-            point_count_for_schema(left_schema) == point_count_for_schema(right_schema)
-            and head_name_for_schema(left_schema) == head_name_for_schema(right_schema)
-        )
+        return point_count_for_schema(left_schema) == point_count_for_schema(
+            right_schema
+        ) and head_name_for_schema(left_schema) == head_name_for_schema(right_schema)
     except ValueError:
         return False
+
 
 class ManifestContractError(ValueError):
     """Raised when a manifest entry violates the declared training contract."""
@@ -165,7 +176,9 @@ def _as_bool_landmark_mask(value, landmark_count=68):
         return None
     if isinstance(value, dict):
         # Accept dicts keyed by landmark index.
-        arr = [value.get(str(i), value.get(i, True)) for i in range(int(landmark_count))]
+        arr = [
+            value.get(str(i), value.get(i, True)) for i in range(int(landmark_count))
+        ]
     else:
         arr = value
     if isinstance(arr, np.ndarray):
@@ -177,7 +190,19 @@ def _as_bool_landmark_mask(value, landmark_count=68):
     for item in arr:
         if isinstance(item, str):
             label = _normalize_label(item)
-            out.append(label not in {"", "0", "false", "none", "invalid", "missing", "self_occluded", "selfoccluded"})
+            out.append(
+                label
+                not in {
+                    "",
+                    "0",
+                    "false",
+                    "none",
+                    "invalid",
+                    "missing",
+                    "self_occluded",
+                    "selfoccluded",
+                }
+            )
         else:
             out.append(bool(item))
     return np.asarray(out, dtype=np.float32)
@@ -204,7 +229,11 @@ def _landmark_mask_from_entry(entry, metadata, landmark_count=68):
 
     # Lower priority: visibility often means score-visible only, which would drop
     # externally occluded but coordinate-valid MERL-RAV points.
-    for key in ("visibility", "landmark_score_visibility_mask", "score_visibility_mask"):
+    for key in (
+        "visibility",
+        "landmark_score_visibility_mask",
+        "score_visibility_mask",
+    ):
         mask = _as_bool_landmark_mask(entry.get(key), landmark_count)
         if mask is not None:
             return mask
@@ -357,7 +386,10 @@ def _load_manifest_index(manifest_path):
             return {}
         if int(header.get("version", -1)) != MANIFEST_INDEX_VERSION:
             return {}
-        if header.get("manifest_fingerprint") != _manifest_index_header(manifest_path)["manifest_fingerprint"]:
+        if (
+            header.get("manifest_fingerprint")
+            != _manifest_index_header(manifest_path)["manifest_fingerprint"]
+        ):
             return {}
 
         records = {}
@@ -384,7 +416,9 @@ def _write_manifest_index(manifest_path, records_by_index):
         if record.get("type") == "landmark_contract":
             lines.append(json.dumps(record, sort_keys=True))
 
-    tmp_path = index_path.with_name(f"{index_path.name}.tmp.{int(time.time() * 1_000_000)}")
+    tmp_path = index_path.with_name(
+        f"{index_path.name}.tmp.{int(time.time() * 1_000_000)}"
+    )
     try:
         tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         tmp_path.replace(index_path)
@@ -475,9 +509,8 @@ def _build_landmark_contract(entry, metadata, landmarks_path, entry_index):
             declared_schema,
             detected_schema,
         )
-        if (
-            not source_schema_matches_loaded_points
-            and not (has_explicit_target and target_schema == detected_schema)
+        if not source_schema_matches_loaded_points and not (
+            has_explicit_target and target_schema == detected_schema
         ):
             raise ManifestContractError(
                 "manifest source_schema does not match loaded landmark array "
@@ -518,9 +551,7 @@ def _build_landmark_contract(entry, metadata, landmarks_path, entry_index):
 
     expected_head_name = head_name_for_schema(target_schema)
     head_name = str(
-        entry.get("head_name")
-        or metadata.get("head_name")
-        or expected_head_name
+        entry.get("head_name") or metadata.get("head_name") or expected_head_name
     )
     if head_name != expected_head_name:
         raise ManifestContractError(
@@ -556,8 +587,12 @@ def _build_landmark_contract(entry, metadata, landmarks_path, entry_index):
     }
 
 
-def _landmark_contract_for_entry(entry, metadata, landmarks_path, entry_index, index_records):
-    cached_contract = _cached_landmark_contract(index_records, entry_index, landmarks_path)
+def _landmark_contract_for_entry(
+    entry, metadata, landmarks_path, entry_index, index_records
+):
+    cached_contract = _cached_landmark_contract(
+        index_records, entry_index, landmarks_path
+    )
     if cached_contract is not None:
         return cached_contract, index_records[int(entry_index)], True
 
@@ -581,7 +616,9 @@ def build_manifest_index(manifest_path):
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     entries = payload.get("samples", payload.get("scenarios", []))
     if not isinstance(entries, list):
-        raise ValueError(f"manifest {manifest_path} must contain a samples or scenarios list")
+        raise ValueError(
+            f"manifest {manifest_path} must contain a samples or scenarios list"
+        )
 
     cached_index_records = _load_manifest_index(manifest_path)
     records_by_index = dict(cached_index_records)
@@ -592,7 +629,9 @@ def build_manifest_index(manifest_path):
         if not isinstance(entry, dict):
             skipped_count += 1
             continue
-        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {}
+        metadata = (
+            entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {}
+        )
         landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
         if not landmarks_value:
             skipped_count += 1
@@ -658,9 +697,13 @@ class LandmarkDataset(Dataset):
     ):
         super(LandmarkDataset, self).__init__()
         if perturbation:
-            raise ValueError("schema-aware landmark manifests do not support perturbation mode")
+            raise ValueError(
+                "schema-aware landmark manifests do not support perturbation mode"
+            )
         if not manifest_path:
-            raise ValueError("schema-aware landmark manifests require --manifest, --train_manifest, or --test_manifest")
+            raise ValueError(
+                "schema-aware landmark manifests require --manifest, --train_manifest, or --test_manifest"
+            )
 
         self.manifest_path = Path(manifest_path)
         self.split = split
@@ -681,23 +724,38 @@ class LandmarkDataset(Dataset):
             detail = f" split={split!r} eval_mode={self.eval_mode!r}"
             if self.heldout_datasets:
                 detail += f" heldout_datasets={self.heldout_datasets!r}"
-            raise ValueError(f"no trainable schema-aware samples found in {self.manifest_path} for{detail}")
+            raise ValueError(
+                f"no trainable schema-aware samples found in {self.manifest_path} for{detail}"
+            )
 
         self.transform = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
+            [
+                transforms.ToTensor(),
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ]
         )
         self.aug_transform = GetAugTransform() if aug else None
-        self.generateHM = GenerateHeatmap(self.heatmap_size) if self.heatmap_size > 0 else None
+        self.generateHM = (
+            GenerateHeatmap(self.heatmap_size) if self.heatmap_size > 0 else None
+        )
         self.data_list = self.loaditem_list() if preload else None
 
-    def _load_manifest(self, manifest_path, split, eval_mode, heldout_datasets, split_policy):
+    def _load_manifest(
+        self, manifest_path, split, eval_mode, heldout_datasets, split_policy
+    ):
         base_dir = manifest_path.parent
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         entries = payload.get("samples", payload.get("scenarios", []))
         if not isinstance(entries, list):
-            raise ValueError(f"manifest {manifest_path} must contain a samples or scenarios list")
+            raise ValueError(
+                f"manifest {manifest_path} must contain a samples or scenarios list"
+            )
 
-        declared_splits = {_entry_split(entry) for entry in entries if isinstance(entry, dict) and _entry_split(entry)}
+        declared_splits = {
+            _entry_split(entry)
+            for entry in entries
+            if isinstance(entry, dict) and _entry_split(entry)
+        }
         use_split_filter = bool(declared_splits)
 
         cached_index_records = _load_manifest_index(manifest_path)
@@ -720,8 +778,14 @@ class LandmarkDataset(Dataset):
             ):
                 continue
 
-            metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {}
-            source = entry.get("source", {}) if isinstance(entry.get("source"), dict) else {}
+            metadata = (
+                entry.get("metadata", {})
+                if isinstance(entry.get("metadata"), dict)
+                else {}
+            )
+            source = (
+                entry.get("source", {}) if isinstance(entry.get("source"), dict) else {}
+            )
             landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
             image_value = entry.get("image")
             if not landmarks_value or not image_value:
@@ -763,29 +827,53 @@ class LandmarkDataset(Dataset):
                 or metadata.get("synthetic_occluder_mask")
             )
             landmark_mask = _landmark_mask_from_entry(entry, metadata, landmark_count)
-            visibility_target, visibility_target_source = _visibility_target_from_entry(entry, metadata, landmark_count)
+            visibility_target, visibility_target_source = _visibility_target_from_entry(
+                entry, metadata, landmark_count
+            )
             conditions = _coerce_conditions(entry, metadata)
             samples.append(
                 {
-                    "sample_id": str(entry.get("sample_id") or entry.get("id") or entry.get("name") or index),
+                    "sample_id": str(
+                        entry.get("sample_id")
+                        or entry.get("id")
+                        or entry.get("name")
+                        or index
+                    ),
                     "image": _resolve_path(base_dir, image_value),
                     "landmarks": landmarks_path,
-                    "dataset": str(entry.get("dataset") or metadata.get("dataset") or ""),
-                    "condition": str(entry.get("condition") or entry.get("scenario") or ""),
+                    "dataset": str(
+                        entry.get("dataset") or metadata.get("dataset") or ""
+                    ),
+                    "condition": str(
+                        entry.get("condition") or entry.get("scenario") or ""
+                    ),
                     "conditions": conditions,
                     "source_schema": schema,
                     "target_schema": target_schema,
                     "landmark_count": int(landmark_count),
                     "head_name": head_name,
                     "split": str(entry.get("split") or metadata.get("split") or ""),
-                    "split_safe_id": str(entry.get("split_safe_id") or metadata.get("split_safe_id") or ""),
+                    "split_safe_id": str(
+                        entry.get("split_safe_id")
+                        or metadata.get("split_safe_id")
+                        or ""
+                    ),
                     "source": source,
                     "metadata": metadata,
-                    "face_bbox": entry.get("face_bbox", metadata.get("face_bbox", entry.get("bbox", metadata.get("bbox")))),
-                    "bbox_format": entry.get("bbox_format", metadata.get("bbox_format", "")),
+                    "face_bbox": entry.get(
+                        "face_bbox",
+                        metadata.get(
+                            "face_bbox", entry.get("bbox", metadata.get("bbox"))
+                        ),
+                    ),
+                    "bbox_format": entry.get(
+                        "bbox_format", metadata.get("bbox_format", "")
+                    ),
                     "visibility_target": visibility_target,
                     "visibility_target_source": visibility_target_source,
-                    "synthetic_visibility_occluder_mask": _resolve_path(base_dir, occluder_mask_value)
+                    "synthetic_visibility_occluder_mask": _resolve_path(
+                        base_dir, occluder_mask_value
+                    )
                     if occluder_mask_value
                     else "",
                     "sample_weight": _weight_from_entry(entry, metadata, conditions),
@@ -798,7 +886,9 @@ class LandmarkDataset(Dataset):
 
         if skipped_non_trainable_schema:
             reason = "non-trainable" if self.schema_aware_training else "non-68-point"
-            print(f"schema-aware manifest skipped {skipped_non_trainable_schema} {reason} sample(s) from {manifest_path}")
+            print(
+                f"schema-aware manifest skipped {skipped_non_trainable_schema} {reason} sample(s) from {manifest_path}"
+            )
         return samples
 
     def __len__(self):
@@ -854,7 +944,9 @@ class LandmarkDataset(Dataset):
             padding = max(padding, rb[1] - img.shape[0] + margin)
         if padding > 0:
             padding = int(round(padding))
-            new_img = cv2.copyMakeBorder(img, padding, padding, padding, padding, cv2.BORDER_CONSTANT)
+            new_img = cv2.copyMakeBorder(
+                img, padding, padding, padding, padding, cv2.BORDER_CONSTANT
+            )
             lmk = lmk + padding
             lmk = lmk * img.shape[0] / new_img.shape[0]
             new_img = cv2.resize(new_img, (img.shape[0], img.shape[1]))
@@ -875,12 +967,17 @@ class LandmarkDataset(Dataset):
             lmk = lmk.copy()
             landmark_mask = landmark_mask.copy()
         synthetic_occluder_mask = None
-        if visibility_target is None and sample.get("synthetic_visibility_occluder_mask"):
+        if visibility_target is None and sample.get(
+            "synthetic_visibility_occluder_mask"
+        ):
             synthetic_occluder_mask = cv2.imread(
                 sample["synthetic_visibility_occluder_mask"],
                 cv2.IMREAD_GRAYSCALE,
             )
-            if synthetic_occluder_mask is not None and synthetic_occluder_mask.shape[:2] != img.shape[:2]:
+            if (
+                synthetic_occluder_mask is not None
+                and synthetic_occluder_mask.shape[:2] != img.shape[:2]
+            ):
                 synthetic_occluder_mask = cv2.resize(
                     synthetic_occluder_mask,
                     (img.shape[1], img.shape[0]),
@@ -904,7 +1001,9 @@ class LandmarkDataset(Dataset):
             img = transformed["image"]
             lmk = np.array(transformed["keypoints"], dtype=np.float32)
             if synthetic_occluder_mask is not None:
-                synthetic_occluder_mask = transformed.get("mask", synthetic_occluder_mask)
+                synthetic_occluder_mask = transformed.get(
+                    "mask", synthetic_occluder_mask
+                )
 
             if np.random.random() < 0.5:
                 if self.schema_aware_training:
@@ -921,7 +1020,9 @@ class LandmarkDataset(Dataset):
                     if visibility_target is not None:
                         visibility_target = np.asarray(visibility_target)[flip_index]
                     if visibility_target_weight is not None:
-                        visibility_target_weight = np.asarray(visibility_target_weight)[flip_index]
+                        visibility_target_weight = np.asarray(visibility_target_weight)[
+                            flip_index
+                        ]
                     lmk[:, 0] = 255 - lmk[:, 0]
 
         if visibility_target is None and synthetic_occluder_mask is not None:
@@ -939,14 +1040,18 @@ class LandmarkDataset(Dataset):
         img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
         img = self.transform(img)
         lmk = torch.from_numpy(lmk / 255.0).float()
-        landmark_mask_t = torch.from_numpy(np.asarray(landmark_mask, dtype=np.float32)).float()
+        landmark_mask_t = torch.from_numpy(
+            np.asarray(landmark_mask, dtype=np.float32)
+        ).float()
 
         if self.generateHM is not None:
             heatmap = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
             heatmap = torch.from_numpy(heatmap).float()
             heatmap = heatmap * landmark_mask_t.reshape(-1, 1, 1)
             denom = torch.sum(heatmap, dim=(1, 2), keepdim=True).clamp_min(1e-6)
-            heatmap = torch.where(landmark_mask_t.reshape(-1, 1, 1) > 0.0, heatmap / denom, heatmap)
+            heatmap = torch.where(
+                landmark_mask_t.reshape(-1, 1, 1) > 0.0, heatmap / denom, heatmap
+            )
             if self.schema_aware_training:
                 metadata = dict(sample.get("metadata", {}))
                 metadata.update(
@@ -967,7 +1072,9 @@ class LandmarkDataset(Dataset):
                         if hasattr(visibility_target, "tolist")
                         else visibility_target,
                         "visibility_target_source": visibility_target_source,
-                        "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
+                        "hard_negative_bucket": metadata.get(
+                            "hard_negative_bucket", ""
+                        ),
                     }
                 )
                 if visibility_target is None:
@@ -982,7 +1089,9 @@ class LandmarkDataset(Dataset):
                         dtype=torch.float32,
                     )
                 if visibility_target_weight is None:
-                    visibility_target_weight_t = torch.ones_like(visibility_target_t).float()
+                    visibility_target_weight_t = torch.ones_like(
+                        visibility_target_t
+                    ).float()
                 else:
                     visibility_target_weight_t = torch.as_tensor(
                         visibility_target_weight,
@@ -992,7 +1101,9 @@ class LandmarkDataset(Dataset):
                     "image": img,
                     "target": lmk,
                     "heatmap": heatmap,
-                    "sample_weight": torch.tensor(sample["sample_weight"], dtype=torch.float32),
+                    "sample_weight": torch.tensor(
+                        sample["sample_weight"], dtype=torch.float32
+                    ),
                     "landmark_mask": landmark_mask_t,
                     "visibility_target": visibility_target_t,
                     "visibility_target_weight": visibility_target_weight_t,
@@ -1021,7 +1132,9 @@ class LandmarkDataset(Dataset):
                         if hasattr(visibility_target, "tolist")
                         else visibility_target,
                         "visibility_target_source": visibility_target_source,
-                        "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
+                        "hard_negative_bucket": metadata.get(
+                            "hard_negative_bucket", ""
+                        ),
                     }
                 )
                 return (
@@ -1032,7 +1145,13 @@ class LandmarkDataset(Dataset):
                     landmark_mask_t,
                     metadata,
                 )
-            return img, lmk, heatmap, torch.tensor(sample["sample_weight"], dtype=torch.float32), landmark_mask_t
+            return (
+                img,
+                lmk,
+                heatmap,
+                torch.tensor(sample["sample_weight"], dtype=torch.float32),
+                landmark_mask_t,
+            )
 
         if self.include_metadata:
             metadata = dict(sample.get("metadata", {}))
@@ -1056,7 +1175,9 @@ class LandmarkDataset(Dataset):
                     "visibility_target": sample.get("visibility_target").tolist()
                     if sample.get("visibility_target") is not None
                     else None,
-                    "visibility_target_source": sample.get("visibility_target_source", ""),
+                    "visibility_target_source": sample.get(
+                        "visibility_target_source", ""
+                    ),
                     "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                 }
             )

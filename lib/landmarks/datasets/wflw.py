@@ -14,7 +14,15 @@ from lib.landmarks.transforms.flip import *
 
 
 class LandmarkDataset(Dataset):
-    def __init__(self, data_root, split, preload=True, aug=True, perturbation=False, heatmap_size=0):
+    def __init__(
+        self,
+        data_root,
+        split,
+        preload=True,
+        aug=True,
+        perturbation=False,
+        heatmap_size=0,
+    ):
         super(LandmarkDataset, self).__init__()
         self.split = split
 
@@ -25,7 +33,10 @@ class LandmarkDataset(Dataset):
         if preload:
             self.data_list = self.loaditem_list(self.image_files, self.annotation)
         self.transform = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
+            [
+                transforms.ToTensor(),
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ]
         )
         self.aug_transform = None
         if aug:
@@ -48,7 +59,11 @@ class LandmarkDataset(Dataset):
                 if a != "":
                     items = a.split(" ")
                     key = items[0]
-                    lmk = np.array([float(x) for x in items[1:]]).reshape((-1, 2)).astype(np.float32)
+                    lmk = (
+                        np.array([float(x) for x in items[1:]])
+                        .reshape((-1, 2))
+                        .astype(np.float32)
+                    )
                     annotation[key] = lmk * 255
         return annotation
 
@@ -85,7 +100,9 @@ class LandmarkDataset(Dataset):
             padding = max(padding, rb[1] - img.shape[0] + margin)
         if padding > 0:
             padding = int(round(padding))
-            new_img = cv2.copyMakeBorder(img, padding, padding, padding, padding, cv2.BORDER_CONSTANT)
+            new_img = cv2.copyMakeBorder(
+                img, padding, padding, padding, padding, cv2.BORDER_CONSTANT
+            )
             lmk = lmk + padding
             lmk = lmk * img.shape[0] / new_img.shape[0]
             new_img = cv2.resize(new_img, (img.shape[0], img.shape[1]))
@@ -118,7 +135,9 @@ class LandmarkDataset(Dataset):
                 angle = 20 * i / (sampled_num - 1) - 10
                 rot = cv2.getRotationMatrix2D((128, 128), angle, 1)
                 warped_img = cv2.warpAffine(img, rot, (256, 256))
-                warped_lmks = np.transpose(rot[:2, :2] @ np.transpose(ldmks) + rot[:2, [2]])
+                warped_lmks = np.transpose(
+                    rot[:2, :2] @ np.transpose(ldmks) + rot[:2, [2]]
+                )
                 perturbed_imgs.append(torch.from_numpy(warped_img).permute((2, 0, 1)))
                 perturbed_lmks.append((torch.from_numpy(warped_lmks) / 255))
             perturbed_imgs = torch.stack(perturbed_imgs, dim=0)
@@ -141,9 +160,10 @@ class LandmarkDataset(Dataset):
 
 
 if __name__ == "__main__":
-
     heatmap_size = 32
-    dataset = LandmarkDataset("WFLW", "test", False, aug=False, heatmap_size=heatmap_size)
+    dataset = LandmarkDataset(
+        "WFLW", "test", False, aug=False, heatmap_size=heatmap_size
+    )
     d = dataset[1]
 
     img, lmk0, heatmap = d
@@ -161,11 +181,16 @@ if __name__ == "__main__":
     img = Image.fromarray(img)
     img.show()
 
-    row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij")
+    row, col = torch.meshgrid(
+        torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij"
+    )
     c = heatmap_size - 1
     row = row / c
     col = col / c
-    yy_loc, xx_loc = row.reshape((1, heatmap_size, heatmap_size)), col.reshape((1, heatmap_size, heatmap_size))
+    yy_loc, xx_loc = (
+        row.reshape((1, heatmap_size, heatmap_size)),
+        col.reshape((1, heatmap_size, heatmap_size)),
+    )
     heatmap = heatmap / torch.sum(heatmap, dim=[1, 2], keepdim=True)
     xx = (xx_loc * heatmap).sum(dim=[1, 2])
     yy = (yy_loc * heatmap).sum(dim=[1, 2])

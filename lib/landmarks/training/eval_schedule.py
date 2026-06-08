@@ -24,7 +24,9 @@ class EvalSchedule:
         return self.should_eval_model and not self.should_build_records
 
 
-def _ema_due_for_scope(scope_policy: str, *, is_full_eval: bool, final_epoch: bool) -> tuple[bool, str]:
+def _ema_due_for_scope(
+    scope_policy: str, *, is_full_eval: bool, final_epoch: bool
+) -> tuple[bool, str]:
     if scope_policy in {"", "same"}:
         return True, ""
     if scope_policy == "full-only":
@@ -56,7 +58,12 @@ def build_eval_schedule(
     should_eval_model = should_run_interval(args.eval_every, epoch, final_epoch)
     run_full_eval = should_run_interval(args.full_eval_every, epoch, final_epoch)
     forced_final_full_eval = False
-    if limited_eval and should_eval_model and epoch >= final_epoch and not run_full_eval:
+    if (
+        limited_eval
+        and should_eval_model
+        and epoch >= final_epoch
+        and not run_full_eval
+    ):
         run_full_eval = True
         forced_final_full_eval = True
 

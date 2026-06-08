@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -64,6 +63,7 @@ def eval_collate(batch):
         }
     return default_collate(batch)
 
+
 def unpack_eval_batch(batch):
     data = batch[0]
     target = batch[1]
@@ -76,6 +76,7 @@ def unpack_eval_batch(batch):
     else:
         metadata = [{} for _ in range(int(target.shape[0]))]
     return data, target, landmark_mask, metadata
+
 
 def _masked_nme_values(pred_keypoints, keypoints, landmark_mask):
     pred = pred_keypoints.detach().float().cpu().numpy()
@@ -130,6 +131,7 @@ def _masked_nme_values(pred_keypoints, keypoints, landmark_mask):
 
     return np.asarray(values, dtype=np.float32)
 
+
 def _normalizer_for_masked_target(target_i, mask_i):
     valid = target_i[mask_i]
     if valid.shape[0] <= 1:
@@ -152,6 +154,7 @@ def _normalizer_for_masked_target(target_i, mask_i):
         return span_norm
     return None
 
+
 def _visibility_target_from_meta(meta, expected_count):
     raw = meta.get("visibility_target") if isinstance(meta, dict) else None
     if raw is None:
@@ -160,6 +163,7 @@ def _visibility_target_from_meta(meta, expected_count):
     if arr.size != expected_count:
         return np.full((expected_count,), -1, dtype=np.int64)
     return arr
+
 
 def _visibility_logits_from_stage(stage_pred, head_name="landmarks_68"):
     if not isinstance(stage_pred, dict):
@@ -181,6 +185,7 @@ def _visibility_logits_from_stage(stage_pred, head_name="landmarks_68"):
     ):
         return head_payload[2]
     return None
+
 
 def _visibility_aware_records(
     pred_keypoints, keypoints, landmark_mask, metadata, visibility_logits=None
@@ -245,10 +250,10 @@ def _visibility_aware_records(
         records.append(record)
     return records
 
+
 def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
     values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
     return values[np.isfinite(values)]
-
 
 
 def _append_finite_nmes(target, values):
@@ -256,6 +261,7 @@ def _append_finite_nmes(target, values):
     if arr.size == 0:
         return
     target.extend(float(value) for value in arr[np.isfinite(arr)])
+
 
 def evaluate_landmark_model(
     model,
@@ -291,10 +297,14 @@ def evaluate_landmark_model(
                 )
                 pred_keypoints = pred_keypoints.index_select(0, indices)
                 keypoints = payload["target"].to(device, non_blocking=non_blocking)
-                landmark_mask = payload["landmark_mask"].to(device, non_blocking=non_blocking)
+                landmark_mask = payload["landmark_mask"].to(
+                    device, non_blocking=non_blocking
+                )
 
                 if build_records:
-                    visibility_logits = _visibility_logits_from_stage(stage_pred, head_name)
+                    visibility_logits = _visibility_logits_from_stage(
+                        stage_pred, head_name
+                    )
                     if visibility_logits is not None:
                         visibility_logits = visibility_logits.index_select(0, indices)
                     records.extend(
@@ -351,12 +361,15 @@ def evaluate_landmark_model(
         "record_mode": "overall_only",
     }
 
+
 def records_from_report(report):
     records = report.get("records", [])
     return records if isinstance(records, list) else []
 
+
 def landmarks_68_prediction(stage_pred):
     return landmark_prediction_for_head(stage_pred, "landmarks_68")
+
 
 def landmark_prediction_for_head(stage_pred, head_name):
     if isinstance(stage_pred, dict):
@@ -374,6 +387,7 @@ def landmark_prediction_for_head(stage_pred, head_name):
         )
     return stage_pred
 
+
 def print_eval_summary(title, report):
     metrics = report["overall"]
     print(f"\n------------ {title} ------------")
@@ -386,10 +400,12 @@ def print_eval_summary(title, report):
     print("FR_{}% : {}".format(0.10, metrics["fr_percent"]))
     print("AUC_{}: {}".format(0.10, metrics["auc"]))
 
+
 def eval_report_json_path(args):
     if args.eval_report_json:
         return args.eval_report_json
     return os.path.join(args.ckpt_folder, "eval_report.json")
+
 
 # Public trainer evaluation API.
 __all__ = [

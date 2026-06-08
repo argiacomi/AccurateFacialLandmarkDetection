@@ -26,11 +26,17 @@ EXTRACTION_MARKER = ".source.json"
 ANNOTATION_SUFFIXES = (".txt", ".pts", ".json", ".mat", ".npy", ".npz")
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
-WFLW_ANNOTATIONS_URL = "https://wywu.github.io/projects/LAB/support/WFLW_annotations.tar.gz"
+WFLW_ANNOTATIONS_URL = (
+    "https://wywu.github.io/projects/LAB/support/WFLW_annotations.tar.gz"
+)
 WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID = "1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC"
 cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/COFW_color.zip"
-MERL_RAV_LABELS_URL = "https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip"
-AFLW2000_3D_URL = "http://www.cbsr.ia.ac.cn/users/xiangyuzhu/projects/3DDFA/Database/AFLW2000-3D.zip"
+MERL_RAV_LABELS_URL = (
+    "https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip"
+)
+AFLW2000_3D_URL = (
+    "http://www.cbsr.ia.ac.cn/users/xiangyuzhu/projects/3DDFA/Database/AFLW2000-3D.zip"
+)
 AFLW2000_3D_SHA256 = "252bc35274d65ff27b6e573aa96c2f4c116ad88452cc984fb882258c0ed6e2d8"
 
 DEFAULT_DOWNLOAD_SOURCES: dict[str, dict[str, str | None]] = {
@@ -149,14 +155,22 @@ def _archive_names(spec: DatasetSourceSpec) -> tuple[str, ...]:
 
 def _archive_name(spec: DatasetSourceSpec) -> str:
     names = _archive_names(spec)
-    archive_names = [name for name in names if any(name.lower().endswith(suffix) for suffix in ARCHIVE_SUFFIXES)]
+    archive_names = [
+        name
+        for name in names
+        if any(name.lower().endswith(suffix) for suffix in ARCHIVE_SUFFIXES)
+    ]
     if archive_names:
         return archive_names[0]
     return names[0] if names else f"{spec.dataset.lower()}.zip"
 
 
 def _manual_hint(spec: DatasetSourceSpec | MultiDatasetSourceSpec) -> str:
-    parts = [item for item in (spec.manual_hint, OFFICIAL_SOURCE_NOTES.get(spec.dataset, "")) if item]
+    parts = [
+        item
+        for item in (spec.manual_hint, OFFICIAL_SOURCE_NOTES.get(spec.dataset, ""))
+        if item
+    ]
     return " " + " ".join(parts) if parts else ""
 
 
@@ -168,18 +182,31 @@ def sha256_file(path: Path) -> str:
     return sha.hexdigest()
 
 
-def verify_sha256(path: Path, expected_sha256: str | None, *, label: str = "archive") -> None:
+def verify_sha256(
+    path: Path, expected_sha256: str | None, *, label: str = "archive"
+) -> None:
     if expected_sha256 is None:
         return
     actual = sha256_file(path)
     if actual.lower() != expected_sha256.lower():
-        raise ValueError(f"{label} checksum mismatch for {path.name}: expected {expected_sha256}, got {actual}")
+        raise ValueError(
+            f"{label} checksum mismatch for {path.name}: expected {expected_sha256}, got {actual}"
+        )
 
 
-def _download_with_progress(response: T.Any, outfile: T.BinaryIO, *, label: str) -> None:
+def _download_with_progress(
+    response: T.Any, outfile: T.BinaryIO, *, label: str
+) -> None:
     length = response.headers.get("Content-Length")
     total = int(length) if length and length.isdigit() else None
-    with tqdm(total=total, desc=f"Download {label}", unit="B", unit_scale=True, unit_divisor=1024, disable=not _progress_enabled()) as bar:
+    with tqdm(
+        total=total,
+        desc=f"Download {label}",
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        disable=not _progress_enabled(),
+    ) as bar:
         while True:
             chunk = response.read(1024 * 1024)
             if not chunk:
@@ -215,7 +242,9 @@ def download(
         )
     if url is None:
         raise ValueError("Either url or google_drive_file_id must be supplied")
-    fd, tmp_name = tempfile.mkstemp(prefix=f"{destination.name}.", suffix=".part", dir=destination.parent)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{destination.name}.", suffix=".part", dir=destination.parent
+    )
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
@@ -240,7 +269,9 @@ def _is_relative_to(path: Path, base: Path) -> bool:
     return True
 
 
-def safe_zip_extractall(zf: zipfile.ZipFile, destination: str | os.PathLike[str]) -> None:
+def safe_zip_extractall(
+    zf: zipfile.ZipFile, destination: str | os.PathLike[str]
+) -> None:
     """Extract a zip file while blocking path traversal."""
     dest = Path(destination).resolve()
     members = zf.infolist()
@@ -248,11 +279,18 @@ def safe_zip_extractall(zf: zipfile.ZipFile, destination: str | os.PathLike[str]
         target = (dest / member.filename).resolve()
         if not _is_relative_to(target, dest):
             raise ValueError(f"Blocked zip path traversal member: {member.filename}")
-    for member in tqdm(members, desc=f"Extract {dest.name}", unit="file", disable=not _progress_enabled()):
+    for member in tqdm(
+        members,
+        desc=f"Extract {dest.name}",
+        unit="file",
+        disable=not _progress_enabled(),
+    ):
         zf.extract(member, dest)
 
 
-def safe_tar_extractall(tf: tarfile.TarFile, destination: str | os.PathLike[str]) -> None:
+def safe_tar_extractall(
+    tf: tarfile.TarFile, destination: str | os.PathLike[str]
+) -> None:
     """Extract a tar file while blocking path traversal and links."""
     dest = Path(destination).resolve()
     members = tf.getmembers()
@@ -262,7 +300,12 @@ def safe_tar_extractall(tf: tarfile.TarFile, destination: str | os.PathLike[str]
         target = (dest / member.name).resolve()
         if not _is_relative_to(target, dest):
             raise ValueError(f"Blocked tar path traversal member: {member.name}")
-    for member in tqdm(members, desc=f"Extract {dest.name}", unit="file", disable=not _progress_enabled()):
+    for member in tqdm(
+        members,
+        desc=f"Extract {dest.name}",
+        unit="file",
+        disable=not _progress_enabled(),
+    ):
         try:
             tf.extract(member, dest, filter="data")
         except TypeError:
@@ -307,7 +350,9 @@ def extract_archive_to_temp(archive: str | os.PathLike[str]) -> T.Iterator[Path]
 
 
 def is_archive(path: Path) -> bool:
-    return path.is_file() and any(str(path).lower().endswith(suffix) for suffix in ARCHIVE_SUFFIXES)
+    return path.is_file() and any(
+        str(path).lower().endswith(suffix) for suffix in ARCHIVE_SUFFIXES
+    )
 
 
 def extract_archive_to_cache(
@@ -324,15 +369,25 @@ def extract_archive_to_cache(
     verify_sha256(archive_path, expected_sha256, label=label)
     destination_path = Path(destination)
     if force and destination_path.exists():
-        shutil.rmtree(destination_path) if destination_path.is_dir() else destination_path.unlink()
+        shutil.rmtree(
+            destination_path
+        ) if destination_path.is_dir() else destination_path.unlink()
     if destination_path.is_dir() and any(destination_path.iterdir()):
         return destination_path
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_dir = Path(tempfile.mkdtemp(prefix=f"{destination_path.name}.", suffix=".part", dir=destination_path.parent))
+    tmp_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f"{destination_path.name}.",
+            suffix=".part",
+            dir=destination_path.parent,
+        )
+    )
     try:
         _extract_archive(archive_path, tmp_dir)
         if destination_path.exists():
-            shutil.rmtree(destination_path) if destination_path.is_dir() else destination_path.unlink()
+            shutil.rmtree(
+                destination_path
+            ) if destination_path.is_dir() else destination_path.unlink()
         os.replace(tmp_dir, destination_path)
     except Exception:
         if tmp_dir.exists():
@@ -355,12 +410,16 @@ def resolve_dataset_source(
     if source_zip is not None:
         archive = Path(source_zip)
         if not archive.is_file():
-            raise FileNotFoundError(f"{spec.dataset} source archive not found: {archive}")
+            raise FileNotFoundError(
+                f"{spec.dataset} source archive not found: {archive}"
+            )
         return archive
     if source_dir is not None:
         directory = Path(source_dir)
         if not directory.is_dir():
-            raise FileNotFoundError(f"{spec.dataset} source directory not found: {directory}")
+            raise FileNotFoundError(
+                f"{spec.dataset} source directory not found: {directory}"
+            )
         return directory
     cache_root = Path(cache_dir) / spec.cache_root_name
     for name in (*_archive_names(spec), *spec.extracted_aliases, EXTRACTED_DIR_NAME):
@@ -368,15 +427,24 @@ def resolve_dataset_source(
         if candidate.is_dir():
             return candidate
         if is_archive(candidate):
-            return extract_archive_to_cache(candidate, cache_root / EXTRACTED_DIR_NAME, expected_sha256=_effective_sha256(spec), label=f"{spec.dataset} archive")
+            return extract_archive_to_cache(
+                candidate,
+                cache_root / EXTRACTED_DIR_NAME,
+                expected_sha256=_effective_sha256(spec),
+                label=f"{spec.dataset} archive",
+            )
         if candidate.is_file():
             return candidate
     if no_download:
-        raise FileNotFoundError(f"{spec.dataset} source not found in {cache_root}. Download disabled.{_manual_hint(spec)}")
+        raise FileNotFoundError(
+            f"{spec.dataset} source not found in {cache_root}. Download disabled.{_manual_hint(spec)}"
+        )
     url = _effective_url(spec, download_url)
     expected_sha256 = None if download_url else _effective_sha256(spec)
     if url is None and spec.google_drive_file_id is None:
-        raise FileNotFoundError(f"{spec.dataset} source not found in {cache_root}.{_manual_hint(spec)}")
+        raise FileNotFoundError(
+            f"{spec.dataset} source not found in {cache_root}.{_manual_hint(spec)}"
+        )
     archive = download(
         url,
         cache_root / _archive_name(spec),
@@ -385,7 +453,13 @@ def resolve_dataset_source(
         expected_sha256=expected_sha256,
         label=f"{spec.dataset} archive",
     )
-    return extract_archive_to_cache(archive, cache_root / EXTRACTED_DIR_NAME, force=force_download, expected_sha256=expected_sha256, label=f"{spec.dataset} archive")
+    return extract_archive_to_cache(
+        archive,
+        cache_root / EXTRACTED_DIR_NAME,
+        force=force_download,
+        expected_sha256=expected_sha256,
+        label=f"{spec.dataset} archive",
+    )
 
 
 def resolve_wflw_official_source(

@@ -57,7 +57,9 @@ def test_manifest_stage_signature_controls_dataset_stage_skip(tmp_path: Path) ->
     assert pipeline._stage_complete("build_dataset_manifests", args, paths) is False
 
 
-def test_manifest_stage_signature_controls_validation_stage_skip(tmp_path: Path) -> None:
+def test_manifest_stage_signature_controls_validation_stage_skip(
+    tmp_path: Path,
+) -> None:
     args = _args(tmp_path)
     paths = _paths(args)
 
@@ -96,10 +98,16 @@ def test_train_stage_signature_controls_train_skip(tmp_path: Path) -> None:
     payload = {
         "status": "complete",
         "requested_epochs": 3,
-        "pipeline_training_signature_digest": pipeline._pipeline_training_signature_digest(args, paths),
-        "pipeline_manifest_sha256": pipeline._safe_sha256_file(Path(pipeline._pipeline_effective_manifest(args, paths))),
+        "pipeline_training_signature_digest": pipeline._pipeline_training_signature_digest(
+            args, paths
+        ),
+        "pipeline_manifest_sha256": pipeline._safe_sha256_file(
+            Path(pipeline._pipeline_effective_manifest(args, paths))
+        ),
     }
-    (ckpt_dir / "training_complete.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    (ckpt_dir / "training_complete.json").write_text(
+        json.dumps(payload) + "\n", encoding="utf-8"
+    )
     (ckpt_dir / "last_checkpoint.pt").write_bytes(b"last")
     (ckpt_dir / "best.weights.pt").write_bytes(b"weights")
     (ckpt_dir / "best_checkpoint.pt").write_bytes(b"checkpoint")

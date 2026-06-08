@@ -39,7 +39,9 @@ OCCLUSION_LABELS: frozenset[str] = frozenset(
         "mouth_or_jaw_occluded",
     }
 )
-ANCHOR_LABELS: frozenset[str] = frozenset({"normal", "frontal", "intermediate", "default", "clean"})
+ANCHOR_LABELS: frozenset[str] = frozenset(
+    {"normal", "frontal", "intermediate", "default", "clean"}
+)
 
 BUCKET_PRIORITY: dict[str, int] = {
     "profile_occlusion": 1,
@@ -90,11 +92,16 @@ def _marks_occlusion(key: str, value: T.Any) -> bool:
         return raw not in {"", "0", "false", "none", "no", "clean"}
     if isinstance(value, (list, tuple, set)):
         text = " ".join(str(item).lower() for item in value)
-        return any(token in text for token in ("occluded", "self_occluded", "externally_occluded"))
+        return any(
+            token in text
+            for token in ("occluded", "self_occluded", "externally_occluded")
+        )
     return bool(value)
 
 
-def _add_runtime_bucket_labels(labels: set[str], payload: T.Mapping[str, T.Any]) -> None:
+def _add_runtime_bucket_labels(
+    labels: set[str], payload: T.Mapping[str, T.Any]
+) -> None:
     """Add faceswap production resolver bucket labels from nested metadata."""
     for key in (
         "runtime_bucket",
@@ -190,7 +197,9 @@ def source_key(sample: T.Mapping[str, T.Any]) -> tuple[str, str]:
     return dataset, source_id
 
 
-def annotate_sample(sample: T.Mapping[str, T.Any], classification: HardNegativeClass) -> dict[str, T.Any]:
+def annotate_sample(
+    sample: T.Mapping[str, T.Any], classification: HardNegativeClass
+) -> dict[str, T.Any]:
     """Return a copy of sample annotated with hard-negative metadata."""
     out = dict(sample)
     raw_labels = out.get("conditions") or ()
@@ -199,8 +208,12 @@ def annotate_sample(sample: T.Mapping[str, T.Any], classification: HardNegativeC
     if classification.bucket == "profile_occlusion":
         labels.extend(("profile", "occlusion"))
     out["condition"] = classification.bucket
-    out["conditions"] = sorted({normalize_label(item) for item in labels if normalize_label(item)})
-    metadata = dict(out.get("metadata", {})) if isinstance(out.get("metadata"), dict) else {}
+    out["conditions"] = sorted(
+        {normalize_label(item) for item in labels if normalize_label(item)}
+    )
+    metadata = (
+        dict(out.get("metadata", {})) if isinstance(out.get("metadata"), dict) else {}
+    )
     metadata.update(
         {
             "hard_negative_bucket": classification.bucket,
@@ -218,7 +231,9 @@ def clamp_hard_negative_weight(weight: float) -> float:
     """Clamp a combined hard-negative weight into the supported range."""
     if not weight or weight != weight:
         return DEFAULT_HARD_NEGATIVE_WEIGHT
-    return float(min(max(weight, DEFAULT_HARD_NEGATIVE_WEIGHT), MAX_HARD_NEGATIVE_WEIGHT))
+    return float(
+        min(max(weight, DEFAULT_HARD_NEGATIVE_WEIGHT), MAX_HARD_NEGATIVE_WEIGHT)
+    )
 
 
 __all__ = [

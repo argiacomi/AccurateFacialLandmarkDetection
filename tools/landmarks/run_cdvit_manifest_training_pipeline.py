@@ -421,7 +421,9 @@ def _repo_file_fingerprint(relative_path: str) -> dict[str, T.Any]:
     return _path_fingerprint(CDVIT_ROOT / relative_path)
 
 
-def _dataset_source_fingerprints(args: argparse.Namespace) -> dict[str, dict[str, T.Any]]:
+def _dataset_source_fingerprints(
+    args: argparse.Namespace,
+) -> dict[str, dict[str, T.Any]]:
     paths: list[Path] = []
     paths.extend(Path(path) for path in _dataset_source_map(args).values())
     paths.extend(Path(path) for path in _dataset_source_zip_map(args).values())
@@ -556,12 +558,16 @@ def _train_cdvit_stage_request(
         "version": 2,
         "stage": "train_cdvit",
         "manifest": _pipeline_effective_manifest(args, paths),
-        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))),
+        "manifest_sha256": _safe_sha256_file(
+            Path(_pipeline_effective_manifest(args, paths))
+        ),
         "ckpt_folder": _normalize_path_for_signature(_checkpoint_dir(args, paths)),
         "config": config_dict(
             PipelineConfig.from_args(
                 args,
-                runtime_metrics_jsonl=_normalize_path_for_signature(runtime_metrics_jsonl),
+                runtime_metrics_jsonl=_normalize_path_for_signature(
+                    runtime_metrics_jsonl
+                ),
             )
         ),
         "training_compat_config": _pipeline_training_compat_config(args, paths),
@@ -668,7 +674,7 @@ def _pipeline_train_arg_values(args: argparse.Namespace, *names: str) -> list[st
                 break
             prefix = name + "="
             if token.startswith(prefix):
-                values.append(token[len(prefix):])
+                values.append(token[len(prefix) :])
                 break
     return values
 
@@ -697,7 +703,9 @@ def _pipeline_train_bool_arg(
     return bool(default)
 
 
-def _pipeline_effective_runtime_metrics_path(args: argparse.Namespace, paths: PipelinePaths) -> Path:
+def _pipeline_effective_runtime_metrics_path(
+    args: argparse.Namespace, paths: PipelinePaths
+) -> Path:
     return (
         Path(args.runtime_metrics_jsonl)
         if args.runtime_metrics_jsonl is not None
@@ -752,7 +760,9 @@ def _pipeline_effective_training_manifest_for_compat(
     return _normalize_path_for_signature(root_folder)
 
 
-def _pipeline_training_compat_config(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
+def _pipeline_training_compat_config(
+    args: argparse.Namespace, paths: PipelinePaths
+) -> dict[str, T.Any]:
     """Build the trainer checkpoint contract for a pipeline invocation.
 
     Contract keys and override semantics live in
@@ -769,11 +779,18 @@ def _pipeline_training_compat_config(args: argparse.Namespace, paths: PipelinePa
         safe_sha256_file=_safe_sha256_file,
     )
 
-def _pipeline_training_compat_digest(args: argparse.Namespace, paths: PipelinePaths) -> str:
-    return training_compat_digest_from_config(_pipeline_training_compat_config(args, paths))
+
+def _pipeline_training_compat_digest(
+    args: argparse.Namespace, paths: PipelinePaths
+) -> str:
+    return training_compat_digest_from_config(
+        _pipeline_training_compat_config(args, paths)
+    )
 
 
-def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
+def _pipeline_training_signature(
+    args: argparse.Namespace, paths: PipelinePaths
+) -> dict[str, T.Any]:
     ckpt_folder = _checkpoint_dir(args, paths)
     runtime_metrics_jsonl = _pipeline_effective_runtime_metrics_path(args, paths)
     pipeline_config = PipelineConfig.from_args(
@@ -783,7 +800,9 @@ def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths)
     return {
         "version": 2,
         "manifest": _pipeline_effective_manifest(args, paths),
-        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))),
+        "manifest_sha256": _safe_sha256_file(
+            Path(_pipeline_effective_manifest(args, paths))
+        ),
         "ckpt_folder": _normalize_path_for_signature(ckpt_folder),
         "config": config_dict(pipeline_config),
         # Backward-compatible top-level mirrors retained for existing summary readers.
@@ -802,7 +821,9 @@ def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths)
     }
 
 
-def _pipeline_training_signature_digest(args: argparse.Namespace, paths: PipelinePaths) -> str:
+def _pipeline_training_signature_digest(
+    args: argparse.Namespace, paths: PipelinePaths
+) -> str:
     payload = json.dumps(
         _pipeline_training_signature(args, paths),
         sort_keys=True,
@@ -825,14 +846,24 @@ def _write_pipeline_training_signature(
         except (OSError, json.JSONDecodeError):
             payload = {}
     payload["pipeline_training_signature"] = _pipeline_training_signature(args, paths)
-    payload["pipeline_training_signature_digest"] = _pipeline_training_signature_digest(args, paths)
+    payload["pipeline_training_signature_digest"] = _pipeline_training_signature_digest(
+        args, paths
+    )
     payload["pipeline_requested_epoch"] = int(args.epoch)
     payload["pipeline_train_command"] = command
-    payload["pipeline_manifest_sha256"] = _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths)))
-    payload["pipeline_training_compat_config"] = _pipeline_training_compat_config(args, paths)
-    payload["pipeline_training_compat_config_digest"] = _pipeline_training_compat_digest(args, paths)
+    payload["pipeline_manifest_sha256"] = _safe_sha256_file(
+        Path(_pipeline_effective_manifest(args, paths))
+    )
+    payload["pipeline_training_compat_config"] = _pipeline_training_compat_config(
+        args, paths
+    )
+    payload["pipeline_training_compat_config_digest"] = (
+        _pipeline_training_compat_digest(args, paths)
+    )
     sentinel.parent.mkdir(parents=True, exist_ok=True)
-    sentinel.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    sentinel.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _checkpoint_metadata_path(path: Path) -> Path:
@@ -850,6 +881,7 @@ def _load_checkpoint_metadata(path: Path) -> dict[str, T.Any] | None:
 
     try:
         import torch
+
         try:
             payload = torch.load(path, map_location="cpu", weights_only=False)
         except TypeError:
@@ -895,7 +927,9 @@ def _checkpoint_matches_pipeline_request(
     if sentinel.is_file():
         try:
             sentinel_payload = json.loads(sentinel.read_text(encoding="utf-8"))
-            sentinel_signature = sentinel_payload.get("pipeline_training_signature_digest")
+            sentinel_signature = sentinel_payload.get(
+                "pipeline_training_signature_digest"
+            )
         except (OSError, json.JSONDecodeError):
             sentinel_signature = None
 
@@ -904,12 +938,18 @@ def _checkpoint_matches_pipeline_request(
             False,
             "last_checkpoint.pt has already reached the requested epoch but the "
             "pipeline runtime/eval signature changed; increase --epoch, use --force "
-            "with a fresh checkpoint folder, or choose a checkpoint before the final epoch"
+            "with a fresh checkpoint folder, or choose a checkpoint before the final epoch",
         )
 
-    current_manifest_sha = _safe_sha256_file(Path(_pipeline_effective_training_manifest_for_compat(args, paths)))
+    current_manifest_sha = _safe_sha256_file(
+        Path(_pipeline_effective_training_manifest_for_compat(args, paths))
+    )
     checkpoint_manifest_sha = payload.get("manifest_sha256")
-    if current_manifest_sha and checkpoint_manifest_sha and current_manifest_sha != checkpoint_manifest_sha:
+    if (
+        current_manifest_sha
+        and checkpoint_manifest_sha
+        and current_manifest_sha != checkpoint_manifest_sha
+    ):
         return False, "checkpoint manifest SHA differs from the current manifest"
 
     expected_config = _pipeline_training_compat_config(args, paths)
@@ -1087,7 +1127,9 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
     ]
     argv.extend(["--preload", str(args.preload)])
     argv.append("--pin-memory" if args.pin_memory else "--no-pin-memory")
-    argv.append("--persistent-workers" if args.persistent_workers else "--no-persistent-workers")
+    argv.append(
+        "--persistent-workers" if args.persistent_workers else "--no-persistent-workers"
+    )
     argv.extend(["--prefetch-factor", str(args.prefetch_factor)])
     argv.extend(["--eval-batch-size", str(args.eval_batch_size)])
     argv.extend(["--eval-num-workers", str(args.eval_num_workers)])
@@ -1109,7 +1151,9 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
     if resume_path is None and args.auto_resume and not args.force:
         candidate = ckpt_folder / "last_checkpoint.pt"
         if candidate.is_file():
-            compatible, reason = _checkpoint_matches_pipeline_request(args, paths, candidate)
+            compatible, reason = _checkpoint_matches_pipeline_request(
+                args, paths, candidate
+            )
             if compatible:
                 resume_path = candidate
             else:
@@ -1180,7 +1224,9 @@ def _run_command(argv: list[str], *, cwd: Path, dry_run: bool) -> None:
     subprocess.run(argv, cwd=str(cwd), check=True)
 
 
-def _effective_manifest_build_workers(command_count: int, requested_workers: int) -> int:
+def _effective_manifest_build_workers(
+    command_count: int, requested_workers: int
+) -> int:
     if command_count <= 0:
         return 0
     requested_workers = int(requested_workers or 0)
@@ -1320,11 +1366,18 @@ def _stage_complete(stage: str, args: argparse.Namespace, paths: PipelinePaths) 
             completed_epochs = int(payload.get("requested_epochs", -1))
         except (TypeError, ValueError):
             return False
-        if payload.get("pipeline_training_signature_digest") != _pipeline_training_signature_digest(args, paths):
+        if payload.get(
+            "pipeline_training_signature_digest"
+        ) != _pipeline_training_signature_digest(args, paths):
             return False
-        if payload.get("pipeline_manifest_sha256") != _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))):
+        if payload.get("pipeline_manifest_sha256") != _safe_sha256_file(
+            Path(_pipeline_effective_manifest(args, paths))
+        ):
             return False
-        if int(args.eval_every or 0) > 0 and not (ckpt_folder / "best.weights.pt").exists():
+        if (
+            int(args.eval_every or 0) > 0
+            and not (ckpt_folder / "best.weights.pt").exists()
+        ):
             return False
         return completed_epochs >= int(args.epoch)
     raise ValueError(f"unknown stage: {stage}")
@@ -1359,7 +1412,9 @@ def _run_stage(
             outputs = _build_manifest_outputs(args, paths)
             command = commands[-1] if commands else []
             if not args.dry_run:
-                _write_stage_signature(stage, args, paths, outputs, command=command, notes=notes)
+                _write_stage_signature(
+                    stage, args, paths, outputs, command=command, notes=notes
+                )
 
         elif stage == "build_hard_negative_manifest":
             if args.manifest:
@@ -1369,7 +1424,9 @@ def _run_stage(
                 _run_command(command, cwd=CDVIT_ROOT, dry_run=args.dry_run)
             outputs = [str(paths.hard_negative_manifest)]
             if not args.dry_run and not args.manifest:
-                _write_stage_signature(stage, args, paths, outputs, command=command, notes=notes)
+                _write_stage_signature(
+                    stage, args, paths, outputs, command=command, notes=notes
+                )
 
         elif stage == "validate_cdvit_manifest":
             report = {} if args.dry_run else _validate_cdvit_manifest(args, paths)
@@ -1613,7 +1670,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-num-workers", type=int, default=0)
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--full-eval-every", type=int, default=25)
-    parser.add_argument("--eval-ema-every", "--eval-on-ema-every", dest="eval_ema_every", type=int, default=5)
+    parser.add_argument(
+        "--eval-ema-every",
+        "--eval-on-ema-every",
+        dest="eval_ema_every",
+        type=int,
+        default=5,
+    )
     parser.add_argument(
         "--eval-ema-scope",
         choices=("same", "full-only", "final-only", "off"),

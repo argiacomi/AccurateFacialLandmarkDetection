@@ -48,7 +48,9 @@ def _make_json_source(extracted: Path, *, dataset: str, count: int = 3) -> None:
                 "video_id": f"{dataset}_clip_{idx}",
             }
         )
-    (extracted / "samples.json").write_text(json.dumps({"samples": samples}), encoding="utf-8")
+    (extracted / "samples.json").write_text(
+        json.dumps({"samples": samples}), encoding="utf-8"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +111,9 @@ def test_download_url_cleans_partial_file_on_interrupt(tmp_path, monkeypatch):
     destination = tmp_path / "archives" / "file.zip"
 
     with pytest.raises(KeyboardInterrupt):
-        downloader._download_url("http://example.com/file.zip", destination, force=False)
+        downloader._download_url(
+            "http://example.com/file.zip", destination, force=False
+        )
 
     assert not destination.exists()
     assert list(destination.parent.glob("*.part")) == []
@@ -245,8 +249,13 @@ def test_jd_landmark_source_artifacts_configured():
     assert "JD-landmark training bbox" in names
 
     by_name = {s.name: s for s in jd}
-    assert by_name["JD-landmark Test_data1"].google_drive_file_id == "12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm"
-    assert by_name["JD-landmark corrected landmarks"].url.endswith("Corrected_landmark.zip")
+    assert (
+        by_name["JD-landmark Test_data1"].google_drive_file_id
+        == "12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm"
+    )
+    assert by_name["JD-landmark corrected landmarks"].url.endswith(
+        "Corrected_landmark.zip"
+    )
     assert by_name["JD-landmark training bbox"].url.endswith(
         "training_dataset_face_detection_bounding_box_v1.zip"
     )
@@ -343,7 +352,6 @@ def test_list_table_marks_manual_and_gdrive():
     assert "gdrive:12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm" in table
 
 
-
 # ---------------------------------------------------------------------------
 # prepare flow (WFLW-V via tiny fake source layout)
 # ---------------------------------------------------------------------------
@@ -376,7 +384,9 @@ def test_prepare_wflwv_flow(tmp_path, capsys):
     output_root = tmp_path / "out"
     _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=3)
 
-    args = _prepare_args(datasets=["wflw-v"], data_root=data_root, output_root=output_root)
+    args = _prepare_args(
+        datasets=["wflw-v"], data_root=data_root, output_root=output_root
+    )
     rc = prepare.prepare(args)
     assert rc == 0
 

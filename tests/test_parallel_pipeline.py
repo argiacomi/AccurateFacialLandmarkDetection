@@ -54,9 +54,9 @@ def test_parallel_map_propagates_exceptions():
 # Video frame extraction parallelism (the named bottleneck)
 # ---------------------------------------------------------------------------
 def _points68() -> np.ndarray:
-    return np.stack(
-        [np.linspace(8, 56, 68), np.linspace(8, 56, 68)], axis=1
-    ).astype(np.float32)
+    return np.stack([np.linspace(8, 56, 68), np.linspace(8, 56, 68)], axis=1).astype(
+        np.float32
+    )
 
 
 def _write_pts(path: Path, points: np.ndarray) -> None:
@@ -119,10 +119,14 @@ def test_video_build_is_deterministic_across_worker_counts(tmp_path):
         return builder.build(
             builder._parser().parse_args(
                 [
-                    "--dataset", "wflw-v",
-                    "--source-dir", str(root),
-                    "--output-dir", str(tmp_path / out),
-                    "--workers", str(workers),
+                    "--dataset",
+                    "wflw-v",
+                    "--source-dir",
+                    str(root),
+                    "--output-dir",
+                    str(tmp_path / out),
+                    "--workers",
+                    str(workers),
                 ]
             )
         )
@@ -146,13 +150,27 @@ def _build_overlay_manifest(tmp_path: Path) -> tuple[Path, Path]:
         img = np.full((128, 128, 3), 90, dtype=np.uint8)
         assert cv2.imwrite(str(source / name), img)
         samples.append(
-            {"sample_id": f"s{idx}", "image": name, "landmarks": pts, "source_schema": "2d_68"}
+            {
+                "sample_id": f"s{idx}",
+                "image": name,
+                "landmarks": pts,
+                "source_schema": "2d_68",
+            }
         )
-    (source / "samples.json").write_text(json.dumps({"samples": samples}), encoding="utf-8")
+    (source / "samples.json").write_text(
+        json.dumps({"samples": samples}), encoding="utf-8"
+    )
     out = tmp_path / "out"
     manifest = builder.build(
         builder._parser().parse_args(
-            ["--dataset", "300vw", "--source-dir", str(source), "--output-dir", str(out)]
+            [
+                "--dataset",
+                "300vw",
+                "--source-dir",
+                str(source),
+                "--output-dir",
+                str(out),
+            ]
         )
     )
     return manifest, out

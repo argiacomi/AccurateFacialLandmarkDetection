@@ -19,7 +19,10 @@ def dataloader_kwargs(args: T.Any, *, eval_loader: bool = False) -> dict[str, T.
     if workers > 0:
         kwargs["persistent_workers"] = bool(args.persistent_workers)
         kwargs["worker_init_fn"] = seed_worker
-        if getattr(args, "prefetch_factor", None) is not None and int(args.prefetch_factor) > 0:
+        if (
+            getattr(args, "prefetch_factor", None) is not None
+            and int(args.prefetch_factor) > 0
+        ):
             kwargs["prefetch_factor"] = int(args.prefetch_factor)
     return kwargs
 
@@ -70,7 +73,9 @@ def seed_worker(worker_id: int) -> None:
 
 
 def normalize_runtime_args(args: T.Any) -> T.Any:
-    if getattr(args, "restore_rng", False) and getattr(args, "persistent_workers", False):
+    if getattr(args, "restore_rng", False) and getattr(
+        args, "persistent_workers", False
+    ):
         print(
             "warning: --restore-rng requires epoch-reseeded training workers; "
             "forcing --no-persistent-workers for checkpoint-compatible replay",

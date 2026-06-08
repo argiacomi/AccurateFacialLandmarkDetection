@@ -65,7 +65,9 @@ def _nested_value(sample: T.Mapping[str, T.Any], key: str) -> T.Any:
     source = sample.get("source") if isinstance(sample.get("source"), dict) else {}
     if source.get(key) not in (None, ""):
         return source.get(key)
-    metadata = sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
+    metadata = (
+        sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
+    )
     return metadata.get(key)
 
 
@@ -78,13 +80,22 @@ def trainable_head_for_schema(schema: str | object) -> str:
 
 def split_safe_id_for_sample(sample: T.Mapping[str, T.Any]) -> str:
     """Return the stable identity used for train/test leakage checks."""
-    for key in ("split_safe_id", "subject_id", "session_id", "video_id", "archive_id", "image_id"):
+    for key in (
+        "split_safe_id",
+        "subject_id",
+        "session_id",
+        "video_id",
+        "archive_id",
+        "image_id",
+    ):
         value = _nested_value(sample, key)
         if value not in (None, ""):
             return str(value)
     source = sample.get("source") if isinstance(sample.get("source"), dict) else {}
     dataset = str(sample.get("dataset") or source.get("dataset") or "unknown")
-    source_id = str(source.get("source_id") or sample.get("sample_id") or sample.get("image") or "")
+    source_id = str(
+        source.get("source_id") or sample.get("sample_id") or sample.get("image") or ""
+    )
     digest = hashlib.sha256(f"{dataset}|{source_id}".encode("utf-8")).hexdigest()[:16]
     return f"{dataset}:{digest}"
 
@@ -102,7 +113,9 @@ def schema_counts(samples: T.Iterable[T.Mapping[str, T.Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def manifest_summary(samples: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, dict[str, int]]:
+def manifest_summary(
+    samples: T.Sequence[T.Mapping[str, T.Any]],
+) -> dict[str, dict[str, int]]:
     counters: dict[str, Counter[str]] = {
         "datasets": Counter(),
         "splits": Counter(),
@@ -113,7 +126,9 @@ def manifest_summary(samples: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, di
         "projection_status": Counter(),
     }
     for sample in samples:
-        metadata = sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
+        metadata = (
+            sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
+        )
         source = sample.get("source") if isinstance(sample.get("source"), dict) else {}
         mapping_audit = sample.get("mapping_audit")
         if not isinstance(mapping_audit, dict):
@@ -124,10 +139,21 @@ def manifest_summary(samples: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, di
         if not isinstance(projection_audit, dict):
             projection_audit = {}
 
-        dataset = sample.get("dataset") or source.get("dataset") or metadata.get("dataset") or "unknown"
+        dataset = (
+            sample.get("dataset")
+            or source.get("dataset")
+            or metadata.get("dataset")
+            or "unknown"
+        )
         split = sample.get("split") or metadata.get("split") or "unspecified"
-        source_schema = sample.get("source_schema") or metadata.get("source_schema") or "unknown"
-        target_schema = sample.get("target_schema") or metadata.get("target_schema") or source_schema
+        source_schema = (
+            sample.get("source_schema") or metadata.get("source_schema") or "unknown"
+        )
+        target_schema = (
+            sample.get("target_schema")
+            or metadata.get("target_schema")
+            or source_schema
+        )
         head = sample.get("head_name") or metadata.get("head_name") or "unknown"
         bucket = (
             sample.get("hard_negative_bucket")
@@ -144,7 +170,12 @@ def manifest_summary(samples: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, di
             ("target_schemas", target_schema),
             ("heads", head),
             ("hard_negative_buckets", bucket),
-            ("projection_status", projection_audit.get("status") or mapping_audit.get("status") or "unknown"),
+            (
+                "projection_status",
+                projection_audit.get("status")
+                or mapping_audit.get("status")
+                or "unknown",
+            ),
         ):
             counters[key][_label(value)] += 1
 

@@ -92,22 +92,35 @@ def build_training_loaders(
     if args.domain_balanced_sampling and schema_manifest:
         train_sampler = DomainBalancedBatchSampler(
             train_dataset.samples,
-            bucket_targets=parse_target_spec(args.bucket_targets, DEFAULT_BUCKET_TARGETS),
-            dataset_targets=parse_target_spec_for_kind(args.dataset_targets, kind="dataset"),
-            schema_targets=parse_target_spec_for_kind(args.schema_targets, kind="schema"),
+            bucket_targets=parse_target_spec(
+                args.bucket_targets, DEFAULT_BUCKET_TARGETS
+            ),
+            dataset_targets=parse_target_spec_for_kind(
+                args.dataset_targets, kind="dataset"
+            ),
+            schema_targets=parse_target_spec_for_kind(
+                args.schema_targets, kind="schema"
+            ),
             batch_size=args.batch_size,
             seed=args.seed,
             rank=rank,
             world_size=world_size,
             auto_balance_datasets=bool(getattr(args, "auto_dataset_balancing", True)),
-            auto_balance_schemas=bool(getattr(args, "auto_schema_balancing", True) and schema_aware_training),
+            auto_balance_schemas=bool(
+                getattr(args, "auto_schema_balancing", True) and schema_aware_training
+            ),
         )
         if rank == 0:
-            print(f"domain-balanced sampler targets: {train_sampler.resolved_targets()}", flush=True)
+            print(
+                f"domain-balanced sampler targets: {train_sampler.resolved_targets()}",
+                flush=True,
+            )
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
             batch_sampler=train_sampler,
-            collate_fn=schema_aware_collate if schema_aware_training else legacy_domain_balanced_collate,
+            collate_fn=schema_aware_collate
+            if schema_aware_training
+            else legacy_domain_balanced_collate,
             **dataloader_kwargs(args),
         )
     else:

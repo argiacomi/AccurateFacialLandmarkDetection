@@ -50,7 +50,11 @@ class Res50PredictBasisCoefficients(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -769,7 +773,13 @@ class NetAttnStage(nn.Module):
 
 class NetAttnStageResSkip(nn.Module):
     def __init__(
-        self, lmk_num=98, Attn=lambda: SA2SA1(32, 256), nstack=4, heatmap_size=32, max_depth=256, increase=False
+        self,
+        lmk_num=98,
+        Attn=lambda: SA2SA1(32, 256),
+        nstack=4,
+        heatmap_size=32,
+        max_depth=256,
+        increase=False,
     ):
         super(NetAttnStageResSkip, self).__init__()
         if heatmap_size == 16:
@@ -789,16 +799,41 @@ class NetAttnStageResSkip(nn.Module):
         merge = []
         for i in range(nstack):
             block = nn.Sequential(
-                CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1),
+                CoordConvTh(
+                    heatmap_size,
+                    heatmap_size,
+                    True,
+                    False,
+                    max_depth,
+                    max_depth,
+                    kernel_size=3,
+                    padding=1,
+                ),
                 Attn(),
-                CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1),
+                CoordConvTh(
+                    heatmap_size,
+                    heatmap_size,
+                    True,
+                    False,
+                    max_depth,
+                    max_depth,
+                    kernel_size=3,
+                    padding=1,
+                ),
                 Attn(),
             )
             if increase:
                 for j in range(i):
                     block.append(
                         CoordConvTh(
-                            heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1
+                            heatmap_size,
+                            heatmap_size,
+                            True,
+                            False,
+                            max_depth,
+                            max_depth,
+                            kernel_size=3,
+                            padding=1,
                         )
                     )
                     block.append(Attn())
@@ -815,7 +850,11 @@ class NetAttnStageResSkip(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1131,7 +1170,9 @@ class NetAttnStageDW(nn.Module):
     DW: dynamic weighted
     """
 
-    def __init__(self, lmk_num=98, Attn=SA2SA1, nstack=4, heatmap_size=32, max_depth=256):
+    def __init__(
+        self, lmk_num=98, Attn=SA2SA1, nstack=4, heatmap_size=32, max_depth=256
+    ):
         super(NetAttnStageDW, self).__init__()
         if heatmap_size == 16:
             self.pre = HeadingNet([32, 64, 128, max_depth])
@@ -1151,9 +1192,27 @@ class NetAttnStageDW(nn.Module):
         weighed = []
         for i in range(nstack):
             block = nn.Sequential(
-                CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1),
+                CoordConvTh(
+                    heatmap_size,
+                    heatmap_size,
+                    True,
+                    False,
+                    max_depth,
+                    max_depth,
+                    kernel_size=3,
+                    padding=1,
+                ),
                 Attn(heatmap_size, max_depth),
-                CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1),
+                CoordConvTh(
+                    heatmap_size,
+                    heatmap_size,
+                    True,
+                    False,
+                    max_depth,
+                    max_depth,
+                    kernel_size=3,
+                    padding=1,
+                ),
                 Attn(heatmap_size, max_depth),
             )
             stages.append(block)
@@ -1178,7 +1237,11 @@ class NetAttnStageDW(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1244,7 +1307,11 @@ class NetAttn64SA2(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1265,7 +1332,14 @@ class NetAttn64SA2(nn.Module):
 
 
 class UNetStage(nn.Module):
-    def __init__(self, lmk_num=98, nstack=4, heatmap_size=32, max_depth=256, feature_extractor=None):
+    def __init__(
+        self,
+        lmk_num=98,
+        nstack=4,
+        heatmap_size=32,
+        max_depth=256,
+        feature_extractor=None,
+    ):
         super(UNetStage, self).__init__()
         if feature_extractor is None:
             if heatmap_size == 16:
@@ -1300,7 +1374,11 @@ class UNetStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1357,7 +1435,6 @@ class UNetStage(nn.Module):
             return self.forward_res(img)
 
 
-
 class VitAttnStage(nn.Module):
     def __init__(
         self,
@@ -1389,14 +1466,29 @@ class VitAttnStage(nn.Module):
 
         stages = []
         output_layers = []
-        schema_output_layers = {name: [] for name in self.schema_heads if name != "landmarks_68"}
-        visibility_output_layers = {name: [] for name in self.schema_heads} if self.visibility_heads_enabled else {}
+        schema_output_layers = {
+            name: [] for name in self.schema_heads if name != "landmarks_68"
+        }
+        visibility_output_layers = (
+            {name: [] for name in self.schema_heads}
+            if self.visibility_heads_enabled
+            else {}
+        )
         merge = []
         for i in range(nstack):
             vit_list = []
             for num in range(num_dvit_per_pred_blk):
                 vit_list.append(
-                    CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1)
+                    CoordConvTh(
+                        heatmap_size,
+                        heatmap_size,
+                        True,
+                        False,
+                        max_depth,
+                        max_depth,
+                        kernel_size=3,
+                        padding=1,
+                    )
                 )
                 vit_list.append(Attn())
             block = nn.Sequential(*vit_list)
@@ -1413,19 +1505,30 @@ class VitAttnStage(nn.Module):
                 schema_output_layers[name].append(nn.Conv2d(max_depth, point_count, 1))
             for name, point_count in visibility_output_layers.items():
                 point_count = int(self.schema_heads[name])
-                visibility_output_layers[name].append(nn.Conv2d(max_depth, point_count, 1))
+                visibility_output_layers[name].append(
+                    nn.Conv2d(max_depth, point_count, 1)
+                )
             if i > 0:
                 merge.append(DoubleConv(max_depth * 2, max_depth, max_depth))
         self.stages = nn.ModuleList(stages)
         self.output_layers = nn.ModuleList(output_layers)
         self.schema_output_layers = nn.ModuleDict(
-            {name: nn.ModuleList(layers) for name, layers in schema_output_layers.items()}
+            {
+                name: nn.ModuleList(layers)
+                for name, layers in schema_output_layers.items()
+            }
         )
         self.visibility_output_layers = nn.ModuleDict(
-            {name: nn.ModuleList(layers) for name, layers in visibility_output_layers.items()}
+            {
+                name: nn.ModuleList(layers)
+                for name, layers in visibility_output_layers.items()
+            }
         )
         self.auxiliary_output_layers = nn.ModuleDict(
-            {name: nn.Linear(max_depth, int(classes)) for name, classes in self.auxiliary_heads.items()}
+            {
+                name: nn.Linear(max_depth, int(classes))
+                for name, classes in self.auxiliary_heads.items()
+            }
         )
         self.merge = nn.ModuleList(merge)
 
@@ -1434,7 +1537,11 @@ class VitAttnStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1457,11 +1564,18 @@ class VitAttnStage(nn.Module):
             head_hm = layers[stage_index](feature)
             out[name] = (self.GetCoord(head_hm), head_hm)
         for name, layers in self.visibility_output_layers.items():
-            visibility_key = "visibility_profile39" if name == "profile39" else "visibility_" + name.split("_", 1)[1]
+            visibility_key = (
+                "visibility_profile39"
+                if name == "profile39"
+                else "visibility_" + name.split("_", 1)[1]
+            )
             out[visibility_key] = layers[stage_index](feature).mean(dim=(2, 3))
         if self.auxiliary_output_layers:
             pooled = F.adaptive_avg_pool2d(feature, 1).flatten(1)
-            out["_aux"] = {name: layer(pooled) for name, layer in self.auxiliary_output_layers.items()}
+            out["_aux"] = {
+                name: layer(pooled)
+                for name, layer in self.auxiliary_output_layers.items()
+            }
         return out
 
     def forward_res(self, img):
@@ -1526,7 +1640,7 @@ class VitAttnStage(nn.Module):
                 res.append(self._prediction_for_stage(i, hm_0))
 
             return res
-        elif connect_type ==0:
+        elif connect_type == 0:
             return self.forward_NoConnection(img)
         elif connect_type == 2:
             return self.forward_res(img)
@@ -1704,9 +1818,27 @@ class VitAttnStageResSkip(nn.Module):
         merge = []
         for i in range(nstack):
             block = nn.Sequential(
-                CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1),
+                CoordConvTh(
+                    heatmap_size,
+                    heatmap_size,
+                    True,
+                    False,
+                    max_depth,
+                    max_depth,
+                    kernel_size=3,
+                    padding=1,
+                ),
                 Attn(),
-                CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1),
+                CoordConvTh(
+                    heatmap_size,
+                    heatmap_size,
+                    True,
+                    False,
+                    max_depth,
+                    max_depth,
+                    kernel_size=3,
+                    padding=1,
+                ),
                 Attn(),
             )
             stages.append(block)
@@ -1722,7 +1854,11 @@ class VitAttnStageResSkip(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -1877,17 +2013,17 @@ if __name__ == "__main__":
 
     max_depth = 160
     net = VitAttnStage(
-            lmk_num=98,
-            nstack=4,
-            Attn=lambda: SA2SA1_2(32, max_depth, win_size=2),
-            # Attn=lambda: Hourglass(3, args.max_depth),
-            # Attn = lambda :SelfAttention_block2(args.max_depth),
-            # Attn = lambda :SelfAttention2_block(args.heatmap_size, args.max_depth,args.max_depth),
-            # Attn = lambda :UNet([256, 256, 256]),
-            # Attn=lambda: nn.Sequential(RCCAModule(256, 256, 256), RCCAModule(256, 256, 256)),
-            heatmap_size=32,
-            max_depth=max_depth,
-            backbone_net= lambda max_depth: HeadingNet([32, 64, max_depth])
-        ).cuda()
+        lmk_num=98,
+        nstack=4,
+        Attn=lambda: SA2SA1_2(32, max_depth, win_size=2),
+        # Attn=lambda: Hourglass(3, args.max_depth),
+        # Attn = lambda :SelfAttention_block2(args.max_depth),
+        # Attn = lambda :SelfAttention2_block(args.heatmap_size, args.max_depth,args.max_depth),
+        # Attn = lambda :UNet([256, 256, 256]),
+        # Attn=lambda: nn.Sequential(RCCAModule(256, 256, 256), RCCAModule(256, 256, 256)),
+        heatmap_size=32,
+        max_depth=max_depth,
+        backbone_net=lambda max_depth: HeadingNet([32, 64, max_depth]),
+    ).cuda()
 
     print(count_parameters(net) / 1024 / 1024)

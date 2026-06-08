@@ -98,13 +98,17 @@ def _pipeline_args(tmp_path: Path, *extra: str):
 
 
 def test_dataloader_kwargs_disable_prefetch_without_workers(tmp_path):
-    args = _trainer_args(tmp_path, num_workers=0, persistent_workers=True, prefetch_factor=2)
+    args = _trainer_args(
+        tmp_path, num_workers=0, persistent_workers=True, prefetch_factor=2
+    )
     kwargs = train._dataloader_kwargs(args)
     assert kwargs == {"num_workers": 0, "pin_memory": True}
 
 
 def test_dataloader_kwargs_wires_worker_flags(tmp_path):
-    args = _trainer_args(tmp_path, num_workers=2, persistent_workers=True, prefetch_factor=4)
+    args = _trainer_args(
+        tmp_path, num_workers=2, persistent_workers=True, prefetch_factor=4
+    )
     kwargs = train._dataloader_kwargs(args)
     assert kwargs["num_workers"] == 2
     assert kwargs["pin_memory"] is True
@@ -182,7 +186,9 @@ def test_epoch_timing_payload_keys_and_metrics_append(tmp_path):
         {
             "event": "epoch_timing",
             "epoch": 0,
-            "timing": {key: round(float(value), 6) for key, value in sorted(final.items())},
+            "timing": {
+                key: round(float(value), 6) for key, value in sorted(final.items())
+            },
         },
     )
     payload = json.loads(metrics_path.read_text(encoding="utf-8").strip())
@@ -286,7 +292,9 @@ def test_pipeline_auto_resume_accepts_matching_full_checkpoint_metadata(tmp_path
     }
     Path(str(ckpt) + ".meta.json").write_text(json.dumps(meta) + "\n", encoding="utf-8")
 
-    compatible, reason = pipeline._checkpoint_matches_pipeline_request(args, paths, ckpt)
+    compatible, reason = pipeline._checkpoint_matches_pipeline_request(
+        args, paths, ckpt
+    )
     assert compatible, reason
 
 
@@ -306,7 +314,9 @@ def test_pipeline_auto_resume_rejects_changed_contract(tmp_path):
     }
     Path(str(ckpt) + ".meta.json").write_text(json.dumps(meta) + "\n", encoding="utf-8")
 
-    compatible, reason = pipeline._checkpoint_matches_pipeline_request(args, paths, ckpt)
+    compatible, reason = pipeline._checkpoint_matches_pipeline_request(
+        args, paths, ckpt
+    )
     assert compatible is False
     assert "training contract" in reason
 
@@ -343,7 +353,9 @@ def test_pipeline_train_command_forwards_runtime_flags(tmp_path):
     assert "--no-save-last-checkpoint" in command
     assert "--synchronize-runtime-timing" in command
     assert "--no-synchronize-runtime-timing" not in command
-    assert command[command.index("--runtime-metrics-jsonl") + 1].endswith("metrics.jsonl")
+    assert command[command.index("--runtime-metrics-jsonl") + 1].endswith(
+        "metrics.jsonl"
+    )
 
 
 def test_pipeline_compat_config_honors_train_arg_override(tmp_path):

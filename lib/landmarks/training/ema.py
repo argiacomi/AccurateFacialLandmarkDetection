@@ -25,14 +25,18 @@ class EMA(nn.Module):
     def update_parameters(self, model: nn.Module):
         if self.n_iter > self.warm_up_iter:
             if (self.n_iter - self.warm_up_iter) % self.ema_steps == 0:
-                for p_swa, p_model in zip(self.model.state_dict().values(), model.state_dict().values()):
+                for p_swa, p_model in zip(
+                    self.model.state_dict().values(), model.state_dict().values()
+                ):
                     if p_model.requires_grad:
                         p = self.decay * p_swa + (1 - self.decay) * p_model.detach()
                         p_swa.copy_(p)
                     else:
                         p_swa.copy_(p_model.detach())
         elif self.n_iter == self.warm_up_iter:
-            for p_swa, p_model in zip(self.model.state_dict().values(), model.state_dict().values()):
+            for p_swa, p_model in zip(
+                self.model.state_dict().values(), model.state_dict().values()
+            ):
                 p_swa.copy_(p_model.detach())
 
         self.n_iter = self.n_iter + 1

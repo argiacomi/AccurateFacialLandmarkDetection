@@ -133,7 +133,9 @@ def _flatten_pipeline_config(config: T.Mapping[str, T.Any]) -> dict[str, T.Any]:
                     else:
                         extra_args.append(str(section_value))
                 else:
-                    extra_args.extend(_hard_negative_extra_arg(section_key, section_value))
+                    extra_args.extend(
+                        _hard_negative_extra_arg(section_key, section_value)
+                    )
             if extra_args:
                 existing = flat.get("hard_negative_arg", [])
                 if not isinstance(existing, list):
@@ -146,7 +148,9 @@ def _flatten_pipeline_config(config: T.Mapping[str, T.Any]) -> dict[str, T.Any]:
     return flat
 
 
-def _parser_action_by_dest(parser: argparse.ArgumentParser) -> dict[str, argparse.Action]:
+def _parser_action_by_dest(
+    parser: argparse.ArgumentParser,
+) -> dict[str, argparse.Action]:
     actions: dict[str, argparse.Action] = {}
     for action in parser._actions:  # argparse exposes no public dest index.
         if not action.option_strings or action.dest in {"help", argparse.SUPPRESS}:

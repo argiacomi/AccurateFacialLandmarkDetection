@@ -49,18 +49,21 @@ def _backbone_for_heatmap_size(heatmap_size: int, max_depth: int):
 
 def _load_state_dict(path: Path, device: torch.device) -> dict[str, torch.Tensor]:
     state = torch.load(path, map_location=device)
-    if isinstance(state, dict) and "state_dict" in state and isinstance(state["state_dict"], dict):
+    if (
+        isinstance(state, dict)
+        and "state_dict" in state
+        and isinstance(state["state_dict"], dict)
+    ):
         state = state["state_dict"]
     if not isinstance(state, dict):
         raise ValueError(f"checkpoint {path} did not contain a state dict")
-    return {
-        key.removeprefix("module."): value
-        for key, value in state.items()
-    }
+    return {key.removeprefix("module."): value for key, value in state.items()}
 
 
 def _build_model(args: argparse.Namespace, device: torch.device) -> VitAttnStage:
-    backbone_net, win_size = _backbone_for_heatmap_size(args.heatmap_size, args.max_depth)
+    backbone_net, win_size = _backbone_for_heatmap_size(
+        args.heatmap_size, args.max_depth
+    )
     model = VitAttnStage(
         lmk_num=68,
         nstack=args.nstack,
@@ -70,7 +73,9 @@ def _build_model(args: argparse.Namespace, device: torch.device) -> VitAttnStage
         backbone_net=backbone_net,
         schema_heads=DEFAULT_SCHEMA_HEADS if args.schema_aware_model else None,
     ).to(device)
-    missing, unexpected = model.load_state_dict(_load_state_dict(args.checkpoint, device), strict=False)
+    missing, unexpected = model.load_state_dict(
+        _load_state_dict(args.checkpoint, device), strict=False
+    )
     if missing:
         print(f"checkpoint missing keys ignored: {len(missing)}")
     if unexpected:
@@ -100,9 +105,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--eval-mode", choices=EVAL_MODES, default="random_hash")
-    parser.add_argument("--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash")
-    parser.add_argument("--respect-declared-splits", action="store_true", help="Alias for --split-policy declared.")
-    parser.add_argument("--ignore-declared-splits", action="store_true", help="Alias for --split-policy random_hash.")
+    parser.add_argument(
+        "--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash"
+    )
+    parser.add_argument(
+        "--respect-declared-splits",
+        action="store_true",
+        help="Alias for --split-policy declared.",
+    )
+    parser.add_argument(
+        "--ignore-declared-splits",
+        action="store_true",
+        help="Alias for --split-policy random_hash.",
+    )
     parser.add_argument(
         "--heldout-dataset",
         action="append",
@@ -126,7 +141,9 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Evaluate manifest samples through native schema heads. Defaults to --schema-aware-model.",
     )
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
     return parser
 
 
@@ -134,7 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if args.respect_declared_splits and args.ignore_declared_splits:
-        parser.error("pass only one of --respect-declared-splits or --ignore-declared-splits")
+        parser.error(
+            "pass only one of --respect-declared-splits or --ignore-declared-splits"
+        )
     if args.respect_declared_splits:
         args.split_policy = "declared"
     if args.ignore_declared_splits:
@@ -178,7 +197,12 @@ def main(argv: list[str] | None = None) -> int:
         write_eval_records_jsonl(args.eval_records_jsonl, records)
     if args.eval_records_csv:
         write_eval_records_csv(args.eval_records_csv, records)
-    print(json.dumps({"eval_report_json": args.eval_report_json, "record_count": len(records)}, sort_keys=True))
+    print(
+        json.dumps(
+            {"eval_report_json": args.eval_report_json, "record_count": len(records)},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

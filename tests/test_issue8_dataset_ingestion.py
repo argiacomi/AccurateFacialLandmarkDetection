@@ -135,7 +135,9 @@ def test_helen_annotations_require_300w_cache(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="HELEN dense annotations require a 300W Helen image cache"):
+    with pytest.raises(
+        ValueError, match="HELEN dense annotations require a 300W Helen image cache"
+    ):
         builder.build(
             _builder_args(
                 "--dataset",
@@ -211,7 +213,9 @@ def test_jd_landmark_test_data_parser_pairs_jpg_txt_images_and_rects(tmp_path):
     _write_image(source / "Test_data1" / "picture" / "sample.jpg")
     _write_counted_txt(source / "Test_data1" / "landmark" / "sample.jpg.txt", points)
     (source / "Test_data1" / "rect").mkdir(parents=True)
-    (source / "Test_data1" / "rect" / "sample.jpg.rect").write_text("10 20 210 220\n", encoding="utf-8")
+    (source / "Test_data1" / "rect" / "sample.jpg.rect").write_text(
+        "10 20 210 220\n", encoding="utf-8"
+    )
 
     manifest_path = builder.build(
         _builder_args(
@@ -233,7 +237,9 @@ def test_jd_landmark_test_data_parser_pairs_jpg_txt_images_and_rects(tmp_path):
     assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
 
 
-def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_corrected_override(tmp_path):
+def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_corrected_override(
+    tmp_path,
+):
     source = tmp_path / "source"
     cache = tmp_path / "300w" / "data" / "300w" / "300w"
     output = tmp_path / "out"
@@ -249,7 +255,9 @@ def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_correct
         / "training_dataset_face_detection_bounding_box"
     )
     bbox_dir.mkdir(parents=True)
-    (bbox_dir / "AFW_134212_1_0.jpg.rect").write_text("10 20 210 220\n", encoding="utf-8")
+    (bbox_dir / "AFW_134212_1_0.jpg.rect").write_text(
+        "10 20 210 220\n", encoding="utf-8"
+    )
 
     manifest_path = builder.build(
         _builder_args(
@@ -274,14 +282,18 @@ def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_correct
     assert sample["metadata"]["resolved_image_source"] == "300w_cache"
     assert sample["metadata"]["resolved_300w_image_path"] == str(image_path.resolve())
     assert sample["metadata"]["base_subset"] == "afw"
-    assert sample["metadata"]["corrected_annotation"].endswith("Corrected_landmark/AFW_134212_1_0.jpg.txt")
+    assert sample["metadata"]["corrected_annotation"].endswith(
+        "Corrected_landmark/AFW_134212_1_0.jpg.txt"
+    )
     assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
 
 
 def test_jd_landmark_corrected_annotations_require_300w_cache_images(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "out"
-    _write_counted_txt(source / "Corrected_landmark" / "AFW_134212_1_0.jpg.txt", _points(106))
+    _write_counted_txt(
+        source / "Corrected_landmark" / "AFW_134212_1_0.jpg.txt", _points(106)
+    )
 
     with pytest.raises(ValueError, match="JD-landmark requires a 300W image cache"):
         builder.build(
@@ -300,7 +312,9 @@ def test_jd_landmark_rejects_ambiguous_300w_cache_matches(tmp_path):
     source = tmp_path / "source"
     cache = tmp_path / "300w" / "data" / "300w" / "300w"
     output = tmp_path / "out"
-    _write_counted_txt(source / "Corrected_landmark" / "LFPW_image_test_0237_0.jpg.txt", _points(106))
+    _write_counted_txt(
+        source / "Corrected_landmark" / "LFPW_image_test_0237_0.jpg.txt", _points(106)
+    )
     _write_image(cache / "lfpw" / "trainset" / "image_0237.png")
     _write_image(cache / "lfpw" / "testset" / "image_0237.png")
 
@@ -374,7 +388,9 @@ def test_lapa_parser_rejects_non_106_point_landmarks(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "out"
     _write_image(source / "LaPa" / "train" / "images" / "sample.jpg")
-    _write_counted_txt(source / "LaPa" / "train" / "landmarks" / "sample.txt", _points(68))
+    _write_counted_txt(
+        source / "LaPa" / "train" / "landmarks" / "sample.txt", _points(68)
+    )
 
     with pytest.raises(ValueError, match="no LaPa native release samples built"):
         builder.build(
@@ -490,7 +506,9 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
         refs[0, 0] = image_ds.ref
         handle.create_dataset("phisTr", data=phis)
-        handle.create_dataset("bboxesTr", data=np.asarray([[1], [2], [30], [40]], dtype=np.float32))
+        handle.create_dataset(
+            "bboxesTr", data=np.asarray([[1], [2], [30], [40]], dtype=np.float32)
+        )
 
     manifest_path = builder.build(
         _builder_args(
@@ -566,7 +584,9 @@ def test_overlay_uses_small_uniform_visibility_colors(tmp_path):
     visibility = [True, True, True, False, True]
 
     out = tmp_path / "overlay.png"
-    builder._draw_manifest_overlay(image_path, landmarks_path, out, visibility=visibility)
+    builder._draw_manifest_overlay(
+        image_path, landmarks_path, out, visibility=visibility
+    )
     drawn = cv2.imread(str(out), cv2.IMREAD_COLOR)  # BGR
 
     def is_green(px):
@@ -592,8 +612,20 @@ def test_overlay_uses_small_uniform_visibility_colors(tmp_path):
 @pytest.mark.parametrize(
     ("dataset", "release_dir", "list_name", "image_rel", "expected_identity"),
     [
-        ("xm2vts", "XM2VTS", "xm2vts_train.txt", "image/161_4_1.jpg", ("161", "4", "1")),
-        ("frgc", "FRGC", "frgc_train.txt", "image/02463d453.jpg", ("02463", "d", "453")),
+        (
+            "xm2vts",
+            "XM2VTS",
+            "xm2vts_train.txt",
+            "image/161_4_1.jpg",
+            ("161", "4", "1"),
+        ),
+        (
+            "frgc",
+            "FRGC",
+            "frgc_train.txt",
+            "image/02463d453.jpg",
+            ("02463", "d", "453"),
+        ),
     ],
 )
 def test_xm2vts_and_frgc_use_native_menpo_train_list_builder(
@@ -609,7 +641,9 @@ def test_xm2vts_and_frgc_use_native_menpo_train_list_builder(
     release = source / release_dir
     points = _points(68)
     _write_image(release / image_rel)
-    (release / list_name).write_text(_menpo_list_row(image_rel, points) + "\n", encoding="utf-8")
+    (release / list_name).write_text(
+        _menpo_list_row(image_rel, points) + "\n", encoding="utf-8"
+    )
 
     manifest_path = builder.build(
         _builder_args(

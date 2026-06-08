@@ -7,7 +7,12 @@ import types
 import pytest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "landmarks" / "tune_training_hyperparameters.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "tools"
+    / "landmarks"
+    / "tune_training_hyperparameters.py"
+)
 spec = importlib.util.spec_from_file_location("tune_training_hyperparameters", SCRIPT)
 tuner = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -49,18 +54,24 @@ def test_objective_score_penalizes_overall_and_frontal_regressions():
 
 
 def test_generate_star_bracket_keeps_non_star_values_fixed(tmp_path):
-    args = tuner.build_arg_parser().parse_args([
-        "--output-dir",
-        str(tmp_path),
-        "--star-bracket",
-        "0,0.01",
-    ])
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--star-bracket",
+            "0,0.01",
+        ]
+    )
     base = tuner.baseline_config(args)
     runs = tuner.generate_star_bracket(args, base)
 
     assert [run["params"]["star_loss_weight"] for run in runs] == [0.0, 0.01]
-    assert {run["params"]["schema_consistency_weight"] for run in runs} == {base["schema_consistency_weight"]}
-    assert {run["params"]["auxiliary_loss_weight"] for run in runs} == {base["auxiliary_loss_weight"]}
+    assert {run["params"]["schema_consistency_weight"] for run in runs} == {
+        base["schema_consistency_weight"]
+    }
+    assert {run["params"]["auxiliary_loss_weight"] for run in runs} == {
+        base["auxiliary_loss_weight"]
+    }
     assert {run["params"]["lr"] for run in runs} == {base["lr"]}
 
 
@@ -83,12 +94,14 @@ def test_rank_results_and_multiseed_aggregation():
 
 
 def test_lr_sweep_freezes_loss_weights(tmp_path):
-    args = tuner.build_arg_parser().parse_args([
-        "--output-dir",
-        str(tmp_path),
-        "--lr-sweep",
-        "0.0001,0.0002",
-    ])
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--lr-sweep",
+            "0.0001,0.0002",
+        ]
+    )
     selected = {
         "star_loss_weight": 0.01,
         "schema_consistency_weight": 0.04,
@@ -106,12 +119,14 @@ def test_lr_sweep_freezes_loss_weights(tmp_path):
 
 
 def test_build_train_command_uses_eval_report_and_runtime_jsonl(tmp_path):
-    args = tuner.build_arg_parser().parse_args([
-        "--output-dir",
-        str(tmp_path),
-        "--train-command",
-        "python TrainHeatmapStageFP16.py",
-    ])
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--train-command",
+            "python TrainHeatmapStageFP16.py",
+        ]
+    )
     run = tuner.make_run_config(
         stage="baseline",
         params=tuner.baseline_config(args),
@@ -123,7 +138,9 @@ def test_build_train_command_uses_eval_report_and_runtime_jsonl(tmp_path):
     assert "--eval-report-json" in command
     assert command[command.index("--eval-report-json") + 1].endswith("metrics.json")
     assert "--runtime-metrics-jsonl" in command
-    assert command[command.index("--runtime-metrics-jsonl") + 1].endswith("runtime_metrics.jsonl")
+    assert command[command.index("--runtime-metrics-jsonl") + 1].endswith(
+        "runtime_metrics.jsonl"
+    )
     assert "--runtime-metrics-path" not in command
 
 
@@ -235,7 +252,9 @@ class _FakeOptuna:
     def __init__(self):
         self.study = _FakeStudy()
         self.created_kwargs = None
-        self.samplers = types.SimpleNamespace(TPESampler=lambda seed=None: {"seed": seed})
+        self.samplers = types.SimpleNamespace(
+            TPESampler=lambda seed=None: {"seed": seed}
+        )
         self.pruners = types.SimpleNamespace(
             MedianPruner=lambda n_startup_trials=0, n_warmup_steps=0: {
                 "startup": n_startup_trials,
@@ -250,13 +269,19 @@ class _FakeOptuna:
 
 def test_generate_loss_search_uses_optuna_study_when_available(tmp_path, monkeypatch):
     fake_optuna = _FakeOptuna()
-    monkeypatch.setattr(tuner.importlib, "import_module", lambda name: fake_optuna if name == "optuna" else None)
-    args = tuner.build_arg_parser().parse_args([
-        "--output-dir",
-        str(tmp_path),
-        "--optuna-trials",
-        "2",
-    ])
+    monkeypatch.setattr(
+        tuner.importlib,
+        "import_module",
+        lambda name: fake_optuna if name == "optuna" else None,
+    )
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--optuna-trials",
+            "2",
+        ]
+    )
 
     runs = tuner.generate_loss_search(args, tuner.baseline_config(args))
 
@@ -277,13 +302,15 @@ def test_require_optuna_fails_when_optuna_missing(tmp_path, monkeypatch):
         raise AssertionError(name)
 
     monkeypatch.setattr(tuner.importlib, "import_module", missing_import)
-    args = tuner.build_arg_parser().parse_args([
-        "--output-dir",
-        str(tmp_path),
-        "--optuna-trials",
-        "1",
-        "--require-optuna",
-    ])
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--optuna-trials",
+            "1",
+            "--require-optuna",
+        ]
+    )
 
     with pytest.raises(tuner.TuningError, match="Optuna is required"):
         tuner.generate_loss_search(args, tuner.baseline_config(args))
@@ -291,7 +318,11 @@ def test_require_optuna_fails_when_optuna_missing(tmp_path, monkeypatch):
 
 def test_tell_optuna_result_reports_completed_score(tmp_path, monkeypatch):
     fake_optuna = _FakeOptuna()
-    monkeypatch.setattr(tuner.importlib, "import_module", lambda name: fake_optuna if name == "optuna" else None)
+    monkeypatch.setattr(
+        tuner.importlib,
+        "import_module",
+        lambda name: fake_optuna if name == "optuna" else None,
+    )
     args = tuner.build_arg_parser().parse_args(["--output-dir", str(tmp_path)])
     result = {
         "stage": "optuna_loss_search",
@@ -306,27 +337,29 @@ def test_tell_optuna_result_reports_completed_score(tmp_path, monkeypatch):
 
 
 def test_pipeline_mock_metrics_writes_recommendation_and_run_artifacts(tmp_path):
-    args = tuner.build_arg_parser().parse_args([
-        "--output-dir",
-        str(tmp_path),
-        "--dry-run",
-        "--mock-metrics",
-        "--disable-optuna",
-        "--star-bracket",
-        "0,0.01",
-        "--optuna-trials",
-        "2",
-        "--loss-top-k",
-        "1",
-        "--loss-finalist-seeds",
-        "17,29",
-        "--lr-sweep",
-        "0.0001,0.0002",
-        "--lr-top-k",
-        "1",
-        "--lr-finalist-seeds",
-        "17,29",
-    ])
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--dry-run",
+            "--mock-metrics",
+            "--disable-optuna",
+            "--star-bracket",
+            "0,0.01",
+            "--optuna-trials",
+            "2",
+            "--loss-top-k",
+            "1",
+            "--loss-finalist-seeds",
+            "17,29",
+            "--lr-sweep",
+            "0.0001,0.0002",
+            "--lr-top-k",
+            "1",
+            "--lr-finalist-seeds",
+            "17,29",
+        ]
+    )
 
     recommendation = tuner.run_pipeline(args)
 
@@ -342,22 +375,24 @@ def test_pipeline_mock_metrics_writes_recommendation_and_run_artifacts(tmp_path)
 
 
 def test_plain_dry_run_generates_commands_without_metrics(tmp_path, capsys):
-    args = tuner.build_arg_parser().parse_args([
-        "--output-dir",
-        str(tmp_path),
-        "--dry-run",
-        "--disable-optuna",
-        "--star-bracket",
-        "0",
-        "--optuna-trials",
-        "0",
-        "--loss-top-k",
-        "1",
-        "--lr-sweep",
-        "0.0001",
-        "--lr-top-k",
-        "1",
-    ])
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--dry-run",
+            "--disable-optuna",
+            "--star-bracket",
+            "0",
+            "--optuna-trials",
+            "0",
+            "--loss-top-k",
+            "1",
+            "--lr-sweep",
+            "0.0001",
+            "--lr-top-k",
+            "1",
+        ]
+    )
 
     recommendation = tuner.run_pipeline(args)
     captured = capsys.readouterr()

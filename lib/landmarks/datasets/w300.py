@@ -15,7 +15,7 @@ from lib.landmarks.transforms.flip import *
 
 
 class CacCoeff:
-    def __init__(self, mat_file='PCA/300w.mat', used_dim=80):
+    def __init__(self, mat_file="PCA/300w.mat", used_dim=80):
         mat = loadmat(mat_file)
         self.mu = mat["mu"].reshape(-1)
 
@@ -34,8 +34,11 @@ class CacCoeff:
         pos = self.basisT.transpose() @ coeff + self.mu
         return pos.reshape((-1, 2))
 
+
 class LandmarkDataset(Dataset):
-    def __init__(self, data_root, split, preload=True, aug=True, heatmap_size=0, perturbation=0):
+    def __init__(
+        self, data_root, split, preload=True, aug=True, heatmap_size=0, perturbation=0
+    ):
         super(LandmarkDataset, self).__init__()
         self.split = split
 
@@ -47,7 +50,10 @@ class LandmarkDataset(Dataset):
         if preload:
             self.data_list = self.loaditem_list(self.image_files, self.annotation_files)
         self.transform = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
+            [
+                transforms.ToTensor(),
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ]
         )
         self.aug_transform = None
         if aug:
@@ -59,27 +65,30 @@ class LandmarkDataset(Dataset):
             self.generateHM = GenerateHeatmap(heatmap_size)
 
         self.calc_coeff = CacCoeff()
+
     def loaddata(self, root_dir, split):
         img_files = []
         npy_files = []
         if split == "train":
             dir = os.path.join(root_dir, "train_data")
-            D300W_tmp_train = ["afw_processed", "hellen_trainset", "lfpw_trainset"]
             D300W_tmp2_train = ["afw", "helen/trainset", "lfpw/trainset"]
             for sub_name in D300W_tmp2_train:
                 sub_folder = os.path.join(dir, sub_name)
-                sub_img_files = glob(os.path.join(sub_folder, "*.jpg")) + glob(os.path.join(sub_folder, "*.png"))
+                sub_img_files = glob(os.path.join(sub_folder, "*.jpg")) + glob(
+                    os.path.join(sub_folder, "*.png")
+                )
                 for img_file in sub_img_files:
                     npy_file = img_file[:-4] + ".npy"
                     img_files.append(img_file)
                     npy_files.append(npy_file)
         elif split == "test":
             dir = os.path.join(root_dir, "test_data")
-            D300W_tmp_test = ["hellen_testset", "ibug_processed", "lfpw_testset"]
             D300W_tmp2_test = ["helen/testset", "ibug", "lfpw/testset"]
             for sub_name in D300W_tmp2_test:
                 sub_folder = os.path.join(dir, sub_name)
-                sub_img_files = glob(os.path.join(sub_folder, "*.jpg")) + glob(os.path.join(sub_folder, "*.png"))
+                sub_img_files = glob(os.path.join(sub_folder, "*.jpg")) + glob(
+                    os.path.join(sub_folder, "*.png")
+                )
                 for img_file in sub_img_files:
                     npy_file = img_file[:-4] + ".npy"
                     img_files.append(img_file)
@@ -118,7 +127,9 @@ class LandmarkDataset(Dataset):
             padding = max(padding, rb[1] - img.shape[0] + margin)
         if padding > 0:
             padding = int(round(padding))
-            new_img = cv2.copyMakeBorder(img, padding, padding, padding, padding, cv2.BORDER_CONSTANT)
+            new_img = cv2.copyMakeBorder(
+                img, padding, padding, padding, padding, cv2.BORDER_CONSTANT
+            )
             lmk = lmk + padding
             lmk = lmk * img.shape[0] / new_img.shape[0]
             new_img = cv2.resize(new_img, (img.shape[0], img.shape[1]))
@@ -128,7 +139,9 @@ class LandmarkDataset(Dataset):
 
     def __getitem__(self, item):
         if self.data_list is None:
-            img, lmk = self.loaditem(self.image_files[item], self.annotation_files[item])
+            img, lmk = self.loaditem(
+                self.image_files[item], self.annotation_files[item]
+            )
         else:
             img, lmk = self.data_list[item]
 
@@ -160,7 +173,6 @@ class LandmarkDataset(Dataset):
 
 
 if __name__ == "__main__":
-
     heatmap_size = 32
     dataset = LandmarkDataset(
         "300W",
@@ -192,16 +204,30 @@ if __name__ == "__main__":
         p = lmk[i]
         x, y = round(float(p[0])), round(float(p[1]))
         cv2.circle(img, (x, y), 1, (0, 225, 255), -1)
-        cv2.putText(img, str(i), (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            str(i),
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.2,
+            (255, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
     img = Image.fromarray(img)
     img.show()
     # print(lmk)
 
-    row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij")
+    row, col = torch.meshgrid(
+        torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij"
+    )
     c = heatmap_size - 1
     row = row / c
     col = col / c
-    yy_loc, xx_loc = row.reshape((1, heatmap_size, heatmap_size)), col.reshape((1, heatmap_size, heatmap_size))
+    yy_loc, xx_loc = (
+        row.reshape((1, heatmap_size, heatmap_size)),
+        col.reshape((1, heatmap_size, heatmap_size)),
+    )
 
     xx = (xx_loc * heatmap).sum(dim=[1, 2])
     yy = (yy_loc * heatmap).sum(dim=[1, 2])

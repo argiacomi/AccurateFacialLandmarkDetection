@@ -8,17 +8,23 @@ class DoubleConv(nn.Module):
         if not mid_channel:
             mid_channel = out_channel
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channel, mid_channel, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(
+                in_channel, mid_channel, kernel_size=3, stride=1, padding=1, bias=False
+            ),
             nn.BatchNorm2d(mid_channel),
             nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(
+                mid_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False
+            ),
             nn.BatchNorm2d(out_channel),
         )
 
         self.short_cut = (
             nn.Identity()
             if in_channel == out_channel
-            else nn.Conv2d(in_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False)
+            else nn.Conv2d(
+                in_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False
+            )
         )
 
         self.relu = nn.ReLU(inplace=True)
@@ -44,7 +50,9 @@ class Down(nn.Module):
 class Up(nn.Module):
     def __init__(self, in_channel, dual_channel):
         super(Up, self).__init__()
-        self.up_sample = nn.ConvTranspose2d(in_channel, dual_channel, kernel_size=2, stride=2)
+        self.up_sample = nn.ConvTranspose2d(
+            in_channel, dual_channel, kernel_size=2, stride=2
+        )
         self.conv = DoubleConv(dual_channel * 2, dual_channel)
 
     def forward(self, pre_level, dual_level):

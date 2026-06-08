@@ -36,14 +36,24 @@ def _resolve(base: Path, value: T.Any) -> Path:
 
 def _schema(entry: T.Mapping[str, T.Any], points: np.ndarray) -> str:
     metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
-    raw = entry.get("source_schema") or metadata.get("source_schema") or f"2d_{points.shape[0]}"
+    raw = (
+        entry.get("source_schema")
+        or metadata.get("source_schema")
+        or f"2d_{points.shape[0]}"
+    )
     try:
         return canonicalize_schema(raw)
     except ValueError:
         return str(raw)
 
 
-def _draw_points(image_path: Path, points: np.ndarray, output_path: Path, *, projected: np.ndarray | None = None) -> None:
+def _draw_points(
+    image_path: Path,
+    points: np.ndarray,
+    output_path: Path,
+    *,
+    projected: np.ndarray | None = None,
+) -> None:
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         image = np.full((256, 256, 3), 255, dtype=np.uint8)
@@ -64,7 +74,9 @@ def _draw_points(image_path: Path, points: np.ndarray, output_path: Path, *, pro
     cv2.imwrite(str(output_path), image)
 
 
-def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, write_overlays: bool = False) -> Path:
+def audit_schema_mapping(
+    manifest: Path, output_dir: Path, *, limit: int = 25, write_overlays: bool = False
+) -> Path:
     entries = _load_manifest(manifest)
     base = manifest.parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -75,7 +87,9 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
         "map_98_to_68_size": int(MAP_98_TO_68.size),
         "projection_to_68": {},
         "flip_map_audit": {
-            "schemas_without_verified_flip_maps": sorted(SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS),
+            "schemas_without_verified_flip_maps": sorted(
+                SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS
+            ),
             "unverified_identity_flip_maps": [],
             "schemas_seen_without_verified_flip_maps": [],
         },
@@ -102,13 +116,17 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
             projection_audit["status"],
             0,
         )
-        report["projection_to_68"][projection_audit["status"]] = int(projection_status_counts) + 1
+        report["projection_to_68"][projection_audit["status"]] = (
+            int(projection_status_counts) + 1
+        )
         try:
             verified_flip_map = has_verified_flip_map(schema)
         except ValueError:
             verified_flip_map = False
         if not verified_flip_map:
-            seen_without_verified = report["flip_map_audit"]["schemas_seen_without_verified_flip_maps"]
+            seen_without_verified = report["flip_map_audit"][
+                "schemas_seen_without_verified_flip_maps"
+            ]
             if schema not in seen_without_verified:
                 seen_without_verified.append(schema)
         sample_id = str(entry.get("sample_id") or entry.get("id") or index)
@@ -124,13 +142,17 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
             item["projected_68_count"] = int(projected.shape[0])
         if write_overlays and image_value and emitted < limit:
             overlay_path = output_dir / "overlays" / f"{schema}_{emitted:04d}.jpg"
-            _draw_points(_resolve(base, image_value), points, overlay_path, projected=projected)
+            _draw_points(
+                _resolve(base, image_value), points, overlay_path, projected=projected
+            )
             item["overlay"] = str(overlay_path)
             emitted += 1
         report["samples"].append(item)
 
     output_path = output_dir / "schema_mapping_audit.json"
-    output_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    output_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
+    )
     return output_path
 
 

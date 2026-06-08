@@ -233,6 +233,7 @@ class Vit2(nn.Module):
     def forward(self, x):
         return self.body(x)
 
+
 class MixBlkC(nn.Module):
     def __init__(self, in_channel, win_size=4):
         super(MixBlkC, self).__init__()
@@ -269,6 +270,7 @@ class Vit3(nn.Module):
 
     def forward(self, x):
         return self.body(x)
+
 
 class VitRegressor(nn.Module):
     def __init__(self, lmd_num=98):

@@ -72,11 +72,15 @@ class PrepStats:
     symlinked_images: int = 0
     duplicate_aflw_stems: int = 0
     aflw_image_count: int = 0
-    visibility_counts: Counter[str] = field(default_factory=lambda: Counter({
-        "visible": 0,
-        "externally_occluded": 0,
-        "self_occluded": 0,
-    }))
+    visibility_counts: Counter[str] = field(
+        default_factory=lambda: Counter(
+            {
+                "visible": 0,
+                "externally_occluded": 0,
+                "self_occluded": 0,
+            }
+        )
+    )
 
     def to_json(self) -> dict[str, T.Any]:
         return {
@@ -139,7 +143,9 @@ def _label_files(root: Path) -> list[Path]:
 def _parse_pts_signed(path: Path) -> np.ndarray:
     rows: list[tuple[float, float]] = []
     inside = False
-    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1
+    ):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -148,7 +154,9 @@ def _parse_pts_signed(path: Path) -> np.ndarray:
             continue
         if stripped.startswith("}"):
             break
-        if not inside and any(stripped.lower().startswith(prefix) for prefix in ("version", "n_points")):
+        if not inside and any(
+            stripped.lower().startswith(prefix) for prefix in ("version", "n_points")
+        ):
             continue
         parts = stripped.split()
         if len(parts) < 2:
@@ -156,13 +164,19 @@ def _parse_pts_signed(path: Path) -> np.ndarray:
         try:
             rows.append((float(parts[0]), float(parts[1])))
         except ValueError as err:
-            raise ValueError(f"invalid MERL-RAV .pts row {line_number} in {path}: {stripped}") from err
+            raise ValueError(
+                f"invalid MERL-RAV .pts row {line_number} in {path}: {stripped}"
+            ) from err
     if len(rows) != 68:
-        raise ValueError(f"MERL-RAV .pts file must contain 68 points, got {len(rows)}: {path}")
+        raise ValueError(
+            f"MERL-RAV .pts file must contain 68 points, got {len(rows)}: {path}"
+        )
     return np.asarray(rows, dtype=np.float32)
 
 
-def _visibility_and_points(signed_xy: np.ndarray) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+def _visibility_and_points(
+    signed_xy: np.ndarray,
+) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
     visibility: list[str] = []
     points = np.zeros(signed_xy.shape, dtype=np.float32)
     coordinate_valid = np.zeros((signed_xy.shape[0],), dtype=bool)
@@ -200,7 +214,9 @@ def _find_aflw_root(root: Path) -> Path:
     candidates = sorted(path.parent for path in root.rglob("flickr") if path.is_dir())
     if candidates:
         return candidates[0]
-    raise FileNotFoundError(f"AFLW root not found below {root}. Expected a directory containing flickr/.")
+    raise FileNotFoundError(
+        f"AFLW root not found below {root}. Expected a directory containing flickr/."
+    )
 
 
 def _build_aflw_image_index(aflw_root: Path, stats: PrepStats) -> dict[str, Path]:
@@ -235,7 +251,11 @@ def _read_image_size(path: Path) -> tuple[int, int] | None:
     return height, width
 
 
-def _in_image_mask(points_xy: np.ndarray, coordinate_valid: np.ndarray, image_hw: tuple[int, int] | None) -> np.ndarray:
+def _in_image_mask(
+    points_xy: np.ndarray,
+    coordinate_valid: np.ndarray,
+    image_hw: tuple[int, int] | None,
+) -> np.ndarray:
     if image_hw is None:
         return coordinate_valid.copy()
     height, width = image_hw
@@ -248,7 +268,9 @@ def _in_image_mask(points_xy: np.ndarray, coordinate_valid: np.ndarray, image_hw
     )
 
 
-def _bbox_from_valid(points: np.ndarray, mask: np.ndarray, image_hw: tuple[int, int] | None) -> list[float]:
+def _bbox_from_valid(
+    points: np.ndarray, mask: np.ndarray, image_hw: tuple[int, int] | None
+) -> list[float]:
     if mask.any():
         valid = points[mask]
         left, top = np.min(valid, axis=0)
@@ -260,7 +282,9 @@ def _bbox_from_valid(points: np.ndarray, mask: np.ndarray, image_hw: tuple[int, 
     return [0.0, 0.0, 1.0, 1.0]
 
 
-def _materialize_image(image_path: Path, output_dir: Path, aflw_root: Path, *, mode: str, stats: PrepStats) -> str:
+def _materialize_image(
+    image_path: Path, output_dir: Path, aflw_root: Path, *, mode: str, stats: PrepStats
+) -> str:
     if mode == "absolute":
         return str(image_path.resolve())
 
@@ -283,7 +307,9 @@ def _materialize_image(image_path: Path, output_dir: Path, aflw_root: Path, *, m
     raise ValueError(f"unsupported --image-mode {mode!r}")
 
 
-def _normalizer(points: np.ndarray, mask: np.ndarray, image_hw: tuple[int, int] | None) -> float:
+def _normalizer(
+    points: np.ndarray, mask: np.ndarray, image_hw: tuple[int, int] | None
+) -> float:
     if mask.any():
         bbox = _bbox_from_valid(points, mask, image_hw)
         return max(float(bbox[2] - bbox[0]), float(bbox[3] - bbox[1]), 1.0)
@@ -305,7 +331,9 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
 
     stats = PrepStats()
     image_index = _build_aflw_image_index(aflw_root, stats)
-    requested_splits = {item.strip().lower() for item in args.splits.split(",") if item.strip()}
+    requested_splits = {
+        item.strip().lower() for item in args.splits.split(",") if item.strip()
+    }
     manifest_samples: list[dict[str, T.Any]] = []
     skipped_examples: list[dict[str, str]] = []
 
@@ -315,7 +343,11 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
 
     for annotation in label_files:
         stats.labels += 1
-        relative_annotation = annotation.relative_to(label_root) if annotation.is_relative_to(label_root) else annotation.relative_to(merl_root)
+        relative_annotation = (
+            annotation.relative_to(label_root)
+            if annotation.is_relative_to(label_root)
+            else annotation.relative_to(merl_root)
+        )
         split = _split_from_annotation_path(relative_annotation)
         if split is not None and requested_splits and split not in requested_splits:
             stats.skipped_split += 1
@@ -324,20 +356,34 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
         stem = _source_stem(annotation.stem)
         if stem is None:
             stats.skipped_no_image_token += 1
-            skipped_examples.append({"annotation": str(relative_annotation), "reason": "missing imageNNNNN token"})
+            skipped_examples.append(
+                {
+                    "annotation": str(relative_annotation),
+                    "reason": "missing imageNNNNN token",
+                }
+            )
             continue
         image_path = image_index.get(stem)
         if image_path is None:
             stats.skipped_no_image += 1
-            skipped_examples.append({"annotation": str(relative_annotation), "reason": f"AFLW image not found for {stem}"})
+            skipped_examples.append(
+                {
+                    "annotation": str(relative_annotation),
+                    "reason": f"AFLW image not found for {stem}",
+                }
+            )
             continue
 
         try:
             signed = _parse_pts_signed(annotation)
-            visibility_labels, points, coordinate_valid, score_visible = _visibility_and_points(signed)
+            visibility_labels, points, coordinate_valid, score_visible = (
+                _visibility_and_points(signed)
+            )
         except Exception as err:  # noqa: BLE001
             stats.skipped_bad_label += 1
-            skipped_examples.append({"annotation": str(relative_annotation), "reason": str(err)})
+            skipped_examples.append(
+                {"annotation": str(relative_annotation), "reason": str(err)}
+            )
             continue
 
         image_hw = None
@@ -346,25 +392,39 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
                 image_hw = _read_image_size(image_path)
             except Exception as err:  # noqa: BLE001
                 stats.skipped_bad_image += 1
-                skipped_examples.append({"annotation": str(relative_annotation), "reason": f"bad image: {err}"})
+                skipped_examples.append(
+                    {
+                        "annotation": str(relative_annotation),
+                        "reason": f"bad image: {err}",
+                    }
+                )
                 continue
 
         in_image_mask = _in_image_mask(points, coordinate_valid, image_hw)
         score_visibility = in_image_mask & score_visible
         if not any(score_visibility):
             stats.skipped_no_visible_landmarks += 1
-            skipped_examples.append({"annotation": str(relative_annotation), "reason": "no score-visible landmarks"})
+            skipped_examples.append(
+                {
+                    "annotation": str(relative_annotation),
+                    "reason": "no score-visible landmarks",
+                }
+            )
             continue
 
         condition_labels = _labels_from_path(relative_annotation)
         if any(value != "visible" for value in visibility_labels):
             condition_labels = tuple(dict.fromkeys((*condition_labels, "occlusion")))
 
-        sample_base_id = relative_annotation.with_suffix("").as_posix().replace("/", "_")
+        sample_base_id = (
+            relative_annotation.with_suffix("").as_posix().replace("/", "_")
+        )
         sample_id = safe_id(f"{sample_base_id}__{image_path.stem}")
         landmark_rel = Path("landmarks") / f"{sample_id}.npy"
         _write_landmarks(output_dir / landmark_rel, points)
-        image_value = _materialize_image(image_path, output_dir, aflw_root, mode=args.image_mode, stats=stats)
+        image_value = _materialize_image(
+            image_path, output_dir, aflw_root, mode=args.image_mode, stats=stats
+        )
 
         for item in visibility_labels:
             stats.visibility_counts[item] += 1
@@ -380,8 +440,12 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
             "image_id": relative_or_absolute(image_path, aflw_root),
             "aflw_image_source": "aflw_native",
             "visibility": visibility_labels,
-            "self_occluded_count": sum(1 for value in visibility_labels if value == "self_occluded"),
-            "externally_occluded_count": sum(1 for value in visibility_labels if value == "externally_occluded"),
+            "self_occluded_count": sum(
+                1 for value in visibility_labels if value == "self_occluded"
+            ),
+            "externally_occluded_count": sum(
+                1 for value in visibility_labels if value == "externally_occluded"
+            ),
             "landmark_source_valid_mask": source_valid_mask,
             "landmark_in_image_mask": coordinate_valid_mask,
             "landmark_coordinate_valid_mask": coordinate_valid_mask,
@@ -442,23 +506,57 @@ def prepare(args: argparse.Namespace) -> tuple[Path, dict[str, T.Any]]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--merl-rav-root", required=True, help="Extracted MERL-RAV labels root or MERL-RAV_dataset-master directory.")
-    parser.add_argument("--aflw-root", required=True, help="Extracted AFLW root or parent containing aflw/flickr.")
-    parser.add_argument("--output-dir", required=True, help="Output organized source directory.")
-    parser.add_argument("--splits", default="train,test", help="Comma-separated split filter: train,test or empty for all.")
-    parser.add_argument("--image-mode", choices=("absolute", "symlink", "copy"), default="absolute", help="How manifest image paths should be materialized.")
-    parser.add_argument("--skip-image-validation", action="store_true", help="Do not open images with Pillow for size/bounds checks.")
-    parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
+    parser.add_argument(
+        "--merl-rav-root",
+        required=True,
+        help="Extracted MERL-RAV labels root or MERL-RAV_dataset-master directory.",
+    )
+    parser.add_argument(
+        "--aflw-root",
+        required=True,
+        help="Extracted AFLW root or parent containing aflw/flickr.",
+    )
+    parser.add_argument(
+        "--output-dir", required=True, help="Output organized source directory."
+    )
+    parser.add_argument(
+        "--splits",
+        default="train,test",
+        help="Comma-separated split filter: train,test or empty for all.",
+    )
+    parser.add_argument(
+        "--image-mode",
+        choices=("absolute", "symlink", "copy"),
+        default="absolute",
+        help="How manifest image paths should be materialized.",
+    )
+    parser.add_argument(
+        "--skip-image-validation",
+        action="store_true",
+        help="Do not open images with Pillow for size/bounds checks.",
+    )
+    parser.add_argument(
+        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s:%(name)s:%(message)s")
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
     manifest, audit = prepare(args)
     print(f"Wrote MERL-RAV/AFLW organized manifest: {manifest}")
     print(f"Wrote audit: {audit['audit']}")
-    print(json.dumps({key: value for key, value in audit.items() if key != "audit"}, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {key: value for key, value in audit.items() if key != "audit"},
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

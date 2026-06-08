@@ -145,14 +145,27 @@ def create_or_load_optuna_study(args: argparse.Namespace):
     return study
 
 
-def config_id(stage: str, params: dict[str, T.Any], *, seed: int | None = None, index: int | None = None) -> str:
+def config_id(
+    stage: str,
+    params: dict[str, T.Any],
+    *,
+    seed: int | None = None,
+    index: int | None = None,
+) -> str:
     parts = [stage]
     if index is not None:
         parts.append(f"{index:03d}")
-    for key in ("star_loss_weight", "schema_consistency_weight", "auxiliary_loss_weight", "lr"):
+    for key in (
+        "star_loss_weight",
+        "schema_consistency_weight",
+        "auxiliary_loss_weight",
+        "lr",
+    ):
         if key in params:
             text = f"{float(params[key]):.6g}".replace("-", "m").replace(".", "p")
-            parts.append(f"{key.replace('_loss_weight', '').replace('schema_consistency', 'consistency')}={text}")
+            parts.append(
+                f"{key.replace('_loss_weight', '').replace('schema_consistency', 'consistency')}={text}"
+            )
     if seed is not None:
         parts.append(f"seed={int(seed)}")
     return "__".join(parts)
@@ -187,7 +200,9 @@ def make_run_config(
     }
 
 
-def build_train_command(args: argparse.Namespace, run: dict[str, T.Any], run_dir: Path) -> list[str]:
+def build_train_command(
+    args: argparse.Namespace, run: dict[str, T.Any], run_dir: Path
+) -> list[str]:
     params = dict(run["params"])
     metrics_path = run_dir / args.metrics_file_name
     cmd = shlex.split(args.train_command)
@@ -226,7 +241,9 @@ def select_metric(metrics: dict[str, T.Any], keys: tuple[str, ...]) -> float | N
     return None
 
 
-def _metric_from_group(report: dict[str, T.Any], group_name: str, labels: tuple[str, ...]) -> float | None:
+def _metric_from_group(
+    report: dict[str, T.Any], group_name: str, labels: tuple[str, ...]
+) -> float | None:
     group = report.get(group_name)
     if not isinstance(group, dict):
         return None
@@ -248,7 +265,11 @@ def normalize_metrics(raw_metrics: dict[str, T.Any]) -> dict[str, T.Any]:
     """
 
     metrics = dict(raw_metrics)
-    report = raw_metrics.get("model") if isinstance(raw_metrics.get("model"), dict) else raw_metrics
+    report = (
+        raw_metrics.get("model")
+        if isinstance(raw_metrics.get("model"), dict)
+        else raw_metrics
+    )
     if not isinstance(report, dict):
         return metrics
 
@@ -302,13 +323,19 @@ def objective_score(
     hard_slice_weight: float = 0.25,
     regression_penalty_weight: float = 2.0,
     max_easy_regression: float = 0.0,
-    required_slices: tuple[str, ...] = ("profile_nme", "occlusion_nme", "profile_occlusion_nme"),
+    required_slices: tuple[str, ...] = (
+        "profile_nme",
+        "occlusion_nme",
+        "profile_occlusion_nme",
+    ),
 ) -> tuple[float, dict[str, T.Any]]:
     """Return lower-is-better score plus diagnostics."""
 
     overall = select_metric(metrics, OVERALL_KEYS)
     if overall is None:
-        raise TuningError(f"metrics missing heldout/overall 68 NME; tried {OVERALL_KEYS}")
+        raise TuningError(
+            f"metrics missing heldout/overall 68 NME; tried {OVERALL_KEYS}"
+        )
 
     score = overall
     used_slices: dict[str, float] = {}
@@ -365,11 +392,17 @@ def summarize_seed_group(results: list[dict[str, T.Any]]) -> dict[str, T.Any]:
     }
 
 
-def rank_results(results: list[dict[str, T.Any]], *, top_k: int) -> list[dict[str, T.Any]]:
-    return sorted(results, key=lambda item: (float(item["score"]), item["id"]))[: int(top_k)]
+def rank_results(
+    results: list[dict[str, T.Any]], *, top_k: int
+) -> list[dict[str, T.Any]]:
+    return sorted(results, key=lambda item: (float(item["score"]), item["id"]))[
+        : int(top_k)
+    ]
 
 
-def aggregate_by_parent(results: list[dict[str, T.Any]], *, top_k: int) -> list[dict[str, T.Any]]:
+def aggregate_by_parent(
+    results: list[dict[str, T.Any]], *, top_k: int
+) -> list[dict[str, T.Any]]:
     grouped: dict[str, list[dict[str, T.Any]]] = {}
     for result in results:
         parent = str(result.get("parent_trial") or result["id"])
@@ -380,15 +413,30 @@ def aggregate_by_parent(results: list[dict[str, T.Any]], *, top_k: int) -> list[
         summary["parent_trial"] = parent
         summary["params"] = dict(items[0]["params"])
         summaries.append(summary)
-    return sorted(summaries, key=lambda item: (float(item["mean_score"]), float(item["std_score"]), item["parent_trial"]))[: int(top_k)]
+    return sorted(
+        summaries,
+        key=lambda item: (
+            float(item["mean_score"]),
+            float(item["std_score"]),
+            item["parent_trial"],
+        ),
+    )[: int(top_k)]
 
 
-def generate_star_bracket(args: argparse.Namespace, base: dict[str, float]) -> list[dict[str, T.Any]]:
+def generate_star_bracket(
+    args: argparse.Namespace, base: dict[str, float]
+) -> list[dict[str, T.Any]]:
     out = []
-    for index, star_weight in enumerate(_split_csv_floats(args.star_bracket, DEFAULT_STAR_BRACKET)):
+    for index, star_weight in enumerate(
+        _split_csv_floats(args.star_bracket, DEFAULT_STAR_BRACKET)
+    ):
         params = dict(base)
         params["star_loss_weight"] = float(star_weight)
-        out.append(make_run_config(stage="star_bracket", params=params, seed=args.seed, index=index))
+        out.append(
+            make_run_config(
+                stage="star_bracket", params=params, seed=args.seed, index=index
+            )
+        )
     return out
 
 
@@ -396,14 +444,18 @@ def _sample_range(rng: random.Random, low: float, high: float) -> float:
     return low + (high - low) * rng.random()
 
 
-def _trial_suggest_params(trial, base: dict[str, float], ranges: dict[str, tuple[float, float]]) -> dict[str, float]:
+def _trial_suggest_params(
+    trial, base: dict[str, float], ranges: dict[str, tuple[float, float]]
+) -> dict[str, float]:
     params = dict(base)
     for name, (low, high) in ranges.items():
         params[name] = float(trial.suggest_float(name, low, high))
     return params
 
 
-def _fallback_trial_params(rng: random.Random, base: dict[str, float], ranges: dict[str, tuple[float, float]]) -> dict[str, float]:
+def _fallback_trial_params(
+    rng: random.Random, base: dict[str, float], ranges: dict[str, tuple[float, float]]
+) -> dict[str, float]:
     params = dict(base)
     for name, (low, high) in ranges.items():
         params[name] = _sample_range(rng, low, high)
@@ -427,7 +479,9 @@ def _load_loss_search_plan(args: argparse.Namespace) -> dict[str, T.Any]:
     }
 
 
-def generate_loss_search(args: argparse.Namespace, base: dict[str, float]) -> list[dict[str, T.Any]]:
+def generate_loss_search(
+    args: argparse.Namespace, base: dict[str, float]
+) -> list[dict[str, T.Any]]:
     ranges = dict(DEFAULT_OPTUNA_RANGES)
     plan = _load_loss_search_plan(args)
     plan["study_name"] = args.optuna_study_name
@@ -453,12 +507,19 @@ def generate_loss_search(args: argparse.Namespace, base: dict[str, float]) -> li
                 params = _fallback_trial_params(rng, base, ranges)
                 trial_number = index
                 source = "deterministic_fallback"
-            run = make_run_config(stage="optuna_loss_search", params=params, seed=args.seed, index=trial_number)
+            run = make_run_config(
+                stage="optuna_loss_search",
+                params=params,
+                seed=args.seed,
+                index=trial_number,
+            )
             run["optuna_trial_number"] = trial_number
             run["optuna_study_name"] = args.optuna_study_name
             run["optuna_storage"] = optuna_storage_url(args)
             run["optuna_source"] = source
-            plan["trials"].append({"number": trial_number, "run": run, "params": params, "source": source})
+            plan["trials"].append(
+                {"number": trial_number, "run": run, "params": params, "source": source}
+            )
 
     write_json(_loss_search_plan_path(args), plan)
     write_json(Path(args.output_dir) / "optuna_study.json", plan)
@@ -478,14 +539,20 @@ def tell_optuna_result(args: argparse.Namespace, result: dict[str, T.Any]) -> No
         return
     try:
         for trial in study.get_trials(deepcopy=False):
-            if int(trial.number) == int(trial_number) and getattr(trial.state, "is_finished", lambda: False)():
+            if (
+                int(trial.number) == int(trial_number)
+                and getattr(trial.state, "is_finished", lambda: False)()
+            ):
                 return
     except Exception:
         pass
     try:
         study.tell(int(trial_number), float(result["score"]))
     except Exception as exc:
-        print(f"warning: could not tell Optuna score for trial {trial_number}: {exc}", file=sys.stderr)
+        print(
+            f"warning: could not tell Optuna score for trial {trial_number}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def generate_loss_finalists(
@@ -509,17 +576,25 @@ def generate_loss_finalists(
     return out
 
 
-def generate_lr_sweep(args: argparse.Namespace, selected_loss_params: dict[str, T.Any]) -> list[dict[str, T.Any]]:
+def generate_lr_sweep(
+    args: argparse.Namespace, selected_loss_params: dict[str, T.Any]
+) -> list[dict[str, T.Any]]:
     lrs = _split_csv_floats(args.lr_sweep, DEFAULT_LR_SWEEP)
     out = []
     for index, lr in enumerate(lrs):
         params = dict(selected_loss_params)
         params["lr"] = float(lr)
-        out.append(make_run_config(stage="lr_sweep", params=params, seed=args.seed, index=index))
+        out.append(
+            make_run_config(
+                stage="lr_sweep", params=params, seed=args.seed, index=index
+            )
+        )
     return out
 
 
-def generate_lr_finalists(args: argparse.Namespace, ranked_lr_results: list[dict[str, T.Any]]) -> list[dict[str, T.Any]]:
+def generate_lr_finalists(
+    args: argparse.Namespace, ranked_lr_results: list[dict[str, T.Any]]
+) -> list[dict[str, T.Any]]:
     seeds = _split_csv_ints(args.lr_finalist_seeds, DEFAULT_LR_SEEDS)
     finalists = ranked_lr_results[: int(args.lr_top_k)]
     out = []
@@ -537,13 +612,20 @@ def generate_lr_finalists(args: argparse.Namespace, ranked_lr_results: list[dict
     return out
 
 
-def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics: dict[str, T.Any] | None) -> dict[str, T.Any] | None:
+def run_one(
+    args: argparse.Namespace,
+    run: dict[str, T.Any],
+    *,
+    baseline_metrics: dict[str, T.Any] | None,
+) -> dict[str, T.Any] | None:
     output_dir = Path(args.output_dir)
     run_dir = output_dir / "runs" / run["id"]
     run_dir.mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "config.json", run)
     command = build_train_command(args, run, run_dir)
-    (run_dir / "command.txt").write_text(" ".join(shlex.quote(item) for item in command) + "\n", encoding="utf-8")
+    (run_dir / "command.txt").write_text(
+        " ".join(shlex.quote(item) for item in command) + "\n", encoding="utf-8"
+    )
 
     if args.dry_run and not args.mock_metrics:
         print("DRY-RUN", run["id"], " ".join(shlex.quote(item) for item in command))
@@ -607,11 +689,15 @@ def read_results(output_dir: Path) -> list[dict[str, T.Any]]:
     return list(dedup.values())
 
 
-def result_by_stage(results: list[dict[str, T.Any]], stage: str) -> list[dict[str, T.Any]]:
+def result_by_stage(
+    results: list[dict[str, T.Any]], stage: str
+) -> list[dict[str, T.Any]]:
     return [item for item in results if item.get("stage") == stage]
 
 
-def synthetic_metrics_for_config(params: dict[str, T.Any], *, seed: int) -> dict[str, float]:
+def synthetic_metrics_for_config(
+    params: dict[str, T.Any], *, seed: int
+) -> dict[str, float]:
     """Deterministic mock metrics for dry-run tests and pipeline smoke checks."""
     rng = random.Random(seed + int(float(params.get("lr", 1e-4)) * 1e8))
     star = float(params.get("star_loss_weight", 0.0))
@@ -679,8 +765,12 @@ def write_recommendation(
         ],
     }
     if baseline_result is not None:
-        recommendation["rationale"]["baseline_delta"] = float(selected_lr_summary["mean_score"]) - float(baseline_result["score"])
-    write_json(Path(args.output_dir) / "best_training_hyperparameters.json", recommendation)
+        recommendation["rationale"]["baseline_delta"] = float(
+            selected_lr_summary["mean_score"]
+        ) - float(baseline_result["score"])
+    write_json(
+        Path(args.output_dir) / "best_training_hyperparameters.json", recommendation
+    )
     return recommendation
 
 
@@ -711,7 +801,9 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
             run_one(args, run, baseline_metrics=baseline_metrics)
 
     results = read_results(output_dir)
-    loss_candidates = result_by_stage(results, "star_bracket") + result_by_stage(results, "optuna_loss_search")
+    loss_candidates = result_by_stage(results, "star_bracket") + result_by_stage(
+        results, "optuna_loss_search"
+    )
     ranked_loss = rank_results(loss_candidates, top_k=max(int(args.loss_top_k), 1))
     write_json(output_dir / "ranked_loss_candidates.json", ranked_loss)
 
@@ -720,21 +812,36 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
             run_one(args, run, baseline_metrics=baseline_metrics)
 
     results = read_results(output_dir)
-    loss_finalist_summaries = aggregate_by_parent(result_by_stage(results, "loss_finalist_seed"), top_k=max(int(args.loss_top_k), 1))
+    loss_finalist_summaries = aggregate_by_parent(
+        result_by_stage(results, "loss_finalist_seed"),
+        top_k=max(int(args.loss_top_k), 1),
+    )
     write_json(output_dir / "loss_finalist_summary.json", loss_finalist_summaries)
     if loss_finalist_summaries:
         selected_loss = loss_finalist_summaries[0]
     elif ranked_loss:
-        selected_loss = {"params": ranked_loss[0]["params"], "parent_trial": ranked_loss[0]["id"], "mean_score": ranked_loss[0]["score"], "std_score": 0.0}
+        selected_loss = {
+            "params": ranked_loss[0]["params"],
+            "parent_trial": ranked_loss[0]["id"],
+            "mean_score": ranked_loss[0]["score"],
+            "std_score": 0.0,
+        }
     else:
-        selected_loss = {"params": base, "parent_trial": "baseline", "mean_score": baseline_result.get("score") if baseline_result else None, "std_score": 0.0}
+        selected_loss = {
+            "params": base,
+            "parent_trial": "baseline",
+            "mean_score": baseline_result.get("score") if baseline_result else None,
+            "std_score": 0.0,
+        }
 
     for run in generate_lr_sweep(args, selected_loss["params"]):
         if not already_done(output_dir, run["id"]):
             run_one(args, run, baseline_metrics=baseline_metrics)
 
     results = read_results(output_dir)
-    ranked_lr = rank_results(result_by_stage(results, "lr_sweep"), top_k=max(int(args.lr_top_k), 1))
+    ranked_lr = rank_results(
+        result_by_stage(results, "lr_sweep"), top_k=max(int(args.lr_top_k), 1)
+    )
     write_json(output_dir / "ranked_lr_candidates.json", ranked_lr)
 
     for run in generate_lr_finalists(args, ranked_lr):
@@ -742,16 +849,27 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
             run_one(args, run, baseline_metrics=baseline_metrics)
 
     results = read_results(output_dir)
-    lr_finalist_summaries = aggregate_by_parent(result_by_stage(results, "lr_finalist_seed"), top_k=max(int(args.lr_top_k), 1))
+    lr_finalist_summaries = aggregate_by_parent(
+        result_by_stage(results, "lr_finalist_seed"), top_k=max(int(args.lr_top_k), 1)
+    )
     write_json(output_dir / "lr_finalist_summary.json", lr_finalist_summaries)
     if lr_finalist_summaries:
         selected_lr = lr_finalist_summaries[0]
     elif ranked_lr:
-        selected_lr = {"params": ranked_lr[0]["params"], "parent_trial": ranked_lr[0]["id"], "mean_score": ranked_lr[0]["score"], "std_score": 0.0}
+        selected_lr = {
+            "params": ranked_lr[0]["params"],
+            "parent_trial": ranked_lr[0]["id"],
+            "mean_score": ranked_lr[0]["score"],
+            "std_score": 0.0,
+        }
     else:
         selected_lr = selected_loss
 
-    if baseline_result is not None and selected_loss.get("mean_score") is not None and selected_lr.get("mean_score") is not None:
+    if (
+        baseline_result is not None
+        and selected_loss.get("mean_score") is not None
+        and selected_lr.get("mean_score") is not None
+    ):
         recommendation = write_recommendation(
             args,
             baseline_result=baseline_result,
@@ -759,7 +877,10 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
             selected_lr_summary=selected_lr,
         )
     else:
-        recommendation = {"status": "planned_only", "message": "No metrics available; rerun with --execute or --mock-metrics."}
+        recommendation = {
+            "status": "planned_only",
+            "message": "No metrics available; rerun with --execute or --mock-metrics.",
+        }
         write_json(output_dir / "best_training_hyperparameters.json", recommendation)
 
     return recommendation
@@ -772,35 +893,75 @@ def already_done(output_dir: Path, run_id: str) -> bool:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--train-command", default=f"{shlex.quote(sys.executable)} TrainHeatmapStageFP16.py")
+    parser.add_argument(
+        "--train-command",
+        default=f"{shlex.quote(sys.executable)} TrainHeatmapStageFP16.py",
+    )
     parser.add_argument("--extra-train-args", default="")
     parser.add_argument("--cwd", default="")
     parser.add_argument("--metrics-file-name", default="metrics.json")
-    parser.add_argument("--dry-run", action="store_true", help="Write configs and commands without executing training unless --mock-metrics is set.")
-    parser.add_argument("--execute", action="store_true", help="Actually launch training commands.")
-    parser.add_argument("--mock-metrics", action="store_true", help="Write deterministic synthetic metrics for smoke tests.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write configs and commands without executing training unless --mock-metrics is set.",
+    )
+    parser.add_argument(
+        "--execute", action="store_true", help="Actually launch training commands."
+    )
+    parser.add_argument(
+        "--mock-metrics",
+        action="store_true",
+        help="Write deterministic synthetic metrics for smoke tests.",
+    )
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--baseline-star-loss-weight", type=float, default=0.0)
-    parser.add_argument("--baseline-schema-consistency-weight", type=float, default=0.05)
+    parser.add_argument(
+        "--baseline-schema-consistency-weight", type=float, default=0.05
+    )
     parser.add_argument("--baseline-auxiliary-loss-weight", type=float, default=0.1)
     parser.add_argument("--baseline-lr", type=float, default=1e-4)
     parser.add_argument("--locw", type=float, default=1.0)
     parser.add_argument("--hw", type=float, default=10.0)
-    parser.add_argument("--star-bracket", default=",".join(str(x) for x in DEFAULT_STAR_BRACKET))
+    parser.add_argument(
+        "--star-bracket", default=",".join(str(x) for x in DEFAULT_STAR_BRACKET)
+    )
     parser.add_argument("--optuna-trials", type=int, default=20)
     parser.add_argument("--optuna-seed", type=int, default=2026)
     parser.add_argument("--optuna-study-name", default="landmark_loss_weight_search")
-    parser.add_argument("--optuna-storage", default="", help="Optuna storage URL. Defaults to sqlite:///<output-dir>/optuna_study.db.")
-    parser.add_argument("--optuna-workers", type=int, default=1, help="Documented worker count for shared Optuna storage; launch multiple processes with same output dir/storage for parallelism.")
+    parser.add_argument(
+        "--optuna-storage",
+        default="",
+        help="Optuna storage URL. Defaults to sqlite:///<output-dir>/optuna_study.db.",
+    )
+    parser.add_argument(
+        "--optuna-workers",
+        type=int,
+        default=1,
+        help="Documented worker count for shared Optuna storage; launch multiple processes with same output dir/storage for parallelism.",
+    )
     parser.add_argument("--optuna-pruner-startup-trials", type=int, default=5)
     parser.add_argument("--optuna-min-pruning-epoch", type=int, default=5)
-    parser.add_argument("--require-optuna", action="store_true", help="Fail if Optuna cannot be imported.")
-    parser.add_argument("--disable-optuna", action="store_true", help="Use deterministic sampled fallback instead of a real Optuna study.")
+    parser.add_argument(
+        "--require-optuna",
+        action="store_true",
+        help="Fail if Optuna cannot be imported.",
+    )
+    parser.add_argument(
+        "--disable-optuna",
+        action="store_true",
+        help="Use deterministic sampled fallback instead of a real Optuna study.",
+    )
     parser.add_argument("--loss-top-k", type=int, default=3)
-    parser.add_argument("--loss-finalist-seeds", default=",".join(str(x) for x in DEFAULT_LOSS_SEEDS))
-    parser.add_argument("--lr-sweep", default=",".join(str(x) for x in DEFAULT_LR_SWEEP))
+    parser.add_argument(
+        "--loss-finalist-seeds", default=",".join(str(x) for x in DEFAULT_LOSS_SEEDS)
+    )
+    parser.add_argument(
+        "--lr-sweep", default=",".join(str(x) for x in DEFAULT_LR_SWEEP)
+    )
     parser.add_argument("--lr-top-k", type=int, default=2)
-    parser.add_argument("--lr-finalist-seeds", default=",".join(str(x) for x in DEFAULT_LR_SEEDS))
+    parser.add_argument(
+        "--lr-finalist-seeds", default=",".join(str(x) for x in DEFAULT_LR_SEEDS)
+    )
     parser.add_argument("--hard-slice-weight", type=float, default=0.25)
     parser.add_argument("--regression-penalty-weight", type=float, default=2.0)
     parser.add_argument("--max-easy-regression", type=float, default=0.0)
@@ -812,7 +973,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.execute and args.dry_run:
         raise SystemExit("--execute and --dry-run cannot both be set")
     if not args.execute and not args.dry_run and not args.mock_metrics:
-        print("Neither --execute nor --dry-run was set; defaulting to dry-run planning.", file=sys.stderr)
+        print(
+            "Neither --execute nor --dry-run was set; defaulting to dry-run planning.",
+            file=sys.stderr,
+        )
         args.dry_run = True
     recommendation = run_pipeline(args)
     print(json.dumps(recommendation, indent=2, sort_keys=True))

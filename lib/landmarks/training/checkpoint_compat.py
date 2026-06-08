@@ -71,13 +71,19 @@ def file_sha256_or_none(value: T.Any) -> str | None:
 
 
 def training_manifest_path_for_compat(args: T.Any) -> T.Any:
-    return getattr(args, "train_manifest", "") or getattr(args, "manifest", "") or getattr(args, "root_folder", "")
+    return (
+        getattr(args, "train_manifest", "")
+        or getattr(args, "manifest", "")
+        or getattr(args, "root_folder", "")
+    )
 
 
 def build_training_compat_config_from_args(args: T.Any) -> dict[str, T.Any]:
     config: dict[str, T.Any] = {
         "manifest_sha256": file_sha256_or_none(training_manifest_path_for_compat(args)),
-        "train_manifest_sha256": file_sha256_or_none(getattr(args, "train_manifest", "")),
+        "train_manifest_sha256": file_sha256_or_none(
+            getattr(args, "train_manifest", "")
+        ),
         "test_manifest_sha256": file_sha256_or_none(getattr(args, "test_manifest", "")),
     }
 
@@ -139,15 +145,25 @@ def build_pipeline_training_compat_config(
         split_policy = "random_hash"
 
     return {
-        "manifest_sha256": safe_sha256_file(Path(effective_training_manifest_for_compat(args, paths))),
+        "manifest_sha256": safe_sha256_file(
+            Path(effective_training_manifest_for_compat(args, paths))
+        ),
         "train_manifest_sha256": safe_sha256_file(
-            Path(train_arg_option(args, "--train_manifest", "--train-manifest", default=""))
+            Path(
+                train_arg_option(
+                    args, "--train_manifest", "--train-manifest", default=""
+                )
+            )
         ),
         "test_manifest_sha256": safe_sha256_file(
-            Path(train_arg_option(args, "--test_manifest", "--test-manifest", default=""))
+            Path(
+                train_arg_option(args, "--test_manifest", "--test-manifest", default="")
+            )
         ),
         "batch_size": int_opt(int(args.batch_size), "--batch_size", "--batch-size"),
-        "heatmap_size": int_opt(int(args.heatmap_size), "--heatmap_size", "--heatmap-size"),
+        "heatmap_size": int_opt(
+            int(args.heatmap_size), "--heatmap_size", "--heatmap-size"
+        ),
         "lmk_num": int_opt(int(args.lmk_num), "--lmk_num", "--lmk-num"),
         "sched_step": int_opt(200, "--sched_step", "--sched-step"),
         "nstack": int_opt(8, "--nstack"),
@@ -220,7 +236,9 @@ def build_pipeline_training_compat_config(
             "--schema-head-loss-weights",
             "--schema_head_loss_weights",
         ),
-        "heldout_dataset": [str(item) for item in train_arg_values(args, "--heldout-dataset")],
+        "heldout_dataset": [
+            str(item) for item in train_arg_values(args, "--heldout-dataset")
+        ],
     }
 
 
@@ -234,7 +252,9 @@ def training_compat_digest_from_config(config: T.Mapping[str, T.Any]) -> str:
 
 
 def training_compat_digest_from_args(args: T.Any) -> str:
-    return training_compat_digest_from_config(build_training_compat_config_from_args(args))
+    return training_compat_digest_from_config(
+        build_training_compat_config_from_args(args)
+    )
 
 
 def checkpoint_compat_errors_for_config(
@@ -245,7 +265,10 @@ def checkpoint_compat_errors_for_config(
     fallback_expected_args: T.Mapping[str, T.Any] | None = None,
     message_prefix: str = "checkpoint",
 ) -> list[str]:
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "cdvit-training-checkpoint-v1":
+    if (
+        not isinstance(checkpoint, dict)
+        or checkpoint.get("format") != "cdvit-training-checkpoint-v1"
+    ):
         return []
 
     errors: list[str] = []
@@ -255,24 +278,54 @@ def checkpoint_compat_errors_for_config(
     if isinstance(actual_config, dict):
         comparable_actual = {key: actual_config.get(key) for key in expected_config}
         if comparable_actual != expected_config:
-            errors.append(f"{message_prefix} training contract differs from the current invocation")
+            errors.append(
+                f"{message_prefix} training contract differs from the current invocation"
+            )
     else:
         actual_digest = checkpoint.get("compat_config_digest")
         if actual_digest:
             if actual_digest != training_compat_digest_from_config(expected_config):
-                errors.append(f"{message_prefix} training contract digest differs from the current invocation")
+                errors.append(
+                    f"{message_prefix} training contract digest differs from the current invocation"
+                )
         else:
-            saved_args = checkpoint.get("args") if isinstance(checkpoint.get("args"), dict) else {}
+            saved_args = (
+                checkpoint.get("args")
+                if isinstance(checkpoint.get("args"), dict)
+                else {}
+            )
             fallback = dict(fallback_expected_args or {})
             critical_keys = {
-                "data_name": str(fallback.get("data_name", expected_config.get("data_name", ""))),
-                "batch_size": int(fallback.get("batch_size", expected_config.get("batch_size", 0))),
-                "heatmap_size": int(fallback.get("heatmap_size", expected_config.get("heatmap_size", 0))),
-                "lmk_num": int(fallback.get("lmk_num", expected_config.get("lmk_num", 0))),
+                "data_name": str(
+                    fallback.get("data_name", expected_config.get("data_name", ""))
+                ),
+                "batch_size": int(
+                    fallback.get("batch_size", expected_config.get("batch_size", 0))
+                ),
+                "heatmap_size": int(
+                    fallback.get("heatmap_size", expected_config.get("heatmap_size", 0))
+                ),
+                "lmk_num": int(
+                    fallback.get("lmk_num", expected_config.get("lmk_num", 0))
+                ),
                 "lr": float(fallback.get("lr", expected_config.get("lr", 0.0))),
-                "schema_aware_training": bool(fallback.get("schema_aware_training", expected_config.get("schema_aware_training", False))),
-                "domain_balanced_sampling": bool(fallback.get("domain_balanced_sampling", expected_config.get("domain_balanced_sampling", False))),
-                "auxiliary_heads": bool(fallback.get("auxiliary_heads", expected_config.get("auxiliary_heads", False))),
+                "schema_aware_training": bool(
+                    fallback.get(
+                        "schema_aware_training",
+                        expected_config.get("schema_aware_training", False),
+                    )
+                ),
+                "domain_balanced_sampling": bool(
+                    fallback.get(
+                        "domain_balanced_sampling",
+                        expected_config.get("domain_balanced_sampling", False),
+                    )
+                ),
+                "auxiliary_heads": bool(
+                    fallback.get(
+                        "auxiliary_heads", expected_config.get("auxiliary_heads", False)
+                    )
+                ),
             }
             for key, expected in critical_keys.items():
                 if key not in saved_args:
@@ -295,7 +348,11 @@ def checkpoint_compat_errors_for_config(
                     )
 
     checkpoint_manifest_sha = checkpoint.get("manifest_sha256")
-    if current_manifest_sha and checkpoint_manifest_sha and current_manifest_sha != checkpoint_manifest_sha:
+    if (
+        current_manifest_sha
+        and checkpoint_manifest_sha
+        and current_manifest_sha != checkpoint_manifest_sha
+    ):
         errors.append("checkpoint manifest SHA differs from the current manifest")
 
     return errors
@@ -305,6 +362,8 @@ def checkpoint_compat_errors_from_args(checkpoint: T.Any, args: T.Any) -> list[s
     return checkpoint_compat_errors_for_config(
         checkpoint,
         build_training_compat_config_from_args(args),
-        current_manifest_sha=file_sha256_or_none(training_manifest_path_for_compat(args)),
+        current_manifest_sha=file_sha256_or_none(
+            training_manifest_path_for_compat(args)
+        ),
         fallback_expected_args=vars(args) if hasattr(args, "__dict__") else {},
     )

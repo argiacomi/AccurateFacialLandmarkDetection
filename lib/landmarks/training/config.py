@@ -66,7 +66,9 @@ class CheckpointConfig:
     runtime_metrics_jsonl: str
 
     @classmethod
-    def from_args(cls, args: T.Any, *, runtime_metrics_jsonl: str = "") -> "CheckpointConfig":
+    def from_args(
+        cls, args: T.Any, *, runtime_metrics_jsonl: str = ""
+    ) -> "CheckpointConfig":
         return cls(
             save_last_checkpoint=bool(args.save_last_checkpoint),
             save_legacy_epoch_state_dict=bool(args.save_legacy_epoch_state_dict),
@@ -103,7 +105,9 @@ class DatasetBuildConfig:
             test_manifest=str(getattr(args, "test_manifest", "")),
             split_policy=str(args.split_policy),
             eval_mode=str(args.eval_mode),
-            heldout_dataset=tuple(str(value) for value in getattr(args, "heldout_dataset", ())),
+            heldout_dataset=tuple(
+                str(value) for value in getattr(args, "heldout_dataset", ())
+            ),
             schema_aware_training=bool(args.schema_aware_training),
             domain_balanced_sampling=bool(args.domain_balanced_sampling),
             bucket_targets=str(args.bucket_targets),
@@ -144,7 +148,9 @@ class PipelineConfig:
             train_arg=tuple(str(value) for value in (args.train_arg or ())),
             runtime=TrainingRuntimeConfig.from_args(args),
             eval=EvalConfig.from_args(args),
-            checkpoint=CheckpointConfig.from_args(args, runtime_metrics_jsonl=runtime_metrics_jsonl),
+            checkpoint=CheckpointConfig.from_args(
+                args, runtime_metrics_jsonl=runtime_metrics_jsonl
+            ),
         )
 
 

@@ -305,15 +305,26 @@ def test_occlusion_labels_are_normalized(value, expected):
 
 
 def test_face_size_bucket_respects_explicit_bbox_format():
-    assert slice_labels({"bbox": [0, 0, 63, 63], "bbox_format": "xyxy"})["by_face_size"] == "small"
-    assert slice_labels({"bbox": [20, 20, 90, 90], "bbox_format": "xywh"})["by_face_size"] == "medium"
+    assert (
+        slice_labels({"bbox": [0, 0, 63, 63], "bbox_format": "xyxy"})["by_face_size"]
+        == "small"
+    )
+    assert (
+        slice_labels({"bbox": [20, 20, 90, 90], "bbox_format": "xywh"})["by_face_size"]
+        == "medium"
+    )
     assert slice_labels({"bbox": [0, 0, 63, 63]})["by_face_size"] == "unknown"
-    assert slice_labels({"bbox": {"x": 0, "y": 0, "w": 129, "h": 129}})["by_face_size"] == "large"
+    assert (
+        slice_labels({"bbox": {"x": 0, "y": 0, "w": 129, "h": 129}})["by_face_size"]
+        == "large"
+    )
 
 
 def test_eval_records_jsonl_can_be_written(tmp_path):
     path = tmp_path / "records.jsonl"
-    write_eval_records_jsonl(path, [{"sample_id": "a", "nme": 0.1}, {"sample_id": "b", "nme": 0.2}])
+    write_eval_records_jsonl(
+        path, [{"sample_id": "a", "nme": 0.1}, {"sample_id": "b", "nme": 0.2}]
+    )
 
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2

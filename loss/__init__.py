@@ -9,6 +9,5 @@ __all__ = [
     "SmoothL1Loss",
     "WingLoss",
     "STARLoss",
-
     "STARLoss_v2",
 ]

@@ -14,7 +14,9 @@ from lib.landmarks.transforms.flip import *
 
 
 class LandmarkDataset(Dataset):
-    def __init__(self, data_root, split, preload=True, aug=True, heatmap_size=0, perturbation=0):
+    def __init__(
+        self, data_root, split, preload=True, aug=True, heatmap_size=0, perturbation=0
+    ):
         super(LandmarkDataset, self).__init__()
         self.split = split
 
@@ -26,7 +28,10 @@ class LandmarkDataset(Dataset):
         if preload:
             self.data_list = self.loaditem_list(self.image_files, self.annotation_files)
         self.transform = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
+            [
+                transforms.ToTensor(),
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ]
         )
         self.aug_transform = None
         if aug:
@@ -76,7 +81,9 @@ class LandmarkDataset(Dataset):
             padding = max(padding, rb[1] - img.shape[0] + margin)
         if padding > 0:
             padding = int(round(padding))
-            new_img = cv2.copyMakeBorder(img, padding, padding, padding, padding, cv2.BORDER_CONSTANT)
+            new_img = cv2.copyMakeBorder(
+                img, padding, padding, padding, padding, cv2.BORDER_CONSTANT
+            )
             lmk = lmk + padding
             lmk = lmk * img.shape[0] / new_img.shape[0]
             new_img = cv2.resize(new_img, (img.shape[0], img.shape[1]))
@@ -86,7 +93,9 @@ class LandmarkDataset(Dataset):
 
     def __getitem__(self, item):
         if self.data_list is None:
-            img, lmk = self.loaditem(self.image_files[item], self.annotation_files[item])
+            img, lmk = self.loaditem(
+                self.image_files[item], self.annotation_files[item]
+            )
         else:
             img, lmk = self.data_list[item]
 
@@ -115,7 +124,6 @@ class LandmarkDataset(Dataset):
 
 
 if __name__ == "__main__":
-
     heatmap_size = 32
     dataset = LandmarkDataset(
         "cofw68", "train", True, aug=False, heatmap_size=heatmap_size
@@ -143,11 +151,16 @@ if __name__ == "__main__":
     img.show()
     # print(lmk)
 
-    row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij")
+    row, col = torch.meshgrid(
+        torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij"
+    )
     c = heatmap_size - 1
     row = row / c
     col = col / c
-    yy_loc, xx_loc = row.reshape((1, heatmap_size, heatmap_size)), col.reshape((1, heatmap_size, heatmap_size))
+    yy_loc, xx_loc = (
+        row.reshape((1, heatmap_size, heatmap_size)),
+        col.reshape((1, heatmap_size, heatmap_size)),
+    )
 
     xx = (xx_loc * heatmap).sum(dim=[1, 2])
     yy = (yy_loc * heatmap).sum(dim=[1, 2])

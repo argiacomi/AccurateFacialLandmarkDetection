@@ -84,8 +84,12 @@ def test_schema_head_loss_can_skip_auxiliary_and_visibility_for_nonfinal_stages(
 
     assert details["loss_visibility"].item() == pytest.approx(0.0)
     assert details["auxiliary_loss_contributions"] == {}
-    assert stage_pred["visibility_68"].grad is None or stage_pred["visibility_68"].grad.abs().sum().item() == pytest.approx(0.0)
-    assert stage_pred["_aux"]["occlusion"].grad is None or stage_pred["_aux"]["occlusion"].grad.abs().sum().item() == pytest.approx(0.0)
+    assert stage_pred["visibility_68"].grad is None or stage_pred[
+        "visibility_68"
+    ].grad.abs().sum().item() == pytest.approx(0.0)
+    assert stage_pred["_aux"]["occlusion"].grad is None or stage_pred["_aux"][
+        "occlusion"
+    ].grad.abs().sum().item() == pytest.approx(0.0)
 
 
 def test_synthetic_visibility_targets_are_weighted_separately_from_explicit_targets():
@@ -113,7 +117,9 @@ def test_synthetic_visibility_targets_are_weighted_separately_from_explicit_targ
     assert details["loss_visibility"].item() > 0.0
 
 
-def test_visibility_target_is_reindexed_when_schema_sample_is_flipped(tmp_path, monkeypatch):
+def test_visibility_target_is_reindexed_when_schema_sample_is_flipped(
+    tmp_path, monkeypatch
+):
     import lib.landmarks.datasets.manifest as manifest_module
 
     class IdentityAug:
@@ -163,7 +169,9 @@ def test_visibility_target_is_reindexed_when_schema_sample_is_flipped(tmp_path, 
     item = dataset[0]
     expected = visibility[flip_map_for_schema("2d_68")]
 
-    assert item["visibility_target"].numpy().tolist() == pytest.approx(expected.tolist())
+    assert item["visibility_target"].numpy().tolist() == pytest.approx(
+        expected.tolist()
+    )
 
 
 def test_manifest_occluder_mask_generates_synthetic_visibility_targets(tmp_path):

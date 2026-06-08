@@ -86,7 +86,14 @@ SUPPORTED_DATASETS = (
     "multipie",
     "directory",
 )
-WFLW_ATTRIBUTE_NAMES = ("pose", "expression", "illumination", "makeup", "occlusion", "blur")
+WFLW_ATTRIBUTE_NAMES = (
+    "pose",
+    "expression",
+    "illumination",
+    "makeup",
+    "occlusion",
+    "blur",
+)
 DEFAULT_NORMALIZER_SOURCE = "interocular_outer_eye_corners_36_45"
 
 
@@ -165,7 +172,9 @@ def _schema_from_declared_or_count(source_schema: str | None, count: int) -> str
     return canonicalize_schema(f"2d_{int(count)}")
 
 
-def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[np.ndarray, str]:
+def _canonical_points(
+    raw: T.Any, *, source_schema: str | None = None
+) -> tuple[np.ndarray, str]:
     """Return native trainable 2D points and the canonical source schema label."""
     arr = np.asarray(raw, dtype=np.float32)
 
@@ -173,7 +182,15 @@ def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[
         arr = np.squeeze(arr)
 
     if arr.ndim == 1:
-        for count, dims in ((29, 2), (39, 2), (68, 3), (68, 2), (98, 2), (106, 2), (194, 2)):
+        for count, dims in (
+            (29, 2),
+            (39, 2),
+            (68, 3),
+            (68, 2),
+            (98, 2),
+            (106, 2),
+            (194, 2),
+        ):
             if arr.size == count * dims:
                 arr = arr.reshape(count, dims)
                 break
@@ -190,7 +207,9 @@ def _canonical_points(raw: T.Any, *, source_schema: str | None = None) -> tuple[
         raise ValueError("landmarks contain NaN or infinite values")
 
     if arr.shape[1] < 2:
-        raise ValueError(f"landmarks must contain x/y coordinates, got shape {arr.shape}")
+        raise ValueError(
+            f"landmarks must contain x/y coordinates, got shape {arr.shape}"
+        )
 
     if arr.shape[0] not in (29, 39, 68, 98, 106, 194):
         raise ValueError(
@@ -234,12 +253,27 @@ def _parse_pts(path: Path) -> np.ndarray:
 
 def _parse_numeric_text(path: Path) -> np.ndarray:
     text = path.read_text(encoding="utf-8", errors="ignore")
-    values = [float(item) for item in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", text)]
-    for count, dims in ((29, 2), (39, 2), (68, 3), (68, 2), (98, 2), (106, 2), (194, 2)):
+    values = [
+        float(item)
+        for item in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", text)
+    ]
+    for count, dims in (
+        (29, 2),
+        (39, 2),
+        (68, 3),
+        (68, 2),
+        (98, 2),
+        (106, 2),
+        (194, 2),
+    ):
         total = count * dims
         for offset in (0, 1):
-            if len(values) - offset == total and (offset == 0 or int(values[0]) == count):
-                return np.asarray(values[offset:], dtype=np.float32).reshape(count, dims)
+            if len(values) - offset == total and (
+                offset == 0 or int(values[0]) == count
+            ):
+                return np.asarray(values[offset:], dtype=np.float32).reshape(
+                    count, dims
+                )
     rows: list[list[float]] = []
     for line in text.splitlines():
         parts = line.replace(",", " ").split()
@@ -321,7 +355,9 @@ def _load_landmark_file(path: Path) -> tuple[np.ndarray, str]:
     raise ValueError(f"unsupported landmark file: {path}")
 
 
-def _load_points(value: T.Any, *, base_dir: Path, source_schema: str | None = None) -> tuple[np.ndarray, str]:
+def _load_points(
+    value: T.Any, *, base_dir: Path, source_schema: str | None = None
+) -> tuple[np.ndarray, str]:
     if isinstance(value, (list, tuple, np.ndarray)):
         return _canonical_points(value, source_schema=source_schema)
     path = _resolve_path(value, base_dir=base_dir)
@@ -353,7 +389,9 @@ def _normalizer(points68: np.ndarray, sample_id: str) -> float:
         )
         return fallback
 
-    raise ValueError(f"invalid normalizer for {sample_id}: interocular={value}, span={fallback}")
+    raise ValueError(
+        f"invalid normalizer for {sample_id}: interocular={value}, span={fallback}"
+    )
 
 
 def _bbox_from_points_xyxy(points: np.ndarray) -> list[float]:
@@ -366,7 +404,9 @@ def _bbox_from_points_xyxy(points: np.ndarray) -> list[float]:
     return [float(left), float(top), float(right), float(bottom)]
 
 
-def _bbox_to_square_with_padding(bbox: T.Sequence[float], *, image_hw: tuple[int, int], pad_ratio: float) -> tuple[float, float, float, float]:
+def _bbox_to_square_with_padding(
+    bbox: T.Sequence[float], *, image_hw: tuple[int, int], pad_ratio: float
+) -> tuple[float, float, float, float]:
     if len(bbox) != 4:
         raise ValueError(f"bbox must have 4 values, got {bbox!r}")
     x1, y1, x2, y2 = [float(v) for v in bbox]
@@ -431,7 +471,9 @@ def _crop_image_and_remap_points(
     pad_bottom = int(round(max(0.0, bottom - height)))
 
     if any(v > 0 for v in (pad_left, pad_top, pad_right, pad_bottom)):
-        crop = cv2.copyMakeBorder(crop, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT)
+        crop = cv2.copyMakeBorder(
+            crop, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT
+        )
 
     # Ensure exact virtual crop size before resize.
     virtual_w = max(1.0, right - left)
@@ -439,20 +481,30 @@ def _crop_image_and_remap_points(
     scale_x = float(output_size) / virtual_w
     scale_y = float(output_size) / virtual_h
 
-    crop_resized = cv2.resize(crop, (output_size, output_size), interpolation=cv2.INTER_LINEAR)
+    crop_resized = cv2.resize(
+        crop, (output_size, output_size), interpolation=cv2.INTER_LINEAR
+    )
 
     remapped = np.asarray(points68, dtype=np.float32).copy()
     remapped[:, 0] = (remapped[:, 0] - float(left)) * scale_x
     remapped[:, 1] = (remapped[:, 1] - float(top)) * scale_y
 
-    return crop_resized, remapped.astype(np.float32), [float(left), float(top), float(right), float(bottom)]
+    return (
+        crop_resized,
+        remapped.astype(np.float32),
+        [float(left), float(top), float(right), float(bottom)],
+    )
 
 
-def _write_crop_image(output_dir: Path, dataset: str, sample_id: str, crop_rgb: np.ndarray) -> Path:
+def _write_crop_image(
+    output_dir: Path, dataset: str, sample_id: str, crop_rgb: np.ndarray
+) -> Path:
     safe = safe_id(sample_id).replace("#", "_").replace("/", "_")
     out = output_dir / "images" / dataset / f"{safe}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    ok = cv2.imwrite(
+        str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+    )
     if not ok:
         raise OSError(f"failed to write crop image: {out}")
     return out
@@ -480,13 +532,17 @@ def _crop_sample_image(
         output_size=256,
     )
     crop_path = _write_crop_image(output_dir, dataset, sample_id, crop_rgb)
-    return crop_path, crop_points68, {
-        "original_image": str(image_path.resolve()),
-        "crop_bbox_xyxy": crop_bbox,
-        "crop_padding_ratio": float(pad_ratio),
-        "crop_bbox_source": bbox_source,
-        "crop_output_size": 256,
-    }
+    return (
+        crop_path,
+        crop_points68,
+        {
+            "original_image": str(image_path.resolve()),
+            "crop_bbox_xyxy": crop_bbox,
+            "crop_padding_ratio": float(pad_ratio),
+            "crop_bbox_source": bbox_source,
+            "crop_output_size": 256,
+        },
+    )
 
 
 def _build_image_index(root: Path) -> dict[str, list[Path]]:
@@ -513,7 +569,12 @@ def _build_combined_image_index(roots: T.Iterable[Path]) -> dict[str, list[Path]
     return index
 
 
-def _matching_image(landmarks: Path, *, root: Path | None = None, image_index: dict[str, list[Path]] | None = None) -> Path | None:
+def _matching_image(
+    landmarks: Path,
+    *,
+    root: Path | None = None,
+    image_index: dict[str, list[Path]] | None = None,
+) -> Path | None:
     for ext in IMAGE_EXTS:
         candidate = landmarks.with_suffix(ext)
         if candidate.is_file():
@@ -536,7 +597,12 @@ def _matching_image(landmarks: Path, *, root: Path | None = None, image_index: d
 
 def _conditions(entry: T.Mapping[str, T.Any], fallback: str) -> tuple[str, ...]:
     labels: list[str] = []
-    for raw in (entry.get("conditions"), entry.get("condition"), entry.get("scenario"), fallback):
+    for raw in (
+        entry.get("conditions"),
+        entry.get("condition"),
+        entry.get("scenario"),
+        fallback,
+    ):
         if isinstance(raw, dict):
             items = [key for key, present in raw.items() if present]
         elif isinstance(raw, str):
@@ -570,8 +636,14 @@ IDENTITY_METADATA_FIELDS = (
 )
 
 
-def _entry_metadata(entry: T.Mapping[str, T.Any], *, dataset: str, source_file: Path | None = None) -> dict[str, T.Any]:
-    metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
+def _entry_metadata(
+    entry: T.Mapping[str, T.Any], *, dataset: str, source_file: Path | None = None
+) -> dict[str, T.Any]:
+    metadata = (
+        dict(entry.get("metadata", {}))
+        if isinstance(entry.get("metadata"), dict)
+        else {}
+    )
     for key in IDENTITY_METADATA_FIELDS:
         if entry.get(key) not in (None, ""):
             metadata.setdefault(key, entry[key])
@@ -581,7 +653,9 @@ def _entry_metadata(entry: T.Mapping[str, T.Any], *, dataset: str, source_file: 
     return metadata
 
 
-def _path_identity_metadata(path: Path, *, root: Path, dataset: str) -> dict[str, T.Any]:
+def _path_identity_metadata(
+    path: Path, *, root: Path, dataset: str
+) -> dict[str, T.Any]:
     rel = path.relative_to(root).with_suffix("")
     parts = list(rel.parts)
     metadata: dict[str, T.Any] = {
@@ -676,7 +750,9 @@ def _sample(
             "target_schema": target_schema,
             "projection_to_68": projection_audit_for_schema(source_schema),
         }
-    meta["mapping_audit"].setdefault("projection_to_68", projection_audit_for_schema(source_schema))
+    meta["mapping_audit"].setdefault(
+        "projection_to_68", projection_audit_for_schema(source_schema)
+    )
 
     out: dict[str, T.Any] = {
         "sample_id": sample_id,
@@ -733,10 +809,18 @@ def _with_split(sample: dict[str, T.Any], split: str) -> dict[str, T.Any]:
     return sample
 
 
-def _filter(samples: list[dict[str, T.Any]], scenarios: tuple[str, ...] | None, limit: int | None) -> list[dict[str, T.Any]]:
+def _filter(
+    samples: list[dict[str, T.Any]],
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+) -> list[dict[str, T.Any]]:
     if scenarios:
         allowed = set(scenarios)
-        samples = [sample for sample in samples if allowed.intersection(sample.get("conditions", ()))]
+        samples = [
+            sample
+            for sample in samples
+            if allowed.intersection(sample.get("conditions", ()))
+        ]
     if not limit:
         return samples
     counts: Counter[str] = Counter()
@@ -766,7 +850,9 @@ def _write_manifest(
     merged: list[dict[str, T.Any]] = []
     if mode == "merge" and manifest_path.is_file():
         payload = read_json(manifest_path)
-        merged = [dict(item) for item in payload.get("samples", []) if isinstance(item, dict)]
+        merged = [
+            dict(item) for item in payload.get("samples", []) if isinstance(item, dict)
+        ]
     seen = {str(item.get("image")) for item in merged}
     for sample in samples:
         image = str(sample.get("image"))
@@ -829,7 +915,14 @@ def _draw_manifest_overlay(
     for index, (x, y) in enumerate(points):
         occluded = vis is not None and index < len(vis) and not bool(vis[index])
         color = occluded_color if occluded else visible_color
-        cv2.circle(image, (int(round(x)), int(round(y))), radius, color, -1, lineType=cv2.LINE_AA)
+        cv2.circle(
+            image,
+            (int(round(x)), int(round(y))),
+            radius,
+            color,
+            -1,
+            lineType=cv2.LINE_AA,
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(str(output_path), image)
     if not ok:
@@ -863,11 +956,15 @@ def _draw_overlay_task(task: _OverlayTask) -> tuple[_OverlayTask, str | None]:
         return task, str(err)
 
 
-def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 50, max_workers: int = 1) -> Path:
+def _write_visual_audit(
+    manifest_path: Path, output_dir: Path, *, limit: int = 50, max_workers: int = 1
+) -> Path:
     payload = read_json(manifest_path)
     entries = payload.get("samples", [])
     if not isinstance(entries, list):
-        raise ValueError(f"manifest {manifest_path} must contain samples list for visual audit")
+        raise ValueError(
+            f"manifest {manifest_path} must contain samples list for visual audit"
+        )
     base_dir = manifest_path.parent
     audit_dir = output_dir / "visual_audit"
     overlays: list[dict[str, T.Any]] = []
@@ -882,7 +979,9 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
-        schema = str(entry.get("target_schema") or entry.get("source_schema") or "unknown")
+        schema = str(
+            entry.get("target_schema") or entry.get("source_schema") or "unknown"
+        )
         schema_counts[schema] += 1
         dataset_name = str(entry.get("dataset") or "unknown")
         if per_dataset_selected.get(dataset_name, 0) >= int(limit):
@@ -891,7 +990,9 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
         landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
         sample_id = str(entry.get("sample_id") or index)
         if not image_value or not landmarks_value:
-            skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
+            skipped.append(
+                {"sample_id": sample_id, "reason": "missing image or landmarks"}
+            )
             continue
         visibility = entry.get("visibility")
         if visibility is None and isinstance(entry.get("metadata"), dict):
@@ -905,7 +1006,11 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
                 schema=schema,
                 image_path=_resolve_path(image_value, base_dir=base_dir),
                 landmarks_path=_resolve_path(landmarks_value, base_dir=base_dir),
-                overlay_path=audit_dir / "overlays" / dataset_dir / schema / f"{overlay_name}.jpg",
+                overlay_path=audit_dir
+                / "overlays"
+                / dataset_dir
+                / schema
+                / f"{overlay_name}.jpg",
                 visibility=tuple(visibility) if visibility is not None else None,
             )
         )
@@ -951,7 +1056,8 @@ def _json_source(root: Path) -> Path | None:
         except (OSError, ValueError):
             continue
         if isinstance(payload, list) or (
-            isinstance(payload, dict) and any(key in payload for key in ("samples", "entries"))
+            isinstance(payload, dict)
+            and any(key in payload for key in ("samples", "entries"))
         ):
             return path
     return None
@@ -970,9 +1076,15 @@ def _build_json(
     image_root: str | None,
 ) -> Path:
     payload = read_json(path)
-    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+    entries = (
+        payload.get("samples", payload.get("entries", payload))
+        if isinstance(payload, dict)
+        else payload
+    )
     if not isinstance(entries, list):
-        raise ValueError(f"JSON source must contain list, entries, or samples list: {path}")
+        raise ValueError(
+            f"JSON source must contain list, entries, or samples list: {path}"
+        )
     image_base = Path(image_root) if image_root else path.parent
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
@@ -980,16 +1092,30 @@ def _build_json(
         if not isinstance(entry, dict):
             continue
         image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
-        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
+        landmark_value = (
+            entry.get("landmarks")
+            or entry.get("points")
+            or entry.get("ground_truth")
+            or entry.get("pts")
+        )
         if image_value is None or landmark_value is None:
-            skipped.append({"sample_id": str(idx), "reason": "missing image or landmarks"})
+            skipped.append(
+                {"sample_id": str(idx), "reason": "missing image or landmarks"}
+            )
             continue
-        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or idx)
+        sample_id = str(
+            entry.get("sample_id") or entry.get("id") or entry.get("name") or idx
+        )
         entry_dataset = _dataset(str(entry.get("dataset") or dataset))
         metadata = _entry_metadata(entry, dataset=entry_dataset, source_file=path)
-        source_schema = str(entry.get("source_schema") or metadata.get("source_schema") or "") or None
+        source_schema = (
+            str(entry.get("source_schema") or metadata.get("source_schema") or "")
+            or None
+        )
         try:
-            points68, detected_schema = _load_points(landmark_value, base_dir=path.parent, source_schema=source_schema)
+            points68, detected_schema = _load_points(
+                landmark_value, base_dir=path.parent, source_schema=source_schema
+            )
             image_path = _resolve_path(image_value, base_dir=image_base)
             if not image_path.is_file():
                 raise FileNotFoundError(f"image not found: {image_path}")
@@ -997,23 +1123,25 @@ def _build_json(
             skipped.append({"sample_id": sample_id, "reason": str(err)})
             continue
         conds = _conditions(entry, scenario)
-        split = _split_from_entry_or_identity(entry, metadata, dataset=entry_dataset, sample_id=sample_id)
+        split = _split_from_entry_or_identity(
+            entry, metadata, dataset=entry_dataset, sample_id=sample_id
+        )
         conds = tuple(dict.fromkeys((*conds, f"{split}set")))
         samples.append(
             _with_split(
                 _sample(
-                output_dir=output_dir,
-                dataset=entry_dataset,
-                sample_id=sample_id,
-                image=image_path,
-                points68=points68,
-                condition=str(entry.get("condition") or conds[0]),
-                conditions=conds,
-                source_schema=source_schema or detected_schema,
-                source_id=str(entry.get("source_id") or sample_id),
-                metadata=metadata,
-                visibility=entry.get("visibility", metadata.get("visibility")),
-                normalizer=entry.get("normalizer", metadata.get("normalizer")),
+                    output_dir=output_dir,
+                    dataset=entry_dataset,
+                    sample_id=sample_id,
+                    image=image_path,
+                    points68=points68,
+                    condition=str(entry.get("condition") or conds[0]),
+                    conditions=conds,
+                    source_schema=source_schema or detected_schema,
+                    source_id=str(entry.get("source_id") or sample_id),
+                    metadata=metadata,
+                    visibility=entry.get("visibility", metadata.get("visibility")),
+                    normalizer=entry.get("normalizer", metadata.get("normalizer")),
                 ),
                 split,
             )
@@ -1032,14 +1160,25 @@ def _build_json(
     )
 
 
-def _condition_for_landmark_file(dataset: str, path: Path, scenario: str) -> tuple[str, tuple[str, ...]]:
+def _condition_for_landmark_file(
+    dataset: str, path: Path, scenario: str
+) -> tuple[str, tuple[str, ...]]:
     parts = {_label(part) for part in path.parts}
     labels: list[str] = []
     if dataset == "cofw68":
         labels.append("occlusion")
     if dataset in {"300w", "w300"}:
         labels.append("anchor")
-    for token in ("profile", "pose", "occlusion", "occluded", "frontal", "normal", "clean", "challenging"):
+    for token in (
+        "profile",
+        "pose",
+        "occlusion",
+        "occluded",
+        "frontal",
+        "normal",
+        "clean",
+        "challenging",
+    ):
         if token in parts or any(token in part for part in parts):
             labels.append(token)
     for token in ("train", "training"):
@@ -1090,8 +1229,13 @@ def _build_directory(
         for path in sorted(root.rglob(f"*{suffix}"))
         if path.name != "manifest.json" and not path.name.startswith(".")
     ]
-    for landmark_path in track(landmark_paths, desc=f"Build {dataset}", total=len(landmark_paths), unit="file"):
-        if landmark_path.suffix.lower() == ".txt" and "98pt" in landmark_path.name.lower():
+    for landmark_path in track(
+        landmark_paths, desc=f"Build {dataset}", total=len(landmark_paths), unit="file"
+    ):
+        if (
+            landmark_path.suffix.lower() == ".txt"
+            and "98pt" in landmark_path.name.lower()
+        ):
             continue
         try:
             points68, source_schema = _load_landmark_file(landmark_path)
@@ -1100,13 +1244,22 @@ def _build_directory(
             continue
         image = _matching_image(landmark_path, root=image_base, image_index=image_index)
         if image is None:
-            skipped.append({"sample_id": landmark_path.as_posix(), "reason": "matching image not found"})
+            skipped.append(
+                {
+                    "sample_id": landmark_path.as_posix(),
+                    "reason": "matching image not found",
+                }
+            )
             continue
         sample_id = landmark_path.relative_to(root).with_suffix("").as_posix()
-        condition, conds = _condition_for_landmark_file(dataset, landmark_path.relative_to(root), scenario)
+        condition, conds = _condition_for_landmark_file(
+            dataset, landmark_path.relative_to(root), scenario
+        )
         sample_image = image
         sample_points68 = points68
-        sample_metadata = _path_identity_metadata(landmark_path, root=root, dataset=dataset)
+        sample_metadata = _path_identity_metadata(
+            landmark_path, root=root, dataset=dataset
+        )
         entry_for_split: dict[str, T.Any] = {}
         if "trainset" in conds:
             entry_for_split["split"] = "train"
@@ -1151,7 +1304,9 @@ def _build_directory(
             )
         )
     if not samples:
-        raise ValueError(f"no usable schema-aware landmark samples found under {root}; skipped={skipped[:5]}")
+        raise ValueError(
+            f"no usable schema-aware landmark samples found under {root}; skipped={skipped[:5]}"
+        )
     return _write_manifest(
         output_dir,
         dataset,
@@ -1197,7 +1352,9 @@ def _source_image_roots(root: Path, dataset: str) -> tuple[Path, ...]:
     return tuple(out)
 
 
-def _schema_parser_metadata(dataset: str, parser_name: str, landmark_path: Path, root: Path) -> dict[str, T.Any]:
+def _schema_parser_metadata(
+    dataset: str, parser_name: str, landmark_path: Path, root: Path
+) -> dict[str, T.Any]:
     metadata = _path_identity_metadata(landmark_path, root=root, dataset=dataset)
     metadata.update(
         {
@@ -1224,7 +1381,9 @@ def _image_for_dataset_landmarks(
     roots = (Path(image_root),) if image_root else _source_image_roots(root, dataset)
     for candidate_root in roots:
         image_index = _build_image_index(candidate_root)
-        image = _matching_image(landmark_path, root=candidate_root, image_index=image_index)
+        image = _matching_image(
+            landmark_path, root=candidate_root, image_index=image_index
+        )
         if image is not None:
             return image
     return None
@@ -1279,7 +1438,13 @@ def _image_name_from_landmark_name(path: Path) -> str:
 def _read_bbox_file(path: Path | None) -> list[float] | None:
     if path is None or not path.is_file():
         return None
-    values = [float(item) for item in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", path.read_text(encoding="utf-8", errors="ignore"))]
+    values = [
+        float(item)
+        for item in re.findall(
+            r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?",
+            path.read_text(encoding="utf-8", errors="ignore"),
+        )
+    ]
     if len(values) < 4:
         return None
     return [float(value) for value in values[:4]]
@@ -1308,7 +1473,9 @@ def _manifest_split_for_source_split(source_split: str) -> str:
     return "train" if _label(source_split) == "train" else "test"
 
 
-def _native_conditions_for_split(scenario: str, split: str) -> tuple[str, tuple[str, ...]]:
+def _native_conditions_for_split(
+    scenario: str, split: str
+) -> tuple[str, tuple[str, ...]]:
     conds = tuple(dict.fromkeys((_label(scenario), f"{split}set")))
     return conds[0], conds
 
@@ -1337,7 +1504,14 @@ def _candidate_300w_cache_roots(root: Path, image_root: str | None) -> tuple[Pat
                 root / "data" / "300w" / "300w",
                 root.parent / "300w" / "data" / "300w" / "300w",
                 root.parent / "300w" / "300w",
-                ROOT / ".fs_cache" / "landmark_quality" / "300w" / "extracted" / "data" / "300w" / "300w",
+                ROOT
+                / ".fs_cache"
+                / "landmark_quality"
+                / "300w"
+                / "extracted"
+                / "data"
+                / "300w"
+                / "300w",
             )
         )
 
@@ -1346,7 +1520,10 @@ def _candidate_300w_cache_roots(root: Path, image_root: str | None) -> tuple[Pat
     for candidate in raw_candidates:
         if not candidate.is_dir():
             continue
-        if candidate.name in {"trainset", "testset"} and candidate.parent.name in {"helen", "lfpw"}:
+        if candidate.name in {"trainset", "testset"} and candidate.parent.name in {
+            "helen",
+            "lfpw",
+        }:
             candidate = candidate.parent.parent
         elif candidate.name in {"afw", "helen", "lfpw", "ibug"}:
             candidate = candidate.parent
@@ -1394,7 +1571,9 @@ def _images_matching_name(
     if raw.suffix.lower() not in IMAGE_EXTS:
         search_names = [f"{raw.name}{ext}" for ext in IMAGE_EXTS]
     if image_index is not None:
-        index_key = raw.stem.lower() if raw.suffix.lower() in IMAGE_EXTS else raw.name.lower()
+        index_key = (
+            raw.stem.lower() if raw.suffix.lower() in IMAGE_EXTS else raw.name.lower()
+        )
         for match in image_index.get(index_key, []):
             if match.name in search_names and _path_under_roots(match, root_list):
                 add(match)
@@ -1421,7 +1600,9 @@ def _resolve_unique_image(
         raise FileNotFoundError(f"{context} image not found: {image_name}")
     if len(matches) > 1:
         rendered = ", ".join(str(path) for path in matches[:5])
-        raise ValueError(f"{context} image match is ambiguous for {image_name}: {rendered}")
+        raise ValueError(
+            f"{context} image match is ambiguous for {image_name}: {rendered}"
+        )
     return matches[0]
 
 
@@ -1444,11 +1625,17 @@ def _jd_drop_face_index(stem: str) -> str:
     return base if sep and tail.isdigit() else stem
 
 
-def _jd_300w_stem_and_split(image_name: str) -> tuple[str | None, str | None, str | None]:
+def _jd_300w_stem_and_split(
+    image_name: str,
+) -> tuple[str | None, str | None, str | None]:
     path = Path(image_name)
     stem = path.stem
     prefix, sep, rest = stem.partition("_")
-    subset = prefix.lower() if sep and prefix.lower() in {"afw", "helen", "lfpw", "ibug"} else None
+    subset = (
+        prefix.lower()
+        if sep and prefix.lower() in {"afw", "helen", "lfpw", "ibug"}
+        else None
+    )
     if subset is None:
         return None, None, None
     base_stem = _jd_drop_face_index(rest)
@@ -1462,7 +1649,9 @@ def _jd_300w_stem_and_split(image_name: str) -> tuple[str | None, str | None, st
     return subset, base_stem, split_hint
 
 
-def _jd_300w_candidate_roots(root: Path, image_root: str | None, image_name: str) -> tuple[Path, ...]:
+def _jd_300w_candidate_roots(
+    root: Path, image_root: str | None, image_name: str
+) -> tuple[Path, ...]:
     subset, _, split_hint = _jd_300w_stem_and_split(image_name)
     cache_roots = _candidate_300w_cache_roots(root, image_root)
     roots: list[Path] = []
@@ -1476,7 +1665,11 @@ def _jd_300w_candidate_roots(root: Path, image_root: str | None, image_name: str
         if subset in {"helen", "lfpw"}:
             if split_hint and (subset_root / split_hint).is_dir():
                 roots.append(subset_root / split_hint)
-            roots.extend(path for path in (subset_root / "trainset", subset_root / "testset") if path.is_dir())
+            roots.extend(
+                path
+                for path in (subset_root / "trainset", subset_root / "testset")
+                if path.is_dir()
+            )
         else:
             roots.append(subset_root)
     out: list[Path] = []
@@ -1522,15 +1715,23 @@ def _resolve_jd_300w_image(
         except FileNotFoundError as err:
             errors.append(str(err))
             continue
-    raise FileNotFoundError(errors[-1] if errors else f"JD-landmark image not found: {image_name}")
+    raise FileNotFoundError(
+        errors[-1] if errors else f"JD-landmark image not found: {image_name}"
+    )
 
 
 def _jd_bbox_dirs(root: Path) -> tuple[Path, ...]:
     candidates = [
         root / "Test_data1" / "rect",
-        root / "training_dataset_face_detection_bounding_box_v1" / "training_dataset_face_detection_bounding_box",
+        root
+        / "training_dataset_face_detection_bounding_box_v1"
+        / "training_dataset_face_detection_bounding_box",
     ]
-    candidates.extend(path for path in root.rglob("training_dataset_face_detection_bounding_box") if path.is_dir())
+    candidates.extend(
+        path
+        for path in root.rglob("training_dataset_face_detection_bounding_box")
+        if path.is_dir()
+    )
     out: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
@@ -1575,11 +1776,15 @@ def _build_expected_schema_dataset(
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for landmark_path in track(_landmark_paths(root), desc=f"Build {dataset}", unit="file"):
+    for landmark_path in track(
+        _landmark_paths(root), desc=f"Build {dataset}", unit="file"
+    ):
         try:
             points, detected_schema = _load_landmark_file(landmark_path)
             if detected_schema != expected_schema:
-                raise ValueError(f"{parser_name} expected {expected_schema}, got {detected_schema}")
+                raise ValueError(
+                    f"{parser_name} expected {expected_schema}, got {detected_schema}"
+                )
             image = _image_for_dataset_landmarks(
                 landmark_path,
                 dataset=dataset,
@@ -1593,7 +1798,9 @@ def _build_expected_schema_dataset(
             continue
 
         sample_id = landmark_path.relative_to(root).with_suffix("").as_posix()
-        condition, conds = _condition_for_landmark_file(dataset, landmark_path.relative_to(root), scenario)
+        condition, conds = _condition_for_landmark_file(
+            dataset, landmark_path.relative_to(root), scenario
+        )
         metadata = _schema_parser_metadata(dataset, parser_name, landmark_path, root)
         entry_for_split: dict[str, T.Any] = {}
         if "trainset" in conds or metadata.get("source_split") == "train":
@@ -1628,7 +1835,9 @@ def _build_expected_schema_dataset(
             break
 
     if not samples:
-        raise ValueError(f"no {dataset} samples built with {parser_name}; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no {dataset} samples built with {parser_name}; skipped={skipped[:10]}"
+        )
 
     return _write_manifest(
         output_dir,
@@ -1657,9 +1866,15 @@ def _build_expected_schema_json(
     image_root: str | None,
 ) -> Path:
     payload = read_json(path)
-    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+    entries = (
+        payload.get("samples", payload.get("entries", payload))
+        if isinstance(payload, dict)
+        else payload
+    )
     if not isinstance(entries, list):
-        raise ValueError(f"{parser_name} JSON source must contain list, entries, or samples list: {path}")
+        raise ValueError(
+            f"{parser_name} JSON source must contain list, entries, or samples list: {path}"
+        )
     image_base = Path(image_root) if image_root else path.parent
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
@@ -1667,15 +1882,28 @@ def _build_expected_schema_json(
         if not isinstance(entry, dict):
             continue
         image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
-        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
-        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or idx)
+        landmark_value = (
+            entry.get("landmarks")
+            or entry.get("points")
+            or entry.get("ground_truth")
+            or entry.get("pts")
+        )
+        sample_id = str(
+            entry.get("sample_id") or entry.get("id") or entry.get("name") or idx
+        )
         if image_value is None or landmark_value is None:
-            skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
+            skipped.append(
+                {"sample_id": sample_id, "reason": "missing image or landmarks"}
+            )
             continue
         metadata = _entry_metadata(entry, dataset=dataset, source_file=path)
         metadata["dataset_parser"] = parser_name
         metadata["parser_type"] = "dataset_specific"
-        source_schema = str(entry.get("source_schema") or metadata.get("source_schema") or expected_schema)
+        source_schema = str(
+            entry.get("source_schema")
+            or metadata.get("source_schema")
+            or expected_schema
+        )
         try:
             points, detected_schema = _load_points(
                 landmark_value,
@@ -1683,7 +1911,9 @@ def _build_expected_schema_json(
                 source_schema=source_schema,
             )
             if detected_schema != expected_schema:
-                raise ValueError(f"{parser_name} expected {expected_schema}, got {detected_schema}")
+                raise ValueError(
+                    f"{parser_name} expected {expected_schema}, got {detected_schema}"
+                )
             image_path = _resolve_path(image_value, base_dir=image_base)
             if not image_path.is_file():
                 raise FileNotFoundError(f"image not found: {image_path}")
@@ -1692,7 +1922,9 @@ def _build_expected_schema_json(
             continue
 
         conds = _conditions(entry, scenario)
-        split = _split_from_entry_or_identity(entry, metadata, dataset=dataset, sample_id=sample_id)
+        split = _split_from_entry_or_identity(
+            entry, metadata, dataset=dataset, sample_id=sample_id
+        )
         conds = tuple(dict.fromkeys((*conds, f"{split}set")))
         samples.append(
             _with_split(
@@ -1715,7 +1947,9 @@ def _build_expected_schema_json(
         )
 
     if not samples:
-        raise ValueError(f"no {dataset} JSON samples built with {parser_name}; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no {dataset} JSON samples built with {parser_name}; skipped={skipped[:10]}"
+        )
     return _write_manifest(
         output_dir,
         dataset,
@@ -1779,7 +2013,12 @@ def _build_helen(
         sample_id = f"annotations/{index:05d}"
         try:
             if isinstance(entry, dict):
-                image_name = str(entry.get("image") or entry.get("image_path") or entry.get("filename") or "")
+                image_name = str(
+                    entry.get("image")
+                    or entry.get("image_path")
+                    or entry.get("filename")
+                    or ""
+                )
                 raw_points = entry.get("landmarks") or entry.get("points")
                 width = entry.get("width") or entry.get("image_width")
                 height = entry.get("height") or entry.get("image_height")
@@ -1795,7 +2034,9 @@ def _build_helen(
                 raise ValueError("unsupported HELEN annotation row")
             if not image_name or raw_points is None:
                 raise ValueError("missing image name or landmarks")
-            points, detected_schema = _canonical_points(raw_points, source_schema="2d_194")
+            points, detected_schema = _canonical_points(
+                raw_points, source_schema="2d_194"
+            )
             if detected_schema != "2d_194":
                 raise ValueError(f"HELEN expected 2d_194, got {detected_schema}")
             image = _resolve_unique_image(
@@ -1867,7 +2108,10 @@ def _lapa_release_roots(root: Path) -> list[Path]:
         resolved = candidate.resolve()
         if resolved in seen:
             continue
-        if any((candidate / split / "landmarks").is_dir() for split in ("train", "val", "test")):
+        if any(
+            (candidate / split / "landmarks").is_dir()
+            for split in ("train", "val", "test")
+        ):
             seen.add(resolved)
             out.append(candidate)
     return out
@@ -1920,16 +2164,22 @@ def _build_lapa(
                         roots.insert(0, Path(image_root))
                     image = _find_named_image(roots, landmark_path.stem)
                     if image is None:
-                        raise FileNotFoundError(f"LaPa image not found for {landmark_path.name}")
+                        raise FileNotFoundError(
+                            f"LaPa image not found for {landmark_path.name}"
+                        )
                 except Exception as err:  # noqa: BLE001
-                    skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+                    skipped.append(
+                        {"sample_id": landmark_path.as_posix(), "reason": str(err)}
+                    )
                     continue
 
                 split = _manifest_split_for_source_split(source_split)
                 condition, conds = _native_conditions_for_split(scenario, split)
                 label_path = label_dir / f"{landmark_path.stem}.png"
                 sample_id = f"{source_split}/{landmark_path.stem}"
-                metadata = _path_identity_metadata(landmark_path, root=root, dataset="lapa")
+                metadata = _path_identity_metadata(
+                    landmark_path, root=root, dataset="lapa"
+                )
                 metadata.update(
                     {
                         "dataset_parser": "lapa_release_106",
@@ -1960,7 +2210,9 @@ def _build_lapa(
                 )
 
     if not samples:
-        raise ValueError(f"no LaPa native release samples built; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no LaPa native release samples built; skipped={skipped[:10]}"
+        )
     return _write_manifest(
         output_dir,
         "lapa",
@@ -1973,7 +2225,9 @@ def _build_lapa(
     )
 
 
-def _jd_landmark_sources(root: Path) -> list[tuple[Path, Path | None, Path | None, str, str]]:
+def _jd_landmark_sources(
+    root: Path,
+) -> list[tuple[Path, Path | None, Path | None, str, str]]:
     out: list[tuple[Path, Path | None, Path | None, str, str]] = []
     test_roots = [root / "Test_data1"]
     if root.name == "Test_data1":
@@ -1981,7 +2235,15 @@ def _jd_landmark_sources(root: Path) -> list[tuple[Path, Path | None, Path | Non
     for test_root in test_roots:
         landmark_dir = test_root / "landmark"
         if landmark_dir.is_dir():
-            out.append((landmark_dir, test_root / "picture", test_root / "rect", "test", "test_data1"))
+            out.append(
+                (
+                    landmark_dir,
+                    test_root / "picture",
+                    test_root / "rect",
+                    "test",
+                    "test_data1",
+                )
+            )
 
     corrected_roots = [root / "Corrected_landmark"]
     if root.name == "Corrected_landmark":
@@ -2030,44 +2292,65 @@ def _build_jd_landmark(
 
     corrected_by_name = {
         path.name: path
-        for corrected_root in (root / "Corrected_landmark", root if root.name == "Corrected_landmark" else root / "__missing__")
+        for corrected_root in (
+            root / "Corrected_landmark",
+            root if root.name == "Corrected_landmark" else root / "__missing__",
+        )
         if corrected_root.is_dir()
         for path in corrected_root.glob("*.txt")
     }
     global_bbox_dirs = _jd_bbox_dirs(root)
-    jd_image_index = _build_combined_image_index(_candidate_300w_cache_roots(root, image_root))
+    jd_image_index = _build_combined_image_index(
+        _candidate_300w_cache_roots(root, image_root)
+    )
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     for landmark_dir, image_dir, bbox_dir, source_split, source_name in sources:
         for landmark_path in sorted(landmark_dir.glob("*.txt")):
             image_name = _image_name_from_landmark_name(landmark_path)
             corrected_path = corrected_by_name.get(landmark_path.name)
-            annotation_path = corrected_path if corrected_path is not None else landmark_path
+            annotation_path = (
+                corrected_path if corrected_path is not None else landmark_path
+            )
             try:
                 points, detected_schema = _load_landmark_file(annotation_path)
                 if detected_schema != "2d_106":
-                    raise ValueError(f"JD-landmark expected 2d_106, got {detected_schema}")
+                    raise ValueError(
+                        f"JD-landmark expected 2d_106, got {detected_schema}"
+                    )
                 try:
-                    image = _resolve_jd_300w_image(root, image_root, image_name, image_index=jd_image_index)
+                    image = _resolve_jd_300w_image(
+                        root, image_root, image_name, image_index=jd_image_index
+                    )
                     image_source = "300w_cache"
                 except FileNotFoundError:
                     if image_dir is None:
                         raise
-                    image = _resolve_unique_image((image_dir,), image_name, context="JD-landmark Test_data1")
+                    image = _resolve_unique_image(
+                        (image_dir,), image_name, context="JD-landmark Test_data1"
+                    )
                     image_source = "test_data1_picture"
             except Exception as err:  # noqa: BLE001
-                skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+                skipped.append(
+                    {"sample_id": landmark_path.as_posix(), "reason": str(err)}
+                )
                 continue
 
-            bbox_dirs = tuple(path for path in (bbox_dir, *global_bbox_dirs) if path is not None)
+            bbox_dirs = tuple(
+                path for path in (bbox_dir, *global_bbox_dirs) if path is not None
+            )
             bbox_path = None
             for candidate_bbox_dir in bbox_dirs:
-                bbox_path = _bbox_file_for_landmark(candidate_bbox_dir, landmark_path, image_name=image_name)
+                bbox_path = _bbox_file_for_landmark(
+                    candidate_bbox_dir, landmark_path, image_name=image_name
+                )
                 if bbox_path is not None:
                     break
             bbox = _read_bbox_file(bbox_path)
             sample_id = f"{source_name}/{Path(image_name).stem}"
-            metadata = _path_identity_metadata(landmark_path, root=root, dataset="jd-landmark")
+            metadata = _path_identity_metadata(
+                landmark_path, root=root, dataset="jd-landmark"
+            )
             metadata.update(
                 {
                     "dataset_parser": "jd_landmark_release_106",
@@ -2079,7 +2362,9 @@ def _build_jd_landmark(
                     "source_image_name": image_name,
                     "source_image": str(image.resolve()),
                     "resolved_image_source": image_source,
-                    "resolved_300w_image_path": str(image.resolve()) if image_source == "300w_cache" else None,
+                    "resolved_300w_image_path": str(image.resolve())
+                    if image_source == "300w_cache"
+                    else None,
                     "base_subset": _jd_300w_base_subset(image_name),
                 }
             )
@@ -2090,7 +2375,11 @@ def _build_jd_landmark(
                 metadata["source_bbox"] = str(bbox_path.resolve())
                 metadata["bbox_xyxy"] = bbox
 
-            split_hint = "test" if source_split == "test" else _split_hint_from_jd_name(image_name)
+            split_hint = (
+                "test"
+                if source_split == "test"
+                else _split_hint_from_jd_name(image_name)
+            )
             split = _split_from_entry_or_identity(
                 {"split": split_hint} if split_hint else {},
                 metadata,
@@ -2121,7 +2410,9 @@ def _build_jd_landmark(
             break
 
     if not samples:
-        raise ValueError(f"no JD-landmark native release samples built; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no JD-landmark native release samples built; skipped={skipped[:10]}"
+        )
     return _write_manifest(
         output_dir,
         "jd-landmark",
@@ -2141,7 +2432,9 @@ def _ffl_split_dirs(root: Path, dataset: str) -> list[tuple[Path, str]]:
         base_candidates = [root / "FLL3_dataset", root]
         candidates = []
         for base in base_candidates:
-            candidates.extend((base / split, split) for split in ("train", "val", "test"))
+            candidates.extend(
+                (base / split, split) for split in ("train", "val", "test")
+            )
     out: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for split_dir, split in candidates:
@@ -2186,21 +2479,29 @@ def _build_ffl_family(
     skipped: list[dict[str, str]] = []
     for split_dir, source_split in split_dirs:
         landmark_dir = split_dir / "landmark"
-        image_dir = split_dir / ("picture_mask" if (split_dir / "picture_mask").is_dir() else "picture")
+        image_dir = split_dir / (
+            "picture_mask" if (split_dir / "picture_mask").is_dir() else "picture"
+        )
         bbox_dir = split_dir / "bbox"
         for landmark_path in sorted(landmark_dir.glob("*.txt")):
             try:
                 points, detected_schema = _load_landmark_file(landmark_path)
                 if detected_schema != "2d_106":
-                    raise ValueError(f"{dataset} expected 2d_106, got {detected_schema}")
+                    raise ValueError(
+                        f"{dataset} expected 2d_106, got {detected_schema}"
+                    )
                 roots = [image_dir]
                 if image_root:
                     roots.insert(0, Path(image_root))
                 image = _find_named_image(roots, landmark_path.stem)
                 if image is None:
-                    raise FileNotFoundError(f"{dataset} image not found for {landmark_path.name}")
+                    raise FileNotFoundError(
+                        f"{dataset} image not found for {landmark_path.name}"
+                    )
             except Exception as err:  # noqa: BLE001
-                skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+                skipped.append(
+                    {"sample_id": landmark_path.as_posix(), "reason": str(err)}
+                )
                 continue
 
             bbox_path = _bbox_file_for_landmark(bbox_dir, landmark_path)
@@ -2208,7 +2509,9 @@ def _build_ffl_family(
             split = _manifest_split_for_source_split(source_split)
             condition, conds = _native_conditions_for_split(scenario, split)
             sample_id = f"{source_split}/{landmark_path.stem}"
-            metadata = _path_identity_metadata(landmark_path, root=root, dataset=dataset)
+            metadata = _path_identity_metadata(
+                landmark_path, root=root, dataset=dataset
+            )
             metadata.update(
                 {
                     "dataset_parser": f"{dataset}_release_106",
@@ -2240,7 +2543,9 @@ def _build_ffl_family(
             )
 
     if not samples:
-        raise ValueError(f"no {dataset} native release samples built; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no {dataset} native release samples built; skipped={skipped[:10]}"
+        )
     return _write_manifest(
         output_dir,
         dataset,
@@ -2289,7 +2594,9 @@ def _menpo_identity_from_image(dataset: str, image_name: str) -> dict[str, str]:
     return metadata
 
 
-def _parse_menpo_list_line(line: str) -> tuple[str, list[float] | None, list[list[float]] | None, np.ndarray]:
+def _parse_menpo_list_line(
+    line: str,
+) -> tuple[str, list[float] | None, list[list[float]] | None, np.ndarray]:
     parts = line.split()
     if len(parts) < 2:
         raise ValueError("empty Menpo-style list row")
@@ -2300,9 +2607,16 @@ def _parse_menpo_list_line(line: str) -> tuple[str, list[float] | None, list[lis
     landmark_values = values
     if len(values) == 150:
         bbox = [float(item) for item in values[:4]]
-        coarse = np.asarray(values[4:14], dtype=np.float32).reshape(5, 2).astype(float).tolist()
+        coarse = (
+            np.asarray(values[4:14], dtype=np.float32)
+            .reshape(5, 2)
+            .astype(float)
+            .tolist()
+        )
         landmark_values = values[14:]
-    points, detected_schema = _canonical_points(np.asarray(landmark_values, dtype=np.float32), source_schema="2d_68")
+    points, detected_schema = _canonical_points(
+        np.asarray(landmark_values, dtype=np.float32), source_schema="2d_68"
+    )
     if detected_schema != "2d_68":
         raise ValueError(f"Menpo-style list expected 2d_68, got {detected_schema}")
     return image_name, bbox, coarse, points
@@ -2327,7 +2641,10 @@ def _build_subject_session_dataset(
         for list_path in list_files:
             source_split = _list_split_from_path(list_path)
             split = _manifest_split_for_source_split(source_split)
-            for line_number, line in enumerate(list_path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            for line_number, line in enumerate(
+                list_path.read_text(encoding="utf-8", errors="ignore").splitlines(),
+                start=1,
+            ):
                 if not line.strip() or line.lstrip().startswith("#"):
                     continue
                 try:
@@ -2337,9 +2654,13 @@ def _build_subject_session_dataset(
                         roots.insert(0, Path(image_root))
                     image = _find_named_image(roots, image_name)
                     if image is None:
-                        raise FileNotFoundError(f"{dataset} image not found: {image_name}")
+                        raise FileNotFoundError(
+                            f"{dataset} image not found: {image_name}"
+                        )
                 except Exception as err:  # noqa: BLE001
-                    skipped.append({"sample_id": f"{list_path}:{line_number}", "reason": str(err)})
+                    skipped.append(
+                        {"sample_id": f"{list_path}:{line_number}", "reason": str(err)}
+                    )
                     continue
 
                 sample_id = f"{list_path.stem}/{Path(image_name).stem}"
@@ -2379,7 +2700,9 @@ def _build_subject_session_dataset(
                 )
 
         if not samples:
-            raise ValueError(f"no {dataset} Menpo-style list samples built; skipped={skipped[:10]}")
+            raise ValueError(
+                f"no {dataset} Menpo-style list samples built; skipped={skipped[:10]}"
+            )
         return _write_manifest(
             output_dir,
             dataset,
@@ -2419,10 +2742,14 @@ def _build_subject_session_dataset(
     image_index = _build_image_index(image_base)
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for landmark_path in track(_landmark_paths(root), desc=f"Build {dataset}", unit="file"):
+    for landmark_path in track(
+        _landmark_paths(root), desc=f"Build {dataset}", unit="file"
+    ):
         try:
             points, source_schema = _load_landmark_file(landmark_path)
-            image = _matching_image(landmark_path, root=image_base, image_index=image_index)
+            image = _matching_image(
+                landmark_path, root=image_base, image_index=image_index
+            )
             if image is None:
                 raise FileNotFoundError("matching image not found")
         except Exception as err:  # noqa: BLE001
@@ -2439,7 +2766,9 @@ def _build_subject_session_dataset(
                 "source_schema": source_schema,
             }
         )
-        split = _split_from_entry_or_identity({}, metadata, dataset=dataset, sample_id=sample_id)
+        split = _split_from_entry_or_identity(
+            {}, metadata, dataset=dataset, sample_id=sample_id
+        )
         conds = tuple(dict.fromkeys((*conds, f"{split}set")))
         samples.append(
             _with_split(
@@ -2460,7 +2789,9 @@ def _build_subject_session_dataset(
         )
 
     if not samples:
-        raise ValueError(f"no {dataset} Menpo-style samples built; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no {dataset} Menpo-style samples built; skipped={skipped[:10]}"
+        )
     return _write_manifest(
         output_dir,
         dataset,
@@ -2521,18 +2852,25 @@ def _cofw68_original_points_array(value: T.Any) -> list[np.ndarray]:
     if arr.ndim == 2:
         if arr.shape[0] == 87:
             return [
-                np.stack((arr[:29, index], arr[29:58, index]), axis=1).astype(np.float32)
+                np.stack((arr[:29, index], arr[29:58, index]), axis=1).astype(
+                    np.float32
+                )
                 for index in range(arr.shape[1])
             ]
         if arr.shape[1] == 87:
             return [
-                np.stack((arr[index, :29], arr[index, 29:58]), axis=1).astype(np.float32)
+                np.stack((arr[index, :29], arr[index, 29:58]), axis=1).astype(
+                    np.float32
+                )
                 for index in range(arr.shape[0])
             ]
         if arr.shape[1] == 58:
             return [row.reshape(29, 2).astype(np.float32) for row in arr]
         if arr.shape[0] == 58:
-            return [arr[:, index].reshape(29, 2).astype(np.float32) for index in range(arr.shape[1])]
+            return [
+                arr[:, index].reshape(29, 2).astype(np.float32)
+                for index in range(arr.shape[1])
+            ]
         if arr.shape == (29, 2):
             return [arr.astype(np.float32)]
     return []
@@ -2548,7 +2886,10 @@ def _cofw68_original_image_array(value: T.Any) -> list[np.ndarray]:
         if arr.shape[-1] in (1, 3, 4):
             return [arr[index] for index in range(arr.shape[0])]
         if arr.shape[0] in (1, 3, 4):
-            return [np.moveaxis(arr[:, :, :, index], 0, -1) for index in range(arr.shape[-1])]
+            return [
+                np.moveaxis(arr[:, :, :, index], 0, -1)
+                for index in range(arr.shape[-1])
+            ]
         return [arr[:, :, :, index] for index in range(arr.shape[-1])]
     if arr.ndim in (2, 3):
         return [arr]
@@ -2582,10 +2923,7 @@ def _write_cofw68_original_image(
     output_dir: Path, sample_id: str, image: np.ndarray
 ) -> Path:
     path = (
-        output_dir
-        / "images"
-        / "cofw29"
-        / f"{safe_id(sample_id).replace('/', '_')}.png"
+        output_dir / "images" / "cofw29" / f"{safe_id(sample_id).replace('/', '_')}.png"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(image)
@@ -2610,7 +2948,9 @@ def _is_hdf5_mat(path: Path) -> bool:
     try:
         with path.open("rb") as handle:
             header = handle.read(128)
-        return header.startswith(b"\x89HDF\r\n\x1a\n") or b"MATLAB 7.3 MAT-file" in header
+        return (
+            header.startswith(b"\x89HDF\r\n\x1a\n") or b"MATLAB 7.3 MAT-file" in header
+        )
     except OSError:
         return False
 
@@ -2630,9 +2970,27 @@ def _cofw68_original_hdf5_arrays(
 
     with h5py.File(path, "r") as handle:
         trainish = declared_split == "train"
-        phis_key = "phisTr" if trainish and "phisTr" in handle else "phisT" if "phisT" in handle else "phisTr"
-        images_key = "IsTr" if trainish and "IsTr" in handle else "IsT" if "IsT" in handle else "IsTr"
-        bboxes_key = "bboxesTr" if trainish and "bboxesTr" in handle else "bboxesT" if "bboxesT" in handle else None
+        phis_key = (
+            "phisTr"
+            if trainish and "phisTr" in handle
+            else "phisT"
+            if "phisT" in handle
+            else "phisTr"
+        )
+        images_key = (
+            "IsTr"
+            if trainish and "IsTr" in handle
+            else "IsT"
+            if "IsT" in handle
+            else "IsTr"
+        )
+        bboxes_key = (
+            "bboxesTr"
+            if trainish and "bboxesTr" in handle
+            else "bboxesT"
+            if "bboxesT" in handle
+            else None
+        )
         phis = np.asarray(handle[phis_key], dtype=np.float32)
         if phis.ndim != 2:
             raise ValueError(f"cofw68 original phis must be 2D, got {phis.shape}")
@@ -2657,7 +3015,11 @@ def _cofw68_original_hdf5_arrays(
         images: list[np.ndarray] = []
         image_refs = handle[images_key]
         for index in range(len(points_rows)):
-            ref = image_refs[0, index] if image_refs.ndim == 2 and image_refs.shape[0] == 1 else image_refs[index]
+            ref = (
+                image_refs[0, index]
+                if image_refs.ndim == 2 and image_refs.shape[0] == 1
+                else image_refs[index]
+            )
             # Reorient to the annotation frame so 29-point landmarks/bboxes align
             # (the cofw6868 reader applies the same transpose).
             images.append(_orient_cofw68_hdf5_image(np.asarray(handle[ref])))
@@ -2666,16 +3028,24 @@ def _cofw68_original_hdf5_arrays(
         if bboxes_key and bboxes_key in handle:
             bboxes = np.asarray(handle[bboxes_key], dtype=np.float32)
             if bboxes.ndim == 2 and bboxes.shape[0] == 4:
-                bbox_rows = [[float(value) for value in bboxes[:, index]] for index in range(bboxes.shape[1])]
+                bbox_rows = [
+                    [float(value) for value in bboxes[:, index]]
+                    for index in range(bboxes.shape[1])
+                ]
             elif bboxes.ndim == 2 and bboxes.shape[1] == 4:
-                bbox_rows = [[float(value) for value in bboxes[index, :]] for index in range(bboxes.shape[0])]
-            bbox_rows = (bbox_rows + [None] * len(points_rows))[:len(points_rows)]
+                bbox_rows = [
+                    [float(value) for value in bboxes[index, :]]
+                    for index in range(bboxes.shape[0])
+                ]
+            bbox_rows = (bbox_rows + [None] * len(points_rows))[: len(points_rows)]
 
     return points_rows, images, visibility_rows, bbox_rows
+
 
 def _is_matlab_hdf_reader_error(err: Exception) -> bool:
     message = str(err)
     return "HDF reader" in message or "MATLAB 7.3" in message
+
 
 def _build_cofw68_original(
     root: Path,
@@ -2706,7 +3076,9 @@ def _build_cofw68_original(
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    image_index = _build_combined_image_index([Path(image_root) if image_root else root])
+    image_index = _build_combined_image_index(
+        [Path(image_root) if image_root else root]
+    )
     sio: T.Any | None = None
     for mat_path, declared_split in mat_files:
         try:
@@ -2780,7 +3152,9 @@ def _build_cofw68_original(
             except Exception as err:  # noqa: BLE001
                 skipped.append({"sample_id": sample_id, "reason": str(err)})
                 continue
-            visibility = visibility_rows[index] if index < len(visibility_rows) else [True] * 29
+            visibility = (
+                visibility_rows[index] if index < len(visibility_rows) else [True] * 29
+            )
             metadata = {
                 "dataset": "cofw29",
                 "dataset_parser": "cofw_original_29",
@@ -2794,7 +3168,9 @@ def _build_cofw68_original(
             }
             if index < len(bbox_rows) and bbox_rows[index] is not None:
                 metadata["bbox_xyxy"] = bbox_rows[index]
-            condition = "occlusion" if any(not bool(item) for item in visibility) else scenario
+            condition = (
+                "occlusion" if any(not bool(item) for item in visibility) else scenario
+            )
             samples.append(
                 _with_split(
                     _sample(
@@ -2832,10 +3208,10 @@ def _build_cofw68_original(
     )
 
 
-
 def _cofw6868_annotation_paths(root: Path) -> list[Path]:
     return sorted(
-        path for path in root.rglob("*_points.mat")
+        path
+        for path in root.rglob("*_points.mat")
         if path.is_file() and "test_annotations" in path.as_posix()
     )
 
@@ -2857,6 +3233,7 @@ def _cofw68_test_bboxes(root: Path) -> np.ndarray | None:
         return None
     try:
         import scipy.io as sio
+
         payload = sio.loadmat(matches[0])
         boxes = np.asarray(payload.get("bboxes"), dtype=np.float32)
         return boxes if boxes.ndim == 2 and boxes.shape[1] == 4 else None
@@ -3021,7 +3398,9 @@ def _build_cofw68(
         metadata["face_bbox_format"] = "ltrb"
         metadata["face_bbox_source"] = bbox_source
         metadata["crop_visibility_mask_source"] = visible_mask_source
-        metadata["crop_visible_landmark_count"] = int(np.asarray(visible_mask, dtype=bool).sum())
+        metadata["crop_visible_landmark_count"] = int(
+            np.asarray(visible_mask, dtype=bool).sum()
+        )
         metadata["visibility"] = visibility
 
         samples.append(
@@ -3058,11 +3437,9 @@ def _build_cofw68(
     )
 
 
-
 def _find_multipie_root(root: Path) -> Path:
     candidates = sorted(
-        path.parent for path in root.rglob("MultiPIE_*_train.txt")
-        if path.is_file()
+        path.parent for path in root.rglob("MultiPIE_*_train.txt") if path.is_file()
     )
     if candidates:
         return candidates[0]
@@ -3075,11 +3452,15 @@ def _multipie_annotation_files(root: Path) -> list[Path]:
     multipie_root = _find_multipie_root(root)
     files = sorted(multipie_root.glob("MultiPIE_*_train.txt"))
     if not files:
-        raise FileNotFoundError(f"MultiPIE train txt files not found in {multipie_root}")
+        raise FileNotFoundError(
+            f"MultiPIE train txt files not found in {multipie_root}"
+        )
     return files
 
 
-def _multipie_conditions(annotation_file: Path, image_rel: str, scenario: str) -> tuple[str, tuple[str, ...]]:
+def _multipie_conditions(
+    annotation_file: Path, image_rel: str, scenario: str
+) -> tuple[str, tuple[str, ...]]:
     text = f"{annotation_file.name} {image_rel}".lower()
     labels: list[str] = []
     if "profile" in text:
@@ -3094,7 +3475,9 @@ def _multipie_conditions(annotation_file: Path, image_rel: str, scenario: str) -
     return labels[0], tuple(labels)
 
 
-def _multipie_parse_line(line: str, *, line_no: int, path: Path) -> tuple[str, np.ndarray, list[float], str]:
+def _multipie_parse_line(
+    line: str, *, line_no: int, path: Path
+) -> tuple[str, np.ndarray, list[float], str]:
     parts = line.strip().split()
     if len(parts) < 2:
         raise ValueError("empty or malformed line")
@@ -3155,7 +3538,9 @@ def _build_multipie(
     skipped: list[dict[str, str]] = []
 
     for annotation_file in annotation_files:
-        for line_no, line in enumerate(annotation_file.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+        for line_no, line in enumerate(
+            annotation_file.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
+        ):
             if not line.strip():
                 continue
             try:
@@ -3168,11 +3553,17 @@ def _build_multipie(
                 if not image_path.is_file():
                     raise FileNotFoundError(f"image not found: {image_path}")
 
-                condition, conds = _multipie_conditions(annotation_file, image_rel, scenario)
+                condition, conds = _multipie_conditions(
+                    annotation_file, image_rel, scenario
+                )
                 bbox = bbox or _bbox_from_points(points68)
                 sample_id = Path(image_rel).with_suffix("").as_posix()
                 normalizer = _normalizer(points68, sample_id)
-                split = "train" if "trainset" in conds else _deterministic_split("multipie", sample_id)
+                split = (
+                    "train"
+                    if "trainset" in conds
+                    else _deterministic_split("multipie", sample_id)
+                )
 
                 metadata = {
                     "annotation_file": str(annotation_file.resolve()),
@@ -3227,11 +3618,15 @@ def _build_multipie(
     )
 
 
-def _parse_wflw_line(line: str, line_no: int) -> tuple[np.ndarray, list[float], dict[str, int], str]:
+def _parse_wflw_line(
+    line: str, line_no: int
+) -> tuple[np.ndarray, list[float], dict[str, int], str]:
     parts = line.split()
     if len(parts) < 197:
         raise ValueError(f"WFLW line {line_no} has too few fields")
-    points = np.asarray([float(value) for value in parts[:196]], dtype=np.float32).reshape(98, 2)
+    points = np.asarray(
+        [float(value) for value in parts[:196]], dtype=np.float32
+    ).reshape(98, 2)
     bbox: list[float] = []
     if len(parts) >= 201:
         bbox = [float(value) for value in parts[196:200]]
@@ -3286,8 +3681,12 @@ def _build_wflw(
         annotations = _find_wflw_annotations(root_for_images)
     if annotations is None or not annotations.is_file():
         if root is None:
-            raise FileNotFoundError("WFLW annotation file not found; pass --wflw-annotations or --source-dir")
-        logger.info("WFLW annotations not found; falling back to generic directory parsing")
+            raise FileNotFoundError(
+                "WFLW annotation file not found; pass --wflw-annotations or --source-dir"
+            )
+        logger.info(
+            "WFLW annotations not found; falling back to generic directory parsing"
+        )
         return _build_directory(
             root,
             output_dir,
@@ -3303,7 +3702,9 @@ def _build_wflw(
     image_base = Path(image_root) if image_root else _find_wflw_images(root_for_images)
     rows = []
     counts: Counter[str] = Counter()
-    for line_no, line in enumerate(annotations.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+    for line_no, line in enumerate(
+        annotations.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
+    ):
         if not line.strip():
             continue
         row = _parse_wflw_line(line, line_no)
@@ -3316,11 +3717,19 @@ def _build_wflw(
     for points98, bbox, attrs, image_rel in rows:
         seen[image_rel] += 1
         base_id = Path(image_rel).with_suffix("").as_posix()
-        sample_id = base_id if counts[image_rel] <= 1 else f"{base_id}#face-{seen[image_rel]:02d}"
-        conds = tuple(name for name in WFLW_ATTRIBUTE_NAMES if attrs.get(name)) or (_label(scenario),)
+        sample_id = (
+            base_id
+            if counts[image_rel] <= 1
+            else f"{base_id}#face-{seen[image_rel]:02d}"
+        )
+        conds = tuple(name for name in WFLW_ATTRIBUTE_NAMES if attrs.get(name)) or (
+            _label(scenario),
+        )
         image_path = (image_base / image_rel).resolve()
         if not image_path.is_file():
-            skipped.append({"sample_id": sample_id, "reason": f"image not found: {image_path}"})
+            skipped.append(
+                {"sample_id": sample_id, "reason": f"image not found: {image_path}"}
+            )
             continue
         points98 = normalize_landmark_array(points98, schema="2d_98")
         crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
@@ -3334,7 +3743,12 @@ def _build_wflw(
             pad_ratio=0.25,
         )
         split = _deterministic_split("wflw", sample_id)
-        metadata = {"bbox": bbox, "attributes": attrs, "image_id": image_rel, "split": split}
+        metadata = {
+            "bbox": bbox,
+            "attributes": attrs,
+            "image_id": image_rel,
+            "split": split,
+        }
         metadata.update(crop_metadata)
         samples.append(
             _with_split(
@@ -3345,7 +3759,11 @@ def _build_wflw(
                     image=crop_image_path,
                     points68=crop_points68,
                     condition=conds[0],
-                    conditions=tuple(dict.fromkeys((*(_label(item) for item in conds), f"{split}set"))),
+                    conditions=tuple(
+                        dict.fromkeys(
+                            (*(_label(item) for item in conds), f"{split}set")
+                        )
+                    ),
                     source_schema="2d_98",
                     source_id=sample_id,
                     metadata=metadata,
@@ -3429,7 +3847,9 @@ def _build_frame_landmark_index(root: Path) -> dict[tuple[str, int], Path]:
         return index
 
     structured_roots = {"annotations", "landmarks", "labels"}
-    for path in sorted(_frame_landmark_files(root), key=lambda item: (len(item.parts), item.as_posix())):
+    for path in sorted(
+        _frame_landmark_files(root), key=lambda item: (len(item.parts), item.as_posix())
+    ):
         if not path.is_file():
             continue
         try:
@@ -3557,7 +3977,9 @@ def _build_video_dataset(
             image_root=image_root,
         )
 
-    frame_root = Path(frame_output_dir) if frame_output_dir else output_dir / "frames" / dataset
+    frame_root = (
+        Path(frame_output_dir) if frame_output_dir else output_dir / "frames" / dataset
+    )
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     frame_landmark_index = _build_frame_landmark_index(root)
@@ -3568,7 +3990,10 @@ def _build_video_dataset(
     tasks = [
         _VideoFrameTask(
             video_path=video_path,
-            video_id=video_path.resolve().relative_to(videos_root.resolve()).with_suffix("").as_posix(),
+            video_id=video_path.resolve()
+            .relative_to(videos_root.resolve())
+            .with_suffix("")
+            .as_posix(),
             frame_root=frame_root,
             frame_stride=frame_stride,
             max_frames_per_video=max_frames_per_video,
@@ -3592,9 +4017,16 @@ def _build_video_dataset(
         for record in frame_records:
             frame_index = int(record["frame_index"])
             sample_id = f"{dataset}/{video_id}/frame_{frame_index:06d}"
-            landmark_path = _find_frame_landmark_file(frame_landmark_index, video_id, frame_index)
+            landmark_path = _find_frame_landmark_file(
+                frame_landmark_index, video_id, frame_index
+            )
             if landmark_path is None:
-                skipped.append({"sample_id": sample_id, "reason": "matching frame landmarks not found"})
+                skipped.append(
+                    {
+                        "sample_id": sample_id,
+                        "reason": "matching frame landmarks not found",
+                    }
+                )
                 continue
             try:
                 points, source_schema = _load_landmark_file(landmark_path)
@@ -3632,7 +4064,9 @@ def _build_video_dataset(
             )
 
     if not samples:
-        raise ValueError(f"no {dataset} video-frame samples built; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no {dataset} video-frame samples built; skipped={skipped[:10]}"
+        )
 
     return _write_manifest(
         output_dir,
@@ -3647,7 +4081,9 @@ def _build_video_dataset(
 
 
 @contextlib.contextmanager
-def _source_context(source_dir: str | None, source_zip: str | None) -> T.Iterator[Path | None]:
+def _source_context(
+    source_dir: str | None, source_zip: str | None
+) -> T.Iterator[Path | None]:
     if source_dir and source_zip:
         raise ValueError("pass only one of --source-dir or --source-zip")
     if source_dir:
@@ -3713,7 +4149,9 @@ def build(args: argparse.Namespace) -> Path:
                 )
         elif dataset == "multipie":
             if root is None:
-                raise ValueError("--source-dir or --source-zip is required for MultiPIE")
+                raise ValueError(
+                    "--source-dir or --source-zip is required for MultiPIE"
+                )
             manifest_path = _build_multipie(
                 root,
                 output_dir,
@@ -3766,7 +4204,9 @@ def build(args: argparse.Namespace) -> Path:
             )
         elif dataset == "jd-landmark":
             if root is None:
-                raise ValueError("--source-dir or --source-zip is required for JD-landmark")
+                raise ValueError(
+                    "--source-dir or --source-zip is required for JD-landmark"
+                )
             manifest_path = _build_jd_landmark(
                 root,
                 output_dir,
@@ -3779,7 +4219,9 @@ def build(args: argparse.Namespace) -> Path:
             )
         elif dataset in {"fll2", "fll3"}:
             if root is None:
-                raise ValueError(f"--source-dir or --source-zip is required for {dataset}")
+                raise ValueError(
+                    f"--source-dir or --source-zip is required for {dataset}"
+                )
             manifest_path = _build_ffl_family(
                 root,
                 output_dir,
@@ -3793,7 +4235,9 @@ def build(args: argparse.Namespace) -> Path:
             )
         elif dataset in {"xm2vts", "frgc"}:
             if root is None:
-                raise ValueError(f"--source-dir or --source-zip is required for {dataset}")
+                raise ValueError(
+                    f"--source-dir or --source-zip is required for {dataset}"
+                )
             manifest_path = _build_subject_session_dataset(
                 root,
                 output_dir,
@@ -3807,7 +4251,9 @@ def build(args: argparse.Namespace) -> Path:
             )
         elif dataset in {"300vw", "wflw-v"}:
             if root is None and not args.video_root:
-                raise ValueError("--source-dir, --source-zip, or --video-root is required for video datasets")
+                raise ValueError(
+                    "--source-dir, --source-zip, or --video-root is required for video datasets"
+                )
             manifest_path = _build_video_dataset(
                 root or Path(args.video_root),
                 output_dir,
@@ -3843,7 +4289,10 @@ def build(args: argparse.Namespace) -> Path:
 
     if args.write_overlays:
         _write_visual_audit(
-            manifest_path, output_dir, limit=args.audit_overlay_limit, max_workers=args.workers
+            manifest_path,
+            output_dir,
+            limit=args.audit_overlay_limit,
+            max_workers=args.workers,
         )
     return manifest_path
 
@@ -3857,32 +4306,68 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--scenario", default="default")
     parser.add_argument("--scenarios", default=None)
     parser.add_argument("--samples-per-scenario", type=int, default=None)
-    parser.add_argument("--manifest-mode", choices=("replace", "merge"), default="replace")
+    parser.add_argument(
+        "--manifest-mode", choices=("replace", "merge"), default="replace"
+    )
     parser.add_argument("--allow-overlap", action="store_true")
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--video-root", default=None)
     parser.add_argument("--frame-output-dir", default=None)
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--max-frames-per-video", type=int, default=None)
-    parser.add_argument("--recursive", action="store_true", help="Accepted for compatibility; scans are recursive.")
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Accepted for compatibility; scans are recursive.",
+    )
     parser.add_argument("--wflw-annotations", default=None)
     parser.add_argument("--cofw68-json", default=None)
-    parser.add_argument("--write-overlays", action="store_true", help="Write visual landmark overlay audit images for built samples.")
+    parser.add_argument(
+        "--write-overlays",
+        action="store_true",
+        help="Write visual landmark overlay audit images for built samples.",
+    )
     parser.add_argument("--audit-overlay-limit", type=int, default=50)
-    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).")
-    parser.add_argument("--no-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
-    parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
-    parser.add_argument("--cache-dir", default=None, help="Accepted for compatibility; explicit sources are preferred.")
-    parser.add_argument("--download-url", default=None, help="Accepted for compatibility; explicit sources are preferred.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).",
+    )
+    parser.add_argument(
+        "--no-39pt-profile",
+        action="store_true",
+        help="Accepted for compatibility; non-68 samples are skipped.",
+    )
+    parser.add_argument(
+        "--include-39pt-profile",
+        action="store_true",
+        help="Accepted for compatibility; non-68 samples are skipped.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Accepted for compatibility; explicit sources are preferred.",
+    )
+    parser.add_argument(
+        "--download-url",
+        default=None,
+        help="Accepted for compatibility; explicit sources are preferred.",
+    )
     parser.add_argument("--force-download", action="store_true")
     parser.add_argument("--no-download", action="store_true")
-    parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
+    parser.add_argument(
+        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s:%(name)s:%(message)s")
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
     try:
         manifest = build(args)
     except KeyboardInterrupt:
@@ -3911,7 +4396,9 @@ def _cofw68_visibility_mask_and_source(entry, metadata):
 
     raw = metadata.get("landmark_score_visibility_mask")
     if isinstance(raw, (list, tuple)) and len(raw) == 68:
-        return np.asarray([bool(v) for v in raw], dtype=bool), "landmark_score_visibility_mask"
+        return np.asarray(
+            [bool(v) for v in raw], dtype=bool
+        ), "landmark_score_visibility_mask"
 
     # cofw68 Occ is occluded=True. If present, invert it.
     occ = metadata.get("occlusion", entry.get("occlusion"))
@@ -3976,11 +4463,21 @@ def _cofw68_bbox_candidates(entry, metadata):
     ).lower()
 
     # Prefer raw benchmark bbox if available.
-    raw_bbox = entry.get("face_bbox_raw") or entry.get("bbox_raw") or metadata.get("face_bbox_raw") or metadata.get("bbox_raw")
+    raw_bbox = (
+        entry.get("face_bbox_raw")
+        or entry.get("bbox_raw")
+        or metadata.get("face_bbox_raw")
+        or metadata.get("bbox_raw")
+    )
     if raw_bbox is not None:
         add("face_bbox_raw", raw_bbox, raw_fmt or "xywh")
 
-    bbox = entry.get("face_bbox") or entry.get("bbox") or metadata.get("face_bbox") or metadata.get("bbox")
+    bbox = (
+        entry.get("face_bbox")
+        or entry.get("bbox")
+        or metadata.get("face_bbox")
+        or metadata.get("bbox")
+    )
     if bbox is not None:
         if "cofw68" in source and raw_bbox is None:
             # The local builder has shown stale/misleading "ltrb" metadata for
@@ -4096,7 +4593,11 @@ def _build_cofw68_json_cropped(
     image_root: str | None,
 ) -> Path:
     payload = read_json(path)
-    entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
+    entries = (
+        payload.get("samples", payload.get("entries", payload))
+        if isinstance(payload, dict)
+        else payload
+    )
     if not isinstance(entries, list):
         raise ValueError(
             f"cofw68 JSON source must contain list, entries, or samples list: {path}"
@@ -4110,9 +4611,18 @@ def _build_cofw68_json_cropped(
         if not isinstance(entry, dict):
             continue
 
-        metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
+        metadata = (
+            dict(entry.get("metadata", {}))
+            if isinstance(entry.get("metadata"), dict)
+            else {}
+        )
         image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
-        landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
+        landmark_value = (
+            entry.get("landmarks")
+            or entry.get("points")
+            or entry.get("ground_truth")
+            or entry.get("pts")
+        )
         sample_id = str(
             entry.get("sample_id")
             or entry.get("id")
@@ -4127,12 +4637,17 @@ def _build_cofw68_json_cropped(
             )
 
         if image_value is None or landmark_value is None:
-            skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
+            skipped.append(
+                {"sample_id": sample_id, "reason": "missing image or landmarks"}
+            )
             continue
 
         try:
             image_path = _resolve_path(image_value, base_dir=image_base)
-            source_schema = str(entry.get("source_schema") or metadata.get("source_schema") or "") or None
+            source_schema = (
+                str(entry.get("source_schema") or metadata.get("source_schema") or "")
+                or None
+            )
             points68, detected_schema = _load_points(
                 landmark_value,
                 base_dir=path.parent,
@@ -4234,7 +4749,9 @@ def _build_cofw68_json_cropped(
         merged_metadata["face_bbox_format"] = "ltrb"
         merged_metadata["face_bbox_source"] = bbox_source
         merged_metadata["crop_visibility_mask_source"] = visible_mask_source
-        merged_metadata["crop_visible_landmark_count"] = int(np.asarray(visible_mask, dtype=bool).sum())
+        merged_metadata["crop_visible_landmark_count"] = int(
+            np.asarray(visible_mask, dtype=bool).sum()
+        )
         merged_metadata.setdefault("source_schema", detected_schema)
         if visibility is not None:
             merged_metadata["visibility"] = visibility

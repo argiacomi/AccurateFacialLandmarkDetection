@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import math
@@ -27,6 +26,7 @@ def weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.00
     if sample_weight is not None:
         return (per_sample * sample_weight).mean()
     return per_sample.mean()
+
 
 def _schema_head_weight_map(raw):
     weights = {}
@@ -72,15 +72,17 @@ def _schema_head_weight_map(raw):
 
 def _star_loss_v2_per_point(star_loss_func, pred_heatmap, target):
     bs, npoints, h, w = pred_heatmap.shape
-    heatmap = torch.softmax(
-        pred_heatmap.reshape((bs, npoints, -1)), dim=-1
-    ).reshape((bs, npoints, h, w))
+    heatmap = torch.softmax(pred_heatmap.reshape((bs, npoints, -1)), dim=-1).reshape(
+        (bs, npoints, h, w)
+    )
     means = star_loss_func.weighted_mean(heatmap)
     covars = star_loss_func.unbiased_weighted_covariance(heatmap, means)
     covars_cpu = covars.reshape(bs * npoints, 2, 2).cpu()
     evalues, evectors = torch.linalg.eigh(covars_cpu, UPLO="U")
-    evalues = evalues.reshape(bs, npoints, 2).to(heatmap).clamp_min(
-        float(getattr(star_loss_func, "EPSILON", 1e-5))
+    evalues = (
+        evalues.reshape(bs, npoints, 2)
+        .to(heatmap)
+        .clamp_min(float(getattr(star_loss_func, "EPSILON", 1e-5)))
     )
     evectors = evectors.reshape(bs, npoints, 2, 2).to(heatmap)
     loss_trans = star_loss_func.ambiguity_guided_decompose(
@@ -90,7 +92,9 @@ def _star_loss_v2_per_point(star_loss_func, pred_heatmap, target):
     return loss_trans + star_loss_func.w * loss_eigen
 
 
-def _weighted_star_loss_v2(star_loss_func, pred_heatmap, target, sample_weight, landmark_mask):
+def _weighted_star_loss_v2(
+    star_loss_func, pred_heatmap, target, sample_weight, landmark_mask
+):
     per_point = _star_loss_v2_per_point(star_loss_func, pred_heatmap, target)
     point_weights = landmark_mask.to(per_point.device).to(per_point.dtype)
     if sample_weight is not None:
@@ -113,7 +117,9 @@ def _visibility_target_weight_for_payload(payload, args, *, device):
         source_text = str(source or "")
         weights.append(pseudo_weight if source_text.startswith("synthetic") else 1.0)
 
-    provenance_weight = torch.as_tensor(weights, device=device, dtype=torch.float32).reshape(-1, 1)
+    provenance_weight = torch.as_tensor(
+        weights, device=device, dtype=torch.float32
+    ).reshape(-1, 1)
     if base_weight is None:
         return provenance_weight
 
@@ -197,32 +203,38 @@ def schema_head_loss(
         if float(getattr(args, "star_loss_weight", 0.0)) > 0.0:
             if star_loss_func is None:
                 star_loss_func = STARLoss_v2()
-            head_star = (
-                _weighted_star_loss_v2(
-                    star_loss_func,
-                    pred_heatmap,
-                    target,
-                    sample_weight,
-                    landmark_mask,
-                )
-                * float(args.star_loss_weight)
-            )
+            head_star = _weighted_star_loss_v2(
+                star_loss_func,
+                pred_heatmap,
+                target,
+                sample_weight,
+                landmark_mask,
+            ) * float(args.star_loss_weight)
 
         visibility_weight = visibility_loss_weight_for_epoch(args)
         visibility_key = visibility_key_for_head(head_name)
-        if include_visibility_loss and visibility_weight > 0.0 and visibility_key in stage_pred and "visibility_target" in payload:
+        if (
+            include_visibility_loss
+            and visibility_weight > 0.0
+            and visibility_key in stage_pred
+            and "visibility_target" in payload
+        ):
             visibility_logits = stage_pred[visibility_key].index_select(0, indices)
             head_visibility_raw, visibility_valid = masked_visibility_bce_loss(
                 visibility_logits,
                 payload["visibility_target"],
                 sample_weight=sample_weight,
                 landmark_mask=landmark_mask,
-                target_weight=_visibility_target_weight_for_payload(payload, args, device=loss.device),
+                target_weight=_visibility_target_weight_for_payload(
+                    payload, args, device=loss.device
+                ),
             )
             head_visibility = head_visibility_raw * visibility_weight
             loss_visibility = loss_visibility + head_visibility.detach()
             details["visibility_valid_counts"][head_name] = visibility_valid
-            details["visibility_loss_weight"] = torch.tensor(visibility_weight, device=loss.device)
+            details["visibility_loss_weight"] = torch.tensor(
+                visibility_weight, device=loss.device
+            )
 
         head_samples = int(indices.numel())
         head_scale = float(head_weight_map.get(head_name, 1.0))
@@ -253,7 +265,9 @@ def schema_head_loss(
 
     aux_outputs = stage_pred.get("_aux", {}) if isinstance(stage_pred, dict) else {}
     if include_auxiliary_loss and args.auxiliary_loss_weight > 0 and aux_outputs:
-        task_weights = parse_auxiliary_loss_weights(getattr(args, "auxiliary_loss_weights", ""))
+        task_weights = parse_auxiliary_loss_weights(
+            getattr(args, "auxiliary_loss_weights", "")
+        )
         valid_task_count = 0
         for task, logits in aux_outputs.items():
             labels = aux_labels.get(task)
@@ -288,6 +302,7 @@ def schema_head_loss(
         return loss, loss_loc, loss_heatmap, loss_aux, details
     return loss, loss_loc, loss_heatmap, loss_aux
 
+
 def heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
     if sample_weight is None and landmark_mask is None:
         return None
@@ -303,6 +318,7 @@ def heatmap_batch_weight(sample_weight, pred_heatmap, landmark_mask=None):
             pred_heatmap.dtype
         ).reshape(-1, 1)
     return weights.reshape(pred_heatmap.shape[0], pred_heatmap.shape[1], 1, 1)
+
 
 # Public trainer loss API.
 __all__ = [

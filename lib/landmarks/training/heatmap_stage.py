@@ -152,7 +152,6 @@ _eval_config = EvalConfig.from_args
 _training_runtime_config = TrainingRuntimeConfig.from_args
 
 
-
 # Runtime, profiling, and checkpoint-compat helpers live in lib.landmarks.training.*.
 
 
@@ -262,8 +261,7 @@ def _aggregate_sampler_diagnostics(local_diagnostics):
         "actual_mix": actual_mix,
         "fallback_counts": fallback_counts,
         "missing_targets": {
-            category: sorted(values)
-            for category, values in missing_targets.items()
+            category: sorted(values) for category, values in missing_targets.items()
         },
         "rank": "all",
         "world_size": int(world_size),
@@ -408,9 +406,12 @@ def main():
                 barrier_start = time.time()
                 dist.barrier()
                 wait_seconds = time.time() - barrier_start
-                local_wait = torch.tensor([wait_seconds], device=device, dtype=torch.float64)
+                local_wait = torch.tensor(
+                    [wait_seconds], device=device, dtype=torch.float64
+                )
                 gathered_waits = [
-                    torch.zeros_like(local_wait) for _ in range(distributed_world_size())
+                    torch.zeros_like(local_wait)
+                    for _ in range(distributed_world_size())
                 ]
                 dist.all_gather(gathered_waits, local_wait)
                 if is_rank_zero():
@@ -441,11 +442,7 @@ def main():
                     torch.cuda.reset_peak_memory_stats(device)
             train_sampler.set_epoch(epoch)
             set_dataset_runtime_epoch(train_dataset, epoch, args)
-            if (
-                args.persistent_workers
-                and epoch == start_epoch
-                and is_rank_zero()
-            ):
+            if args.persistent_workers and epoch == start_epoch and is_rank_zero():
                 print(
                     "note: --persistent-workers seeds DataLoader workers once for throughput; "
                     "use --no-persistent-workers for epoch-reseeded worker RNG",
@@ -500,24 +497,24 @@ def main():
                                 stage_heatmap,
                                 stage_aux,
                                 stage_details,
-                            ) = (
-                                schema_head_loss(
-                                    pred_info[i],
-                                    schema_heads,
-                                    aux_labels,
-                                    heatmap_loss_func,
-                                    args,
-                                    return_details=True,
-                                    star_loss_func=vertex_loss_func,
-                                    include_auxiliary_loss=(
-                                        getattr(args, "auxiliary_loss_stage", "final") == "all"
-                                        or i == len(pred_info) - 1
-                                    ),
-                                    include_visibility_loss=(
-                                        getattr(args, "auxiliary_loss_stage", "final") == "all"
-                                        or i == len(pred_info) - 1
-                                    ),
-                                )
+                            ) = schema_head_loss(
+                                pred_info[i],
+                                schema_heads,
+                                aux_labels,
+                                heatmap_loss_func,
+                                args,
+                                return_details=True,
+                                star_loss_func=vertex_loss_func,
+                                include_auxiliary_loss=(
+                                    getattr(args, "auxiliary_loss_stage", "final")
+                                    == "all"
+                                    or i == len(pred_info) - 1
+                                ),
+                                include_visibility_loss=(
+                                    getattr(args, "auxiliary_loss_stage", "final")
+                                    == "all"
+                                    or i == len(pred_info) - 1
+                                ),
                             )
                             loss_loc = stage_loc
                             loss_heatmap = stage_heatmap
@@ -525,7 +522,9 @@ def main():
                             loss_details = stage_details
                             loss_consistency = stage_details["loss_consistency"]
                             loss_star = stage_details["loss_star"]
-                            loss_visibility = stage_details.get("loss_visibility", loss_visibility)
+                            loss_visibility = stage_details.get(
+                                "loss_visibility", loss_visibility
+                            )
                             loss = loss + stage_loss * weights[i]
                         else:
                             pred_loc, pred_heatmap = pred_info[i]
@@ -875,7 +874,10 @@ def main():
                     print_eval_summary(f"test ema {eval_scope}", ema_report)
                     print(best_record)
                 elif ema is not None and should_eval_model:
-                    reason = eval_schedule.ema_skip_reason or f"--eval-ema-every={args.eval_ema_every}"
+                    reason = (
+                        eval_schedule.ema_skip_reason
+                        or f"--eval-ema-every={args.eval_ema_every}"
+                    )
                     print(f"skipping EMA eval at epoch {epoch}; {reason}")
 
                 if model_report is not None:

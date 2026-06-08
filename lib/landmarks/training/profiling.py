@@ -93,7 +93,9 @@ def empty_epoch_timing() -> dict[str, float]:
     return {key: 0.0 for key in PHASE_TIMING_KEYS}
 
 
-def start_timing(*, device: torch.device | int | None = None, synchronize: bool = False) -> TimingStart:
+def start_timing(
+    *, device: torch.device | int | None = None, synchronize: bool = False
+) -> TimingStart:
     """Start a timed section.
 
     With a CUDA device and synchronize=True, this records a CUDA event on the
@@ -128,7 +130,10 @@ def elapsed_timing(
             assert started_at.end_event is not None
             started_at.end_event.record()
             started_at.end_event.synchronize()
-            return float(started_at.start_event.elapsed_time(started_at.end_event)) / 1000.0
+            return (
+                float(started_at.start_event.elapsed_time(started_at.end_event))
+                / 1000.0
+            )
         _maybe_synchronize(started_at.device if device is None else device, synchronize)
         return time.time() - started_at.wall_start
 
@@ -151,7 +156,13 @@ def accumulate_timing(
     )
 
 
-def time_call(timing: dict[str, float] | None, key: str, fn: T.Callable[..., T.Any], *args: T.Any, **kwargs: T.Any) -> T.Any:
+def time_call(
+    timing: dict[str, float] | None,
+    key: str,
+    fn: T.Callable[..., T.Any],
+    *args: T.Any,
+    **kwargs: T.Any,
+) -> T.Any:
     started_at = time.time()
     try:
         return fn(*args, **kwargs)
@@ -160,7 +171,9 @@ def time_call(timing: dict[str, float] | None, key: str, fn: T.Callable[..., T.A
             timing[key] = float(timing.get(key, 0.0)) + (time.time() - started_at)
 
 
-def finalize_epoch_timing(timing: dict[str, float], epoch_wall_seconds: float) -> dict[str, float]:
+def finalize_epoch_timing(
+    timing: dict[str, float], epoch_wall_seconds: float
+) -> dict[str, float]:
     final = dict(timing)
     compute_seconds = sum(float(final.get(key, 0.0)) for key in COMPUTE_COMPONENT_KEYS)
     final["compute_seconds"] = compute_seconds
@@ -171,6 +184,7 @@ def finalize_epoch_timing(timing: dict[str, float], epoch_wall_seconds: float) -
     final["epoch_wall_seconds"] = float(epoch_wall_seconds)
     final["unattributed_seconds"] = max(
         0.0,
-        final["epoch_wall_seconds"] - sum(float(final.get(key, 0.0)) for key in PHASE_TIMING_KEYS),
+        final["epoch_wall_seconds"]
+        - sum(float(final.get(key, 0.0)) for key in PHASE_TIMING_KEYS),
     )
     return final

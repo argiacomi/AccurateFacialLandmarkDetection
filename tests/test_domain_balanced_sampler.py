@@ -55,7 +55,9 @@ def test_bucket_aliases_collapse_to_canonical_targets():
 
 
 def test_dataset_target_aliases_reuse_split_safe_normalization():
-    assert parse_target_spec_for_kind("300W=1,aflw2000-3d=1,prod=1", kind="dataset") == {
+    assert parse_target_spec_for_kind(
+        "300W=1,aflw2000-3d=1,prod=1", kind="dataset"
+    ) == {
         "w300": 1.0,
         "aflw2000": 1.0,
         "production_validated": 1.0,
@@ -72,7 +74,12 @@ def test_domain_balanced_sampler_is_reproducible():
     ]
     kwargs = dict(
         samples=samples,
-        bucket_targets={"profile": 1, "occlusion": 1, "anchor": 1, "profile_occlusion": 1},
+        bucket_targets={
+            "profile": 1,
+            "occlusion": 1,
+            "anchor": 1,
+            "profile_occlusion": 1,
+        },
         batch_size=4,
         seed=7,
     )
@@ -93,9 +100,13 @@ def test_domain_balanced_sampler_is_reproducible():
 
 
 def test_domain_balanced_sampler_ddp_lengths_match_actual_batches():
-    samples = [_sample(f"dataset-{index % 3}", "2d_68", "anchor") for index in range(10)]
+    samples = [
+        _sample(f"dataset-{index % 3}", "2d_68", "anchor") for index in range(10)
+    ]
     ranks = [
-        DomainBalancedBatchSampler(samples, batch_size=2, seed=3, rank=rank, world_size=2)
+        DomainBalancedBatchSampler(
+            samples, batch_size=2, seed=3, rank=rank, world_size=2
+        )
         for rank in range(2)
     ]
 
@@ -106,7 +117,9 @@ def test_domain_balanced_sampler_ddp_lengths_match_actual_batches():
 
 
 def test_domain_balanced_sampler_drop_last_drops_uneven_ddp_global_batches():
-    samples = [_sample(f"dataset-{index % 3}", "2d_68", "anchor") for index in range(11)]
+    samples = [
+        _sample(f"dataset-{index % 3}", "2d_68", "anchor") for index in range(11)
+    ]
     ranks = [
         DomainBalancedBatchSampler(
             samples,
@@ -165,7 +178,9 @@ def test_domain_balanced_sampler_falls_back_for_sparse_targets():
     batch = next(iter(sampler))
 
     assert len(batch) == 4
-    assert {sample_bucket(samples[index]) for index in batch}.issubset({"profile", "occlusion"})
+    assert {sample_bucket(samples[index]) for index in batch}.issubset(
+        {"profile", "occlusion"}
+    )
     diagnostics = sampler.last_epoch_diagnostics
     assert diagnostics["missing_targets"]["bucket"] == ["profile_occlusion"]
     assert diagnostics["missing_targets"]["dataset"] == ["missing"]

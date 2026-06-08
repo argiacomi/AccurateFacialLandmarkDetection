@@ -7,7 +7,9 @@ from lib.landmarks.pipeline.config import _extract_config_path, _merge_config_ar
 from tools.landmarks import run_cdvit_manifest_training_pipeline as pipeline
 
 
-def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(tmp_path: Path) -> None:
+def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "pipeline_config.json"
     output_root = tmp_path / "runs"
     config_path.write_text(
@@ -15,25 +17,15 @@ def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(tmp_path
             {
                 "run_name": "from_config",
                 "datasets": ["wflw"],
-                "dataset_sources": {
-                    "wflw": "config/wflw"
-                },
+                "dataset_sources": {"wflw": "config/wflw"},
                 "training": {
                     "batch_size": 8,
                     "epoch": 3,
-                    "train_arg": ["--config-flag 1"]
+                    "train_arg": ["--config-flag 1"],
                 },
-                "runtime": {
-                    "num_workers": 2,
-                    "pin_memory": False
-                },
-                "eval": {
-                    "eval_every": 7
-                },
-                "hard_negative": {
-                    "write_audit": True,
-                    "total_samples": 12
-                }
+                "runtime": {"num_workers": 2, "pin_memory": False},
+                "eval": {"eval_every": 7},
+                "hard_negative": {"write_audit": True, "total_samples": 12},
             }
         ),
         encoding="utf-8",
@@ -90,5 +82,8 @@ def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(tmp_path
         "cofw68=cli/cofw68",
     ]
     assert resolved["args"]["train_arg"] == ["--config-flag 1", "--cli-flag 2"]
-    assert resolved["args"]["hard_negative_arg"] == ["--write-audit", "--total-samples 12"]
+    assert resolved["args"]["hard_negative_arg"] == [
+        "--write-audit",
+        "--total-samples 12",
+    ]
     assert resolved["selected_stages"] == ["build_dataset_manifests"]

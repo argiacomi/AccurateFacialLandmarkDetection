@@ -88,13 +88,17 @@ def _extract_zip_source(zip_path: Path, output_dir: Path) -> Path:
     return extract_dir.resolve()
 
 
-def _resolve_prod_source(prod_source: Path, output_dir: Path) -> tuple[Path, Path | None]:
+def _resolve_prod_source(
+    prod_source: Path, output_dir: Path
+) -> tuple[Path, Path | None]:
     prod_source = prod_source.resolve()
     if prod_source.is_dir():
         return prod_source, None
     if prod_source.is_file() and prod_source.suffix.lower() == ".zip":
         return _extract_zip_source(prod_source, output_dir), prod_source
-    raise FileNotFoundError(f"production source must be a directory or .zip file: {prod_source}")
+    raise FileNotFoundError(
+        f"production source must be a directory or .zip file: {prod_source}"
+    )
 
 
 def _is_ignored_macos_sidecar(path: Path) -> bool:
@@ -123,7 +127,9 @@ def _find_fsa(prod_dir: Path) -> Path:
         raise FileNotFoundError(f"no .fsa file found under {prod_dir}")
     if len(candidates) > 1:
         names = ", ".join(str(path) for path in candidates[:10])
-        raise ValueError(f"expected exactly one .fsa file under {prod_dir}; found {len(candidates)}: {names}")
+        raise ValueError(
+            f"expected exactly one .fsa file under {prod_dir}; found {len(candidates)}: {names}"
+        )
     return candidates[0]
 
 
@@ -136,7 +142,9 @@ def _load_fsa(path: Path) -> dict[str, T.Any]:
     try:
         payload = pickle.loads(zlib.decompress(path.read_bytes()))
     except Exception as err:  # noqa: BLE001
-        raise ValueError(f"failed to read Faceswap .fsa alignments at {path}: {err}") from err
+        raise ValueError(
+            f"failed to read Faceswap .fsa alignments at {path}: {err}"
+        ) from err
     if not isinstance(payload, dict):
         raise ValueError(f"Faceswap .fsa payload must be a dict: {path}")
     data = payload.get("__data__", payload)
@@ -161,7 +169,9 @@ def _build_image_index(prod_dir: Path, fsa_path: Path) -> dict[str, Path]:
     return index
 
 
-def _resolve_image(prod_dir: Path, frame_name: str, image_index: T.Mapping[str, Path]) -> Path | None:
+def _resolve_image(
+    prod_dir: Path, frame_name: str, image_index: T.Mapping[str, Path]
+) -> Path | None:
     frame_path = Path(str(frame_name))
     candidates = [
         prod_dir / frame_path,
@@ -170,7 +180,11 @@ def _resolve_image(prod_dir: Path, frame_name: str, image_index: T.Mapping[str, 
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
-    for key in (str(frame_name).lower(), frame_path.name.lower(), frame_path.stem.lower()):
+    for key in (
+        str(frame_name).lower(),
+        frame_path.name.lower(),
+        frame_path.stem.lower(),
+    ):
         match = image_index.get(key)
         if match is not None and match.is_file():
             return match.resolve()
@@ -214,7 +228,9 @@ def _landmarks(face: T.Mapping[str, T.Any]) -> np.ndarray:
     raw_points = np.asarray(raw, dtype=np.float32)
     if raw_points.ndim == 1:
         if raw_points.size % 2 != 0:
-            raise ValueError(f"flat landmark array has odd value count: {raw_points.size}")
+            raise ValueError(
+                f"flat landmark array has odd value count: {raw_points.size}"
+            )
         raw_points = raw_points.reshape((-1, 2))
     if raw_points.ndim != 2 or raw_points.shape[1] < 2:
         raise ValueError(f"expected Nx2 landmarks, got {raw_points.shape}")
@@ -223,7 +239,9 @@ def _landmarks(face: T.Mapping[str, T.Any]) -> np.ndarray:
     points = normalize_landmarks(raw_points[:, :2], source_schema=source_schema)
 
     if points.shape != (68, 2):
-        raise ValueError(f"expected canonical 68x2 landmarks from {source_schema}, got {points.shape}")
+        raise ValueError(
+            f"expected canonical 68x2 landmarks from {source_schema}, got {points.shape}"
+        )
     if not np.all(np.isfinite(points)):
         raise ValueError("landmarks contain NaN or infinite values")
     return np.ascontiguousarray(points, dtype=np.float32)
@@ -250,12 +268,18 @@ def _normalizer(face: T.Mapping[str, T.Any], points: np.ndarray) -> float:
     del face
     value = float(np.linalg.norm(points[36] - points[45]))
     if not np.isfinite(value) or value <= 0:
-        raise ValueError(f"invalid interocular normalizer after canonical 68 conversion: {value}")
+        raise ValueError(
+            f"invalid interocular normalizer after canonical 68 conversion: {value}"
+        )
     return value
 
 
-def _metadata(face: T.Mapping[str, T.Any], *, frame_name: str, fsa_path: Path, face_index: int) -> dict[str, T.Any]:
-    metadata = dict(face.get("metadata", {})) if isinstance(face.get("metadata"), dict) else {}
+def _metadata(
+    face: T.Mapping[str, T.Any], *, frame_name: str, fsa_path: Path, face_index: int
+) -> dict[str, T.Any]:
+    metadata = (
+        dict(face.get("metadata", {})) if isinstance(face.get("metadata"), dict) else {}
+    )
     metadata.setdefault("review_status", "accepted")
     metadata.setdefault("label_quality", DEFAULT_LABEL_QUALITY)
     metadata.setdefault("source", DEFAULT_SOURCE)
@@ -293,7 +317,9 @@ def _write_landmarks(output_dir: Path, sample_id: str, points: np.ndarray) -> st
     return path.relative_to(output_dir).as_posix()
 
 
-def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFAULT_DATASET) -> dict[str, T.Any]:
+def build_manifest(
+    prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFAULT_DATASET
+) -> dict[str, T.Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     prod_source = prod_dir.resolve()
     prod_dir, zip_source = _resolve_prod_source(prod_source, output_dir)
@@ -321,7 +347,12 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
                 sample_id = f"{sample_id}_{used_ids[sample_id]}"
             try:
                 points = _landmarks(face)
-                metadata = _metadata(face, frame_name=str(frame_name), fsa_path=fsa_path, face_index=face_index)
+                metadata = _metadata(
+                    face,
+                    frame_name=str(frame_name),
+                    fsa_path=fsa_path,
+                    face_index=face_index,
+                )
                 condition = _runtime_bucket(metadata) or "unknown"
                 landmark_path = _write_landmarks(output_dir, sample_id, points)
                 sample = {
@@ -339,7 +370,12 @@ def build_manifest(prod_dir: Path, output_dir: Path, *, dataset_name: str = DEFA
                 }
             except Exception as err:  # noqa: BLE001
                 skipped_invalid_face += 1
-                logger.debug("Skipping invalid production face %s[%d]: %s", frame_name, face_index, err)
+                logger.debug(
+                    "Skipping invalid production face %s[%d]: %s",
+                    frame_name,
+                    face_index,
+                    err,
+                )
                 continue
             samples.append(sample)
 
@@ -378,19 +414,30 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-name", default=DEFAULT_DATASET)
-    parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
+    parser.add_argument(
+        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+    )
     return parser
 
 
 def main(argv: T.Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s:%(name)s:%(message)s")
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
     try:
-        metadata = build_manifest(args.prod_dir, args.output_dir, dataset_name=args.dataset_name)
+        metadata = build_manifest(
+            args.prod_dir, args.output_dir, dataset_name=args.dataset_name
+        )
     except Exception as err:  # noqa: BLE001
         logger.error("production manifest build failed: %s", err)
         return 1
-    logger.info("Wrote %d production_validated samples to %s", metadata["sample_count"], args.output_dir / "manifest.json")
+    logger.info(
+        "Wrote %d production_validated samples to %s",
+        metadata["sample_count"],
+        args.output_dir / "manifest.json",
+    )
     print(f"Wrote production_validated manifest: {args.output_dir / 'manifest.json'}")
     return 0
 

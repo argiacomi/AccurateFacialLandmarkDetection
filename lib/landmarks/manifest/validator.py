@@ -37,7 +37,9 @@ def _sha256_file(path: Path) -> str:
 
 def _write_json(path: Path, payload: T.Mapping[str, T.Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _resolve(manifest_path: Path, value: T.Any) -> Path:
@@ -46,11 +48,17 @@ def _resolve(manifest_path: Path, value: T.Any) -> Path:
 
 
 def _metadata(sample: T.Mapping[str, T.Any]) -> dict[str, T.Any]:
-    return dict(sample.get("metadata", {})) if isinstance(sample.get("metadata"), dict) else {}
+    return (
+        dict(sample.get("metadata", {}))
+        if isinstance(sample.get("metadata"), dict)
+        else {}
+    )
 
 
 def _source(sample: T.Mapping[str, T.Any]) -> dict[str, T.Any]:
-    return dict(sample.get("source", {})) if isinstance(sample.get("source"), dict) else {}
+    return (
+        dict(sample.get("source", {})) if isinstance(sample.get("source"), dict) else {}
+    )
 
 
 def _value(sample: T.Mapping[str, T.Any], key: str) -> T.Any:
@@ -70,7 +78,9 @@ def _label(value: T.Any, default: str = "unknown") -> str:
     return label.strip("_") or default
 
 
-def _example(report: dict[str, T.Any], kind: str, payload: T.Any, max_examples: int) -> None:
+def _example(
+    report: dict[str, T.Any], kind: str, payload: T.Any, max_examples: int
+) -> None:
     examples = report.setdefault("examples", {}).setdefault(kind, [])
     if len(examples) < max_examples:
         examples.append(payload)
@@ -203,14 +213,20 @@ def validate_training_manifest(
         "leakage": {"checked_fields": list(IDENTITY_FIELDS), "violations": []},
     }
 
-    identities: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    identities: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
 
     for index, sample in enumerate(samples):
         metadata = _metadata(sample)
         source = _source(sample)
         sample_id = str(sample.get("sample_id") or sample.get("id") or index)
-        dataset = _label(sample.get("dataset") or source.get("dataset") or metadata.get("dataset"))
-        split = _label(sample.get("split") or metadata.get("split"), default="unspecified")
+        dataset = _label(
+            sample.get("dataset") or source.get("dataset") or metadata.get("dataset")
+        )
+        split = _label(
+            sample.get("split") or metadata.get("split"), default="unspecified"
+        )
         bucket = _label(
             sample.get("hard_negative_bucket")
             or metadata.get("hard_negative_bucket")
@@ -223,12 +239,19 @@ def validate_training_manifest(
         report["hard_negative_buckets"][bucket] += 1
 
         errors: list[str] = []
-        legacy_inferable_contract_fields = {"landmark_count", "head_name", "split_safe_id"}
+        legacy_inferable_contract_fields = {
+            "landmark_count",
+            "head_name",
+            "split_safe_id",
+        }
         for field in REQUIRED_SAMPLE_FIELDS:
             if _value(sample, field) not in (None, ""):
                 continue
             report["missing_required_fields"][field] += 1
-            if field in legacy_inferable_contract_fields and allow_legacy_missing_contract_fields:
+            if (
+                field in legacy_inferable_contract_fields
+                and allow_legacy_missing_contract_fields
+            ):
                 continue
             errors.append(f"missing_{field}")
 
@@ -250,7 +273,9 @@ def validate_training_manifest(
         detected_schema = None
         if not landmarks_value:
             report["missing_landmarks"] += 1
-            _example(report, "missing_landmarks", {"sample_id": sample_id}, max_examples)
+            _example(
+                report, "missing_landmarks", {"sample_id": sample_id}, max_examples
+            )
             errors.append("missing_landmarks")
         else:
             landmarks_path = _resolve(manifest_path, landmarks_value)
@@ -267,13 +292,19 @@ def validate_training_manifest(
                 try:
                     landmarks = np.load(landmarks_path)
                     detected_schema = _detect_schema(np.asarray(landmarks))
-                    normalize_landmark_array(np.asarray(landmarks)[:, :2], schema=detected_schema)
+                    normalize_landmark_array(
+                        np.asarray(landmarks)[:, :2], schema=detected_schema
+                    )
                 except Exception as err:  # noqa: BLE001
                     report["invalid_landmarks"] += 1
                     _example(
                         report,
                         "invalid",
-                        {"sample_id": sample_id, "path": str(landmarks_path), "error": str(err)},
+                        {
+                            "sample_id": sample_id,
+                            "path": str(landmarks_path),
+                            "error": str(err),
+                        },
                         max_examples,
                     )
                     errors.append("invalid_landmarks")
@@ -282,12 +313,17 @@ def validate_training_manifest(
         target_schema = None
         if landmarks is not None and detected_schema is not None:
             try:
-                source_schema = _normalize_schema(_value(sample, "source_schema")) or detected_schema
+                source_schema = (
+                    _normalize_schema(_value(sample, "source_schema"))
+                    or detected_schema
+                )
             except ValueError as err:
                 errors.append(f"invalid_source_schema:{err}")
                 source_schema = detected_schema
             try:
-                target_schema = _normalize_schema(_value(sample, "target_schema")) or source_schema
+                target_schema = (
+                    _normalize_schema(_value(sample, "target_schema")) or source_schema
+                )
             except ValueError as err:
                 errors.append(f"invalid_target_schema:{err}")
                 target_schema = detected_schema
@@ -354,7 +390,8 @@ def validate_training_manifest(
                 sample,
                 source_schema=source_schema,
                 target_schema=target_schema,
-                allow_missing_projection_audit=allow_missing_projection_audit or legacy_projection,
+                allow_missing_projection_audit=allow_missing_projection_audit
+                or legacy_projection,
             )
             if projection_error:
                 report["projection_audit_errors"] += 1
@@ -384,14 +421,21 @@ def validate_training_manifest(
             _example(
                 report,
                 "invalid",
-                {"sample_id": sample_id, "dataset": dataset, "split": split, "errors": errors},
+                {
+                    "sample_id": sample_id,
+                    "dataset": dataset,
+                    "split": split,
+                    "errors": errors,
+                },
                 max_examples,
             )
         else:
             report["valid_samples"] += 1
 
     for (field, value), split_map in sorted(identities.items()):
-        concrete_splits = {split for split in split_map if split not in {"", "unspecified"}}
+        concrete_splits = {
+            split for split in split_map if split not in {"", "unspecified"}
+        }
         if len(concrete_splits) <= 1:
             continue
         violation = {
@@ -405,7 +449,9 @@ def validate_training_manifest(
         report["leakage"]["violations"].append(violation)
         _example(report, "leakage", violation, max_examples)
 
-    report["missing_required_fields"] = dict(sorted(report["missing_required_fields"].items()))
+    report["missing_required_fields"] = dict(
+        sorted(report["missing_required_fields"].items())
+    )
     for key in (
         "datasets",
         "splits",

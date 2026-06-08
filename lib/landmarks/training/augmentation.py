@@ -8,6 +8,7 @@ import numpy as np
 
 import random
 import time
+
 try:
     import albumentations as A
 except ModuleNotFoundError:
@@ -22,7 +23,7 @@ def _require_albumentations():
 def GetAugTransform(prob_factor=1.0):
     _require_albumentations()
     affine_worker = A.Affine(
-        scale={'x':[0.8, 1.2], 'y':[0.8, 1.2]},
+        scale={"x": [0.8, 1.2], "y": [0.8, 1.2]},
         translate_px={"x": [-40, 40], "y": [-40, 40]},
         rotate=[-20, 20],
         shear=[-5, 5],
@@ -31,7 +32,7 @@ def GetAugTransform(prob_factor=1.0):
     )
 
     color_jitter = A.ColorJitter(p=0.3 * prob_factor)
-    gauss_noise = A.GaussNoise((100/255.0, 201/255.0), p=0.3 * prob_factor)
+    gauss_noise = A.GaussNoise((100 / 255.0, 201 / 255.0), p=0.3 * prob_factor)
     # gauss_noise = A.GaussNoise((100, 201), p=0.3 * prob_factor)
     gauss_blur = A.GaussianBlur((5, 19), p=0.1 * prob_factor)
     gamma_correct = A.RandomGamma(p=0.2 * prob_factor)
@@ -63,6 +64,7 @@ def GetAugTransform(prob_factor=1.0):
         keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
     )
     return transform
+
 
 def GetAugTransform_2(prob_factor=1.0):
     _require_albumentations()
@@ -107,6 +109,8 @@ def GetAugTransform_2(prob_factor=1.0):
         keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
     )
     return transform
+
+
 if __name__ == "__main__":
     random.seed(int(time.time()))
 

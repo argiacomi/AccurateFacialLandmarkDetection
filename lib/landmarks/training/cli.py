@@ -134,10 +134,16 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         default="",
         help="schema-aware landmark manifest for train/test",
     )
-    parser.add_argument("--train_manifest", type=str, default="", help="schema-aware train manifest")
-    parser.add_argument("--test_manifest", type=str, default="", help="schema-aware test manifest")
+    parser.add_argument(
+        "--train_manifest", type=str, default="", help="schema-aware train manifest"
+    )
+    parser.add_argument(
+        "--test_manifest", type=str, default="", help="schema-aware test manifest"
+    )
     parser.add_argument("--eval-mode", choices=EVAL_MODES, default="random_hash")
-    parser.add_argument("--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash")
+    parser.add_argument(
+        "--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash"
+    )
     parser.add_argument(
         "--respect-declared-splits",
         action="store_true",
@@ -160,7 +166,9 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         default="",
         help="Evaluation JSON path. Defaults to <ckpt_folder>/eval_report.json",
     )
-    parser.add_argument("--eval-report-csv", type=str, default="", help="Optional evaluation CSV path")
+    parser.add_argument(
+        "--eval-report-csv", type=str, default="", help="Optional evaluation CSV path"
+    )
     parser.add_argument(
         "--eval-records-jsonl",
         type=str,
@@ -210,8 +218,12 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         default="anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
         help="Comma-separated hard bucket target weights for domain-balanced sampling.",
     )
-    parser.add_argument("--dataset-targets", default="", help="Comma-separated dataset target weights.")
-    parser.add_argument("--schema-targets", default="", help="Comma-separated schema target weights.")
+    parser.add_argument(
+        "--dataset-targets", default="", help="Comma-separated dataset target weights."
+    )
+    parser.add_argument(
+        "--schema-targets", default="", help="Comma-separated schema target weights."
+    )
     parser.add_argument(
         "--auto-dataset-balancing",
         action=argparse.BooleanOptionalAction,

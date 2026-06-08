@@ -102,10 +102,7 @@ def _explicit_label_source(
         conditions = metadata.get("conditions") or ()
         if isinstance(conditions, str):
             conditions = (conditions,)
-        labels = {
-            _norm(value)
-            for value in conditions
-        }
+        labels = {_norm(value) for value in conditions}
         condition = _norm(metadata.get("condition"))
         if condition:
             labels.add(condition)
@@ -128,14 +125,28 @@ def _class_label_from_raw(task: str, raw: T.Any) -> str | None:
 
         # Common aliases.
         if task == "occlusion":
-            if label in {"1", "true", "yes", "occluded", "occlusion", "partially_occluded"}:
+            if label in {
+                "1",
+                "true",
+                "yes",
+                "occluded",
+                "occlusion",
+                "partially_occluded",
+            }:
                 return "occlusion"
             if label in {"0", "false", "no", "clear", "clean", "no_occlusion"}:
                 return "no_occlusion"
         if task == "visibility":
             if label in {"all_visible", "visible", "1", "true", "yes"}:
                 return "all_visible"
-            if label in {"partially_visible", "partial", "occluded", "0", "false", "no"}:
+            if label in {
+                "partially_visible",
+                "partial",
+                "occluded",
+                "0",
+                "false",
+                "no",
+            }:
                 return "partially_visible"
         if task == "blur_quality":
             if label in {"1", "true", "yes", "blur", "blurred"}:
@@ -210,9 +221,13 @@ def parse_auxiliary_loss_weights(raw: str | None) -> dict[str, float]:
         try:
             amount = float(value)
         except ValueError as exc:
-            raise ValueError(f"invalid auxiliary loss weight for {task!r}: {value!r}") from exc
+            raise ValueError(
+                f"invalid auxiliary loss weight for {task!r}: {value!r}"
+            ) from exc
         if not math.isfinite(amount) or amount < 0.0:
-            raise ValueError(f"auxiliary loss weight for {task!r} must be finite and non-negative")
+            raise ValueError(
+                f"auxiliary loss weight for {task!r} must be finite and non-negative"
+            )
         out[task] = amount
     return out
 
@@ -276,7 +291,9 @@ def masked_visibility_bce_loss(
 
     weights = valid.to(loss.dtype)
     if sample_weight is not None:
-        weights = weights * sample_weight.to(logits.device).to(loss.dtype).reshape(-1, 1)
+        weights = weights * sample_weight.to(logits.device).to(loss.dtype).reshape(
+            -1, 1
+        )
     if target_weight is not None:
         target_weight = target_weight.to(logits.device).to(loss.dtype)
         if target_weight.ndim == 1:

@@ -10,16 +10,79 @@ import numpy as np
 
 CANONICAL_SCHEMA = "2d_68"
 
-MAP_98_TO_68 = np.array([
-    0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32,
-    33, 34, 35, 36, 37,
-    42, 43, 44, 45, 46,
-    51, 52, 53, 54, 55, 56, 57, 58, 59,
-    60, 61, 63, 64, 65, 67,
-    68, 69, 71, 72, 73, 75,
-    76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87,
-    88, 89, 90, 91, 92, 93, 94, 95,
-], dtype=np.int64)
+MAP_98_TO_68 = np.array(
+    [
+        0,
+        2,
+        4,
+        6,
+        8,
+        10,
+        12,
+        14,
+        16,
+        18,
+        20,
+        22,
+        24,
+        26,
+        28,
+        30,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        42,
+        43,
+        44,
+        45,
+        46,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        63,
+        64,
+        65,
+        67,
+        68,
+        69,
+        71,
+        72,
+        73,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+    ],
+    dtype=np.int64,
+)
 
 PROJECTION_MAPS_TO_68: dict[str, str] = {
     "2d_68": "identity",
@@ -111,35 +174,188 @@ _SCHEMA_ALIASES = {
     "lm_3d_26": "3d_26",
 }
 
-WFLW_98_FLIP = np.array([
-    32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
-    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-    46, 45, 44, 43, 42, 50, 49, 48, 47,
-    37, 36, 35, 34, 33, 41, 40, 39, 38,
-    51, 52, 53, 54,
-    59, 58, 57, 56, 55,
-    72, 71, 70, 69, 68, 75, 74, 73,
-    64, 63, 62, 61, 60, 67, 66, 65,
-    82, 81, 80, 79, 78, 77, 76, 87, 86, 85, 84, 83,
-    92, 91, 90, 89, 88, 95, 94, 93, 97, 96,
-], dtype=np.int64)
+WFLW_98_FLIP = np.array(
+    [
+        32,
+        31,
+        30,
+        29,
+        28,
+        27,
+        26,
+        25,
+        24,
+        23,
+        22,
+        21,
+        20,
+        19,
+        18,
+        17,
+        16,
+        15,
+        14,
+        13,
+        12,
+        11,
+        10,
+        9,
+        8,
+        7,
+        6,
+        5,
+        4,
+        3,
+        2,
+        1,
+        0,
+        46,
+        45,
+        44,
+        43,
+        42,
+        50,
+        49,
+        48,
+        47,
+        37,
+        36,
+        35,
+        34,
+        33,
+        41,
+        40,
+        39,
+        38,
+        51,
+        52,
+        53,
+        54,
+        59,
+        58,
+        57,
+        56,
+        55,
+        72,
+        71,
+        70,
+        69,
+        68,
+        75,
+        74,
+        73,
+        64,
+        63,
+        62,
+        61,
+        60,
+        67,
+        66,
+        65,
+        82,
+        81,
+        80,
+        79,
+        78,
+        77,
+        76,
+        87,
+        86,
+        85,
+        84,
+        83,
+        92,
+        91,
+        90,
+        89,
+        88,
+        95,
+        94,
+        93,
+        97,
+        96,
+    ],
+    dtype=np.int64,
+)
 
 SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS = frozenset(
     {"2d_39", "menpo2d_profile_39", "multipie_profile_39"}
 )
 
 SCHEMA_FLIP_MAPS: dict[str, np.ndarray] = {
-    "2d_68": np.array([
-        16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-        26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
-        27, 28, 29, 30,
-        35, 34, 33, 32, 31,
-        45, 44, 43, 42, 47, 46,
-        39, 38, 37, 36, 41, 40,
-        54, 53, 52, 51, 50, 49, 48,
-        59, 58, 57, 56, 55,
-        64, 63, 62, 61, 60, 67, 66, 65,
-    ], dtype=np.int64),
+    "2d_68": np.array(
+        [
+            16,
+            15,
+            14,
+            13,
+            12,
+            11,
+            10,
+            9,
+            8,
+            7,
+            6,
+            5,
+            4,
+            3,
+            2,
+            1,
+            0,
+            26,
+            25,
+            24,
+            23,
+            22,
+            21,
+            20,
+            19,
+            18,
+            17,
+            27,
+            28,
+            29,
+            30,
+            35,
+            34,
+            33,
+            32,
+            31,
+            45,
+            44,
+            43,
+            42,
+            47,
+            46,
+            39,
+            38,
+            37,
+            36,
+            41,
+            40,
+            54,
+            53,
+            52,
+            51,
+            50,
+            49,
+            48,
+            59,
+            58,
+            57,
+            56,
+            55,
+            64,
+            63,
+            62,
+            61,
+            60,
+            67,
+            66,
+            65,
+        ],
+        dtype=np.int64,
+    ),
     "2d_98": WFLW_98_FLIP,
 }
 
@@ -177,7 +393,9 @@ class LandmarkPrediction:
             raise ValueError("provide either landmarks or points, not both")
 
         raw = np.asarray(landmarks, dtype="float32")
-        schema_name = infer_schema(raw) if schema is None else canonicalize_schema(schema)
+        schema_name = (
+            infer_schema(raw) if schema is None else canonicalize_schema(schema)
+        )
         points_array = normalize_landmark_array(raw, schema=schema_name)
         name = model_name if source is None else source
         if source_landmark_count is None:
@@ -245,7 +463,11 @@ def canonicalize_schema(schema: str | object) -> str:
 def infer_schema(points: np.ndarray) -> str:
     if points.ndim != 2:
         raise ValueError(f"landmarks must be 2D, got shape {points.shape}")
-    matches = [schema.name for schema in SUPPORTED_SCHEMAS.values() if points.shape == schema.shape]
+    matches = [
+        schema.name
+        for schema in SUPPORTED_SCHEMAS.values()
+        if points.shape == schema.shape
+    ]
     if not matches:
         raise ValueError(f"Cannot infer landmark schema from shape {points.shape}")
     return matches[0]
@@ -260,7 +482,9 @@ def normalize_landmark_array(
     array = np.asarray(points, dtype=dtype)
     if array.ndim == 1:
         if array.size % 2 != 0:
-            raise ValueError(f"flat landmark arrays must contain x/y pairs, got {array.size} values")
+            raise ValueError(
+                f"flat landmark arrays must contain x/y pairs, got {array.size} values"
+            )
         array = array.reshape((-1, 2))
     if array.ndim != 2:
         raise ValueError(f"landmarks must be a 2D array, got shape {array.shape}")
@@ -304,7 +528,9 @@ def head_name_for_schema(schema: str | object) -> str:
         return "landmarks_29"
     if schema_name in {"2d_39", "menpo2d_profile_39", "multipie_profile_39"}:
         return "profile39"
-    raise ValueError(f"Schema '{schema_name}' is not trainable by the CD-ViT multi-head path")
+    raise ValueError(
+        f"Schema '{schema_name}' is not trainable by the CD-ViT multi-head path"
+    )
 
 
 def point_count_for_schema(schema: str | object) -> int:
@@ -367,7 +593,11 @@ def to_canonical_68(
     source_schema: str | object | None = None,
 ) -> np.ndarray:
     array = normalize_landmark_array(points, schema=source_schema)
-    schema = infer_schema(array) if source_schema is None else canonicalize_schema(source_schema)
+    schema = (
+        infer_schema(array)
+        if source_schema is None
+        else canonicalize_schema(source_schema)
+    )
     if schema == CANONICAL_SCHEMA:
         return array[:, :2].astype("float32", copy=True)
     if schema == "2d_98":

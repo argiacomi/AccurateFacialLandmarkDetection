@@ -78,7 +78,9 @@ def _symlink(link: Path, target: Path) -> None:
     link.symlink_to(target.resolve())
 
 
-def _stage_jd_landmark(data_root: Path, registry: dict[str, T.Any] | None) -> Path | None:
+def _stage_jd_landmark(
+    data_root: Path, registry: dict[str, T.Any] | None
+) -> Path | None:
     """Stage Test_data1, Corrected_landmark, and bbox dirs under one source root.
 
     The JD-landmark builder expects ``<root>/Test_data1`` and
@@ -105,7 +107,10 @@ def _stage_jd_landmark(data_root: Path, registry: dict[str, T.Any] | None) -> Pa
 
 
 def _resolve_inputs(
-    dataset: str, registry: dict[str, T.Any] | None, data_root: Path, image_root_override: str | None
+    dataset: str,
+    registry: dict[str, T.Any] | None,
+    data_root: Path,
+    image_root_override: str | None,
 ) -> tuple[Path | None, str | None]:
     """Return the (source_dir, image_root) the builder should use for a dataset."""
     image_root = image_root_override
@@ -152,7 +157,11 @@ def _build_dataset(
         if args.max_frames_per_video is not None:
             arglist += ["--max-frames-per-video", str(args.max_frames_per_video)]
     if args.write_overlays:
-        arglist += ["--write-overlays", "--audit-overlay-limit", str(args.audit_overlay_limit)]
+        arglist += [
+            "--write-overlays",
+            "--audit-overlay-limit",
+            str(args.audit_overlay_limit),
+        ]
     build_args = builder._parser().parse_args(arglist)
     return builder.build(build_args)
 
@@ -176,10 +185,16 @@ def _dataset_summary(payload: T.Mapping[str, T.Any]) -> dict[str, dict[str, T.An
     for sample in payload.get("samples", []):
         if not isinstance(sample, dict):
             continue
-        name = str(sample.get("dataset") or sample.get("source", {}).get("dataset") or "unknown")
+        name = str(
+            sample.get("dataset")
+            or sample.get("source", {}).get("dataset")
+            or "unknown"
+        )
         entry = per_dataset.setdefault(name, {"samples": 0, "schemas": Counter()})
         entry["samples"] += 1
-        schema = str(sample.get("target_schema") or sample.get("source_schema") or "unknown")
+        schema = str(
+            sample.get("target_schema") or sample.get("source_schema") or "unknown"
+        )
         entry["schemas"][schema] += 1
     return per_dataset
 
@@ -190,7 +205,9 @@ def _dataset_summary(payload: T.Mapping[str, T.Any]) -> dict[str, dict[str, T.An
 def prepare(args: argparse.Namespace) -> int:
     datasets = downloader.normalize_datasets(args.datasets)
     if not datasets:
-        print("No datasets requested. Pass --datasets <id> [<id> ...].", file=sys.stderr)
+        print(
+            "No datasets requested. Pass --datasets <id> [<id> ...].", file=sys.stderr
+        )
         return 2
     data_root = Path(args.data_root)
     output_root = Path(args.output_root)
@@ -199,7 +216,9 @@ def prepare(args: argparse.Namespace) -> int:
     registry: dict[str, T.Any] | None = None
     if not args.skip_download:
         download_targets = downloader.normalize_datasets(
-            [*datasets, "300w"] if any(d in DATASETS_NEEDING_300W_IMAGES for d in datasets) else datasets
+            [*datasets, "300w"]
+            if any(d in DATASETS_NEEDING_300W_IMAGES for d in datasets)
+            else datasets
         )
         print(f"Downloading sources for: {', '.join(download_targets)}")
         _, registry = downloader.download_datasets(
@@ -220,8 +239,13 @@ def prepare(args: argparse.Namespace) -> int:
         dataset_bar.set_description(f"Prepare {dataset}")
         # First built dataset honors the requested mode; later ones merge into it.
         mode = args.manifest_mode if not built_any else "merge"
-        source, image_root = _resolve_inputs(dataset, registry, data_root, args.image_root)
-        record: dict[str, T.Any] = {"dataset": dataset, "source_dir": str(source) if source else None}
+        source, image_root = _resolve_inputs(
+            dataset, registry, data_root, args.image_root
+        )
+        record: dict[str, T.Any] = {
+            "dataset": dataset,
+            "source_dir": str(source) if source else None,
+        }
         try:
             manifest_path = _build_dataset(
                 dataset, source, image_root, output_root, mode=mode, args=args
@@ -240,7 +264,9 @@ def prepare(args: argparse.Namespace) -> int:
         results.append(record)
 
     combined_manifest = output_root / "manifest.json"
-    combined_payload = read_json(combined_manifest) if combined_manifest.is_file() else None
+    combined_payload = (
+        read_json(combined_manifest) if combined_manifest.is_file() else None
+    )
     report: dict[str, T.Any] | None = None
     if built_any and not args.skip_validate:
         report = _validate(
@@ -249,7 +275,9 @@ def prepare(args: argparse.Namespace) -> int:
             manifest_payload=combined_payload,
         )
 
-    _print_summary(results, report, output_root, datasets, manifest_payload=combined_payload)
+    _print_summary(
+        results, report, output_root, datasets, manifest_payload=combined_payload
+    )
 
     errored = [r for r in results if r["status"] == "error"]
     if not built_any:
@@ -268,7 +296,9 @@ def _print_summary(
     manifest_payload: T.Mapping[str, T.Any] | None = None,
 ) -> None:
     combined_manifest = output_root / "manifest.json"
-    per_dataset = _dataset_summary(manifest_payload) if manifest_payload is not None else {}
+    per_dataset = (
+        _dataset_summary(manifest_payload) if manifest_payload is not None else {}
+    )
 
     print("\nPer-dataset summary:")
     for record in results:
@@ -278,7 +308,10 @@ def _print_summary(
             continue
         stats = per_dataset.get(dataset, {})
         count = stats.get("samples", 0)
-        schemas = ",".join(f"{k}={v}" for k, v in sorted(stats.get("schemas", {}).items())) or "-"
+        schemas = (
+            ",".join(f"{k}={v}" for k, v in sorted(stats.get("schemas", {}).items()))
+            or "-"
+        )
         print(f"  {dataset:14s} samples={count} schemas={schemas}")
 
     if report is not None:
@@ -300,7 +333,9 @@ def _print_summary(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--datasets",
         nargs="+",
@@ -320,29 +355,69 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("data/prepared"),
         help="Combined manifest output root.",
     )
-    parser.add_argument("--image-root", default=None, help="Override image root (defaults to the 300W cache for annotation-layer datasets).")
-    parser.add_argument("--manifest-mode", choices=("replace", "merge"), default="replace", help="Replace (fresh) or merge into an existing combined manifest.")
+    parser.add_argument(
+        "--image-root",
+        default=None,
+        help="Override image root (defaults to the 300W cache for annotation-layer datasets).",
+    )
+    parser.add_argument(
+        "--manifest-mode",
+        choices=("replace", "merge"),
+        default="replace",
+        help="Replace (fresh) or merge into an existing combined manifest.",
+    )
     parser.add_argument(
         "--allow-overlap",
         action="store_true",
         help="Keep duplicate image paths across datasets.",
     )
-    parser.add_argument("--write-overlays", action="store_true", help="Write visual landmark overlay audit images.")
+    parser.add_argument(
+        "--write-overlays",
+        action="store_true",
+        help="Write visual landmark overlay audit images.",
+    )
     parser.add_argument("--audit-overlay-limit", type=int, default=50)
-    parser.add_argument("--frame-stride", type=int, default=1, help="Frame stride for video datasets.")
-    parser.add_argument("--max-frames-per-video", type=int, default=None, help="Cap frames per video for video datasets.")
+    parser.add_argument(
+        "--frame-stride", type=int, default=1, help="Frame stride for video datasets."
+    )
+    parser.add_argument(
+        "--max-frames-per-video",
+        type=int,
+        default=None,
+        help="Cap frames per video for video datasets.",
+    )
     parser.add_argument(
         "--workers",
         type=int,
         default=16,
         help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).",
     )
-    parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
-    parser.add_argument("--skip-checksum", action="store_true", help="Skip stored checksum verification.")
-    parser.add_argument("--skip-download", action="store_true", help="Reuse already-downloaded/extracted assets from --data-root.")
-    parser.add_argument("--skip-validate", action="store_true", help="Skip manifest validation.")
-    parser.add_argument("--skip-image-exists-check", action="store_true", help="Do not require manifest images to exist during validation.")
-    parser.add_argument("--keep-going", action="store_true", help="Continue after a dataset build fails.")
+    parser.add_argument(
+        "--force", action="store_true", help="Redownload/re-extract existing files."
+    )
+    parser.add_argument(
+        "--skip-checksum",
+        action="store_true",
+        help="Skip stored checksum verification.",
+    )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Reuse already-downloaded/extracted assets from --data-root.",
+    )
+    parser.add_argument(
+        "--skip-validate", action="store_true", help="Skip manifest validation."
+    )
+    parser.add_argument(
+        "--skip-image-exists-check",
+        action="store_true",
+        help="Do not require manifest images to exist during validation.",
+    )
+    parser.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="Continue after a dataset build fails.",
+    )
     return parser
 
 

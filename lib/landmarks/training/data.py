@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import torch
@@ -29,6 +28,7 @@ class LegacyBatchWithMix(tuple):
 def is_schema_aware_manifest_dataset_name(data_name):
     return is_schema_aware_manifest_dataset(data_name)
 
+
 def landmark_count_for_dataset(args):
     if args.data_name == "WFLW":
         return 98
@@ -40,12 +40,14 @@ def landmark_count_for_dataset(args):
         return int(args.lmk_num)
     raise ValueError(f"unknown data_name: {args.data_name}")
 
+
 def manifest_for_split(args, split):
     if split == "train":
         return args.train_manifest or args.manifest or args.root_folder
     if split == "test":
         return args.test_manifest or args.manifest or args.root_folder
     return args.manifest or args.root_folder
+
 
 def build_dataset(
     args,
@@ -83,6 +85,7 @@ def build_dataset(
         else "declared_or_random_hash",
     )
 
+
 def unpack_train_batch(batch, device, non_blocking=False):
     if isinstance(batch, dict):
         data = batch["image"].to(device, non_blocking=non_blocking)
@@ -90,20 +93,34 @@ def unpack_train_batch(batch, device, non_blocking=False):
         for head_name, payload in batch["heads"].items():
             heads[head_name] = {
                 "indices": payload["indices"].to(device, non_blocking=non_blocking),
-                "target": payload["target"].to(device, non_blocking=non_blocking).float(),
-                "heatmap": payload["heatmap"].to(device, non_blocking=non_blocking).float(),
-                "landmark_mask": payload["landmark_mask"].to(device, non_blocking=non_blocking).float(),
-                "sample_weight": payload["sample_weight"].to(device, non_blocking=non_blocking).float(),
+                "target": payload["target"]
+                .to(device, non_blocking=non_blocking)
+                .float(),
+                "heatmap": payload["heatmap"]
+                .to(device, non_blocking=non_blocking)
+                .float(),
+                "landmark_mask": payload["landmark_mask"]
+                .to(device, non_blocking=non_blocking)
+                .float(),
+                "sample_weight": payload["sample_weight"]
+                .to(device, non_blocking=non_blocking)
+                .float(),
             }
             if "visibility_target" in payload:
-                heads[head_name]["visibility_target"] = payload["visibility_target"].to(
-                    device,
-                    non_blocking=non_blocking,
-                ).float()
+                heads[head_name]["visibility_target"] = (
+                    payload["visibility_target"]
+                    .to(
+                        device,
+                        non_blocking=non_blocking,
+                    )
+                    .float()
+                )
             if "visibility_target_weight" in payload:
-                heads[head_name]["visibility_target_weight"] = payload[
-                    "visibility_target_weight"
-                ].to(device, non_blocking=non_blocking).float()
+                heads[head_name]["visibility_target_weight"] = (
+                    payload["visibility_target_weight"]
+                    .to(device, non_blocking=non_blocking)
+                    .float()
+                )
             if "visibility_target_provenance" in payload:
                 heads[head_name]["visibility_target_provenance"] = list(
                     payload["visibility_target_provenance"]
@@ -145,6 +162,7 @@ def unpack_train_batch(batch, device, non_blocking=False):
         landmark_mask = landmark_mask.to(device, non_blocking=non_blocking).float()
     return data, target, heatmap, sample_weight, landmark_mask
 
+
 def mix_for_samples(samples):
     mix = {"bucket": {}, "dataset": {}, "schema": {}}
     for sample in samples:
@@ -160,10 +178,12 @@ def mix_for_samples(samples):
             mix[key][label] = mix[key].get(label, 0) + 1
     return mix
 
+
 def batch_mix(batch):
     if isinstance(batch, dict):
         return batch.get("mix")
     return getattr(batch, "mix", None)
+
 
 def legacy_domain_balanced_collate(batch):
     if batch and isinstance(batch[0], tuple) and len(batch[0]) == 6:
@@ -173,6 +193,7 @@ def legacy_domain_balanced_collate(batch):
         metadata = []
         values = batch
     return LegacyBatchWithMix(default_collate(values), mix_for_samples(metadata))
+
 
 def schema_aware_collate(batch):
     images = default_collate([item["image"] for item in batch])
@@ -204,7 +225,9 @@ def schema_aware_collate(batch):
         )
         grouped[head_name]["visibility_target"].append(visibility_target)
         grouped[head_name]["visibility_target_weight"].append(
-            item.get("visibility_target_weight", torch.ones_like(visibility_target).float())
+            item.get(
+                "visibility_target_weight", torch.ones_like(visibility_target).float()
+            )
         )
         grouped[head_name]["visibility_target_provenance"].append(
             item.get("visibility_target_provenance", "")
@@ -220,8 +243,12 @@ def schema_aware_collate(batch):
             "landmark_mask": default_collate(payload["landmark_mask"]),
             "sample_weight": default_collate(payload["sample_weight"]),
             "visibility_target": default_collate(payload["visibility_target"]),
-            "visibility_target_weight": default_collate(payload["visibility_target_weight"]),
-            "visibility_target_provenance": list(payload["visibility_target_provenance"]),
+            "visibility_target_weight": default_collate(
+                payload["visibility_target_weight"]
+            ),
+            "visibility_target_provenance": list(
+                payload["visibility_target_provenance"]
+            ),
             "metadata": payload["metadata"],
         }
 

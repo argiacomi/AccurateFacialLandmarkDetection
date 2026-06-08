@@ -36,8 +36,11 @@ def build_cdvit_model(
         max_depth=args.max_depth,
         backbone_net=backbone_net,
         schema_heads=DEFAULT_SCHEMA_HEADS if schema_aware_training else None,
-        auxiliary_heads={name: len(labels) for name, labels in auxiliary_class_names.items()}
+        auxiliary_heads={
+            name: len(labels) for name, labels in auxiliary_class_names.items()
+        }
         if schema_aware_training and args.auxiliary_heads
         else None,
-        visibility_heads=schema_aware_training and bool(getattr(args, "visibility_heads", True)),
+        visibility_heads=schema_aware_training
+        and bool(getattr(args, "visibility_heads", True)),
     )

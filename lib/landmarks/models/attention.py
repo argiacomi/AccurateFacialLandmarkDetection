@@ -31,7 +31,9 @@ class PositionalEncoding1(nn.Module):
 
     def forward(self, x):
         B, C, N = x.shape
-        pos = (torch.arange(C, device=x.device, dtype=torch.float) - (C - 1) / 2) / ((C - 1) / 2)
+        pos = (torch.arange(C, device=x.device, dtype=torch.float) - (C - 1) / 2) / (
+            (C - 1) / 2
+        )
         pos = pos.reshape((1, C, 1)).repeat((B, 1, 1))
         x = torch.cat([x, pos], dim=2)
         x = self.linear(x)
@@ -65,7 +67,11 @@ class SelfAttention(nn.Module):
         attention_value, _ = self.mha(x_ln, x_ln, x_ln)
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
-        return attention_value.swapaxes(2, 1).view(-1, self.channels, size, size).contiguous()
+        return (
+            attention_value.swapaxes(2, 1)
+            .view(-1, self.channels, size, size)
+            .contiguous()
+        )
 
 
 class SelfAttention_block(nn.Module):
@@ -92,7 +98,16 @@ class SelfAttention_block(nn.Module):
         B, C, H, W = x.shape
 
         x = (
-            x.reshape((B, C, H // self.win_size, self.win_size, W // self.win_size, self.win_size))
+            x.reshape(
+                (
+                    B,
+                    C,
+                    H // self.win_size,
+                    self.win_size,
+                    W // self.win_size,
+                    self.win_size,
+                )
+            )
             .permute((0, 2, 4, 1, 3, 5))
             .reshape((B, (H * W) // (self.win_size * self.win_size), -1))
         )
@@ -105,7 +120,16 @@ class SelfAttention_block(nn.Module):
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         attention_value = (
-            attention_value.reshape((B, H // self.win_size, W // self.win_size, C, self.win_size, self.win_size))
+            attention_value.reshape(
+                (
+                    B,
+                    H // self.win_size,
+                    W // self.win_size,
+                    C,
+                    self.win_size,
+                    self.win_size,
+                )
+            )
             .permute((0, 3, 1, 4, 2, 5))
             .reshape((B, C, H, W))
         )
@@ -121,7 +145,9 @@ class SelfAttention_block2(nn.Module):
         else:
             self.out_channel = out_channel
         multiplier = win_size * win_size
-        self.mha = nn.MultiheadAttention(self.out_channel * multiplier, 4, batch_first=True)
+        self.mha = nn.MultiheadAttention(
+            self.out_channel * multiplier, 4, batch_first=True
+        )
         self.ln = nn.LayerNorm([self.out_channel * multiplier])
         self.ff_self = nn.Sequential(
             nn.LayerNorm([self.out_channel * multiplier]),
@@ -130,18 +156,31 @@ class SelfAttention_block2(nn.Module):
             nn.Linear(self.out_channel * multiplier, self.out_channel * multiplier),
         )
 
-        self.patch_embed = nn.Conv2d(channels, self.out_channel * multiplier, win_size, win_size)
+        self.patch_embed = nn.Conv2d(
+            channels, self.out_channel * multiplier, win_size, win_size
+        )
 
     def forward(self, x):
         B, C, H, W = x.shape
-        x = self.patch_embed(x).permute((0, 2, 3, 1)).reshape((B, (H * W) // (self.win_size * self.win_size), -1))
+        x = (
+            self.patch_embed(x)
+            .permute((0, 2, 3, 1))
+            .reshape((B, (H * W) // (self.win_size * self.win_size), -1))
+        )
         x_ln = self.ln(x)
         attention_value, _ = self.mha(x_ln, x_ln, x_ln)
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         attention_value = (
             attention_value.reshape(
-                (B, H // self.win_size, W // self.win_size, self.win_size, self.win_size, self.out_channel)
+                (
+                    B,
+                    H // self.win_size,
+                    W // self.win_size,
+                    self.win_size,
+                    self.win_size,
+                    self.out_channel,
+                )
             )
             .permute((0, 5, 1, 3, 2, 4))
             .reshape((B, self.out_channel, H, W))
@@ -173,7 +212,16 @@ class SelfAttention_block3(nn.Module):
         B, C, H, W = x.shape
 
         x = (
-            x.reshape((B, C, H // self.win_size, self.win_size, W // self.win_size, self.win_size))
+            x.reshape(
+                (
+                    B,
+                    C,
+                    H // self.win_size,
+                    self.win_size,
+                    W // self.win_size,
+                    self.win_size,
+                )
+            )
             .permute((0, 2, 4, 3, 5, 1))
             .reshape((B, (H * W) // (self.win_size * self.win_size), -1))
         )
@@ -186,7 +234,16 @@ class SelfAttention_block3(nn.Module):
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         attention_value = (
-            attention_value.reshape((B, H // self.win_size, W // self.win_size, self.win_size, self.win_size, C))
+            attention_value.reshape(
+                (
+                    B,
+                    H // self.win_size,
+                    W // self.win_size,
+                    self.win_size,
+                    self.win_size,
+                    C,
+                )
+            )
             .permute((0, 5, 1, 3, 2, 4))
             .reshape((B, C, H, W))
         )
@@ -210,7 +267,6 @@ class SelfAttention2(nn.Module):
         B, C, H, W = x.shape
         x = x.view(B, C, self.img_size * self.img_size)
 
-
         x_ln = self.ln(x)
 
         K = x_ln
@@ -230,22 +286,36 @@ class SelfAttention2_block(nn.Module):
         self.in_channel = in_channel
         self.out_channel = out_channel
 
-        self.mha = nn.MultiheadAttention(img_size * img_size // (win_size * win_size), 4, batch_first=True)
+        self.mha = nn.MultiheadAttention(
+            img_size * img_size // (win_size * win_size), 4, batch_first=True
+        )
         self.ln = nn.LayerNorm([img_size * img_size // (win_size * win_size)])
         self.ff_self = nn.Sequential(
             nn.LayerNorm([img_size * img_size // (win_size * win_size)]),
-            nn.Linear(img_size * img_size // (win_size * win_size), img_size * img_size // (win_size * win_size)),
+            nn.Linear(
+                img_size * img_size // (win_size * win_size),
+                img_size * img_size // (win_size * win_size),
+            ),
             nn.GELU(),
-            nn.Linear(img_size * img_size // (win_size * win_size), img_size * img_size // (win_size * win_size)),
+            nn.Linear(
+                img_size * img_size // (win_size * win_size),
+                img_size * img_size // (win_size * win_size),
+            ),
         )
 
-        self.patch_embed = nn.Conv2d(in_channel, out_channel * win_size * win_size, win_size, win_size)
+        self.patch_embed = nn.Conv2d(
+            in_channel, out_channel * win_size * win_size, win_size, win_size
+        )
 
     def forward(self, x):
         B, C, H, W = x.shape
         x_embed = self.patch_embed(x)
         x_embed = x_embed.reshape(
-            (B, self.out_channel * self.win_size * self.win_size, H * W // (self.win_size * self.win_size))
+            (
+                B,
+                self.out_channel * self.win_size * self.win_size,
+                H * W // (self.win_size * self.win_size),
+            )
         )
 
         x_ln = self.ln(x_embed)
@@ -256,7 +326,14 @@ class SelfAttention2_block(nn.Module):
         attention_value = self.ff_self(attention_value) + attention_value
         res = (
             attention_value.reshape(
-                (B, self.win_size, self.win_size, self.out_channel, H // self.win_size, W // self.win_size)
+                (
+                    B,
+                    self.win_size,
+                    self.win_size,
+                    self.out_channel,
+                    H // self.win_size,
+                    W // self.win_size,
+                )
             )
             .permute((0, 3, 4, 1, 5, 2))
             .reshape((B, self.out_channel, H, W))
@@ -309,6 +386,7 @@ class SelfAttention2Local2(nn.Module):
 
         return res
 
+
 class MixBlk(nn.Module):
     def __init__(self, in_channel, win_size=4):
         super(MixBlk, self).__init__()
@@ -328,6 +406,7 @@ class MixBlk(nn.Module):
         f = torch.concat([f1, f2], dim=1)
         f = self.merge(f)
         return f
+
 
 class SA2SA1(nn.Module):
     def __init__(self, img_size=32, channel_size=256, concat=True):
@@ -351,9 +430,14 @@ class SA2SA1_2(nn.Module):
     def __init__(self, img_size=32, channel_size=256, win_size=2, concat=True):
         super(SA2SA1_2, self).__init__()
         # self.sa1 = SelfAttention(channel_size)
-        self.sa1 = SelfAttention_block2(channels=channel_size, win_size=win_size, out_channel=channel_size // 2)
+        self.sa1 = SelfAttention_block2(
+            channels=channel_size, win_size=win_size, out_channel=channel_size // 2
+        )
         self.sa2 = SelfAttention2_block(
-            img_size=img_size, in_channel=channel_size, out_channel=channel_size // 2, win_size=win_size
+            img_size=img_size,
+            in_channel=channel_size,
+            out_channel=channel_size // 2,
+            win_size=win_size,
         )
         self.conv = None
         if concat:
@@ -371,8 +455,12 @@ class SA2SA1_twins(nn.Module):
     def __init__(self, img_size=32, channel_size=256, win_size=2, concat=True):
         super(SA2SA1_twins, self).__init__()
         # self.sa1 = SelfAttention(channel_size)
-        self.sa1 = SelfAttention_block2(channels=channel_size, win_size=win_size, out_channel=channel_size // 2)
-        self.sa2 = SelfAttention_block2(channels=channel_size, win_size=win_size, out_channel=channel_size // 2)
+        self.sa1 = SelfAttention_block2(
+            channels=channel_size, win_size=win_size, out_channel=channel_size // 2
+        )
+        self.sa2 = SelfAttention_block2(
+            channels=channel_size, win_size=win_size, out_channel=channel_size // 2
+        )
         self.conv = None
         if concat:
             self.conv = DoubleConv(channel_size, channel_size)
@@ -383,15 +471,23 @@ class SA2SA1_twins(nn.Module):
         else:
             c = torch.cat([self.sa2(x), self.sa1(x)], dim=1)
             return self.conv(c)
+
+
 class SA2SA1_twins2(nn.Module):
     def __init__(self, img_size=32, channel_size=256, win_size=2, concat=True):
         super(SA2SA1_twins2, self).__init__()
         # self.sa1 = SelfAttention(channel_size)
         self.sa1 = SelfAttention2_block(
-            img_size=img_size, in_channel=channel_size, out_channel=channel_size // 2, win_size=win_size
+            img_size=img_size,
+            in_channel=channel_size,
+            out_channel=channel_size // 2,
+            win_size=win_size,
         )
         self.sa2 = SelfAttention2_block(
-            img_size=img_size, in_channel=channel_size, out_channel=channel_size // 2, win_size=win_size
+            img_size=img_size,
+            in_channel=channel_size,
+            out_channel=channel_size // 2,
+            win_size=win_size,
         )
         self.conv = None
         if concat:
@@ -403,6 +499,8 @@ class SA2SA1_twins2(nn.Module):
         else:
             c = torch.cat([self.sa2(x), self.sa1(x)], dim=1)
             return self.conv(c)
+
+
 class SelfAttentionGL(nn.Module):
     def __init__(self, img_size=32, channel_size=256, concat=True):
         super(SelfAttentionGL, self).__init__()
@@ -420,13 +518,17 @@ class SelfAttentionGL(nn.Module):
             c = torch.cat([self.sa2(x), self.sa1(x)], dim=1)
             return self.conv(c)
 
+
 class SA2SA1_3(nn.Module):
     def __init__(self, img_size=32, channel_size=256, win_size=2, concat=True):
         super(SA2SA1_3, self).__init__()
         # self.sa1 = SelfAttention(channel_size)
         self.sa1 = MixBlk(in_channel=channel_size, win_size=win_size)
         self.sa2 = SelfAttention2_block(
-            img_size=img_size, in_channel=channel_size, out_channel=channel_size // 2, win_size=win_size
+            img_size=img_size,
+            in_channel=channel_size,
+            out_channel=channel_size // 2,
+            win_size=win_size,
         )
         self.conv = None
         if concat:
@@ -442,13 +544,17 @@ class SA2SA1_3(nn.Module):
             return self.conv(c)
 
 
-
 class SA2SA1_4(nn.Module):
     def __init__(self, img_size=32, channel_size=256, win_size=2, concat=True):
         super(SA2SA1_4, self).__init__()
-        self.sa1 = SelfAttention_block2(channels=channel_size, win_size=win_size, out_channel=channel_size // 2)
+        self.sa1 = SelfAttention_block2(
+            channels=channel_size, win_size=win_size, out_channel=channel_size // 2
+        )
         self.sa2 = SelfAttention2_block(
-            img_size=img_size, in_channel=channel_size, out_channel=channel_size // 2, win_size=win_size
+            img_size=img_size,
+            in_channel=channel_size,
+            out_channel=channel_size // 2,
+            win_size=win_size,
         )
         self.sa3 = nn.Sequential(
             nn.Conv2d(channel_size, channel_size // 2, 1),
@@ -469,6 +575,7 @@ class SA2SA1_4(nn.Module):
         else:
             c = torch.cat([self.sa3(x), self.sa2(x), self.sa1(x)], dim=1)
             return self.conv(c)
+
 
 if __name__ == "__main__":
     x = torch.rand((2, 256, 32, 32))

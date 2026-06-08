@@ -11,10 +11,12 @@ class SmoothL1Loss(nn.Module):
     def __repr__(self):
         return "SmoothL1Loss()"
 
-    def forward(self, output: torch.Tensor, groundtruth: torch.Tensor, reduction='mean'):
+    def forward(
+        self, output: torch.Tensor, groundtruth: torch.Tensor, reduction="mean"
+    ):
         """
-            input:  b x n x 2
-            output: b x n x 1 => 1
+        input:  b x n x 2
+        output: b x n x 1 => 1
         """
         if output.dim() == 4:
             shape = output.shape
@@ -23,14 +25,15 @@ class SmoothL1Loss(nn.Module):
         delta_2 = (output - groundtruth).pow(2).sum(dim=-1, keepdim=False)
         delta = delta_2.clamp(min=1e-6).sqrt()
         # delta = torch.sqrt(delta_2 + self.EPSILON)
-        loss = torch.where( \
-            delta_2 < self.scale * self.scale, \
-            0.5 / self.scale * delta_2, \
-            delta - 0.5 * self.scale)
+        loss = torch.where(
+            delta_2 < self.scale * self.scale,
+            0.5 / self.scale * delta_2,
+            delta - 0.5 * self.scale,
+        )
 
-        if reduction == 'mean':
+        if reduction == "mean":
             loss = loss.mean()
-        elif reduction == 'sum':
+        elif reduction == "sum":
             loss = loss.sum()
 
         return loss

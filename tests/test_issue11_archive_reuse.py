@@ -35,7 +35,13 @@ def _valid_targz(path: Path) -> Path:
     return path
 
 
-def _args(output_root: Path, *, extract: bool = True, force: bool = False, keep_going: bool = False):
+def _args(
+    output_root: Path,
+    *,
+    extract: bool = True,
+    force: bool = False,
+    keep_going: bool = False,
+):
     return argparse.Namespace(
         output_root=output_root,
         extract=extract,
@@ -45,7 +51,9 @@ def _args(output_root: Path, *, extract: bool = True, force: bool = False, keep_
     )
 
 
-def _asset(dataset: str, *, gdrive: bool = False, name: str | None = None) -> downloader.SourceAsset:
+def _asset(
+    dataset: str, *, gdrive: bool = False, name: str | None = None
+) -> downloader.SourceAsset:
     for a in downloader.SOURCES:
         if a.dataset != dataset:
             continue
@@ -53,10 +61,18 @@ def _asset(dataset: str, *, gdrive: bool = False, name: str | None = None) -> do
             continue
         if gdrive and not a.google_drive_file_id:
             continue
-        if not gdrive and gdrive is False and name is None and a.url is None and a.google_drive_file_id is None:
+        if (
+            not gdrive
+            and gdrive is False
+            and name is None
+            and a.url is None
+            and a.google_drive_file_id is None
+        ):
             continue
         return a
-    raise AssertionError(f"no source asset for {dataset!r} name={name!r} gdrive={gdrive}")
+    raise AssertionError(
+        f"no source asset for {dataset!r} name={name!r} gdrive={gdrive}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +84,9 @@ def test_wflw_images_reuse_configured_tarball_skips_gdrive(tmp_path, monkeypatch
     _valid_targz(output_root / "wflw" / "archives" / "WFLW_images.tar.gz")
 
     def fail(*args, **kwargs):  # pragma: no cover - must not be called
-        raise AssertionError("_download_google_drive should not be called when a tarball exists")
+        raise AssertionError(
+            "_download_google_drive should not be called when a tarball exists"
+        )
 
     monkeypatch.setattr(downloader, "_download_google_drive", fail)
     result = downloader._process_asset(wflw_images, _args(output_root, extract=False))
@@ -84,8 +102,11 @@ def test_wflw_images_reuse_alternate_zip(tmp_path, monkeypatch):
     _valid_zip(output_root / "wflw" / "archives" / "WFLW_images.zip")
 
     monkeypatch.setattr(
-        downloader, "_download_google_drive",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should reuse, not download")),
+        downloader,
+        "_download_google_drive",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("should reuse, not download")
+        ),
     )
     result = downloader._process_asset(wflw_images, _args(output_root, extract=False))
     assert result["status"] == "reused"
@@ -96,7 +117,12 @@ def test_wflw_images_reuse_alternate_zip(tmp_path, monkeypatch):
 # Shared COFW image archive reuse (both orders) + separate annotations
 # ---------------------------------------------------------------------------
 def _cofw_color(dataset: str) -> downloader.SourceAsset:
-    return _asset(dataset, name="cofw68 color images" if dataset == "cofw68" else "cofw29 original color images")
+    return _asset(
+        dataset,
+        name="cofw68 color images"
+        if dataset == "cofw68"
+        else "cofw29 original color images",
+    )
 
 
 def test_cofw68_then_cofw29_reuses_shared_image_archive(tmp_path, monkeypatch):
@@ -111,8 +137,11 @@ def test_cofw68_then_cofw29_reuses_shared_image_archive(tmp_path, monkeypatch):
 
     # cofw29 must reuse the COFW color archive cofw68 already fetched.
     monkeypatch.setattr(
-        downloader, "_download_url",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should reuse cofw68 archive")),
+        downloader,
+        "_download_url",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("should reuse cofw68 archive")
+        ),
     )
     second = downloader._process_asset(_cofw_color("cofw29"), _args(output_root))
     assert second["status"] == "reused_shared"
@@ -122,13 +151,20 @@ def test_cofw68_then_cofw29_reuses_shared_image_archive(tmp_path, monkeypatch):
 
 def test_cofw29_then_cofw68_reuses_shared_image_archive(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
-    monkeypatch.setattr(downloader, "_download_url", lambda url, destination, *, force=False: _valid_zip(destination))
+    monkeypatch.setattr(
+        downloader,
+        "_download_url",
+        lambda url, destination, *, force=False: _valid_zip(destination),
+    )
     first = downloader._process_asset(_cofw_color("cofw29"), _args(output_root))
     assert first["status"] == "downloaded"
 
     monkeypatch.setattr(
-        downloader, "_download_url",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should reuse cofw29 archive")),
+        downloader,
+        "_download_url",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("should reuse cofw29 archive")
+        ),
     )
     second = downloader._process_asset(_cofw_color("cofw68"), _args(output_root))
     assert second["status"] == "reused_shared"
@@ -137,7 +173,11 @@ def test_cofw29_then_cofw68_reuses_shared_image_archive(tmp_path, monkeypatch):
 
 def test_cofw_annotation_assets_stay_separate(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
-    monkeypatch.setattr(downloader, "_download_url", lambda url, destination, *, force=False: _valid_zip(destination))
+    monkeypatch.setattr(
+        downloader,
+        "_download_url",
+        lambda url, destination, *, force=False: _valid_zip(destination),
+    )
     results = [
         downloader._process_asset(a, _args(output_root))
         for a in downloader.SOURCES
@@ -148,7 +188,9 @@ def test_cofw_annotation_assets_stay_separate(tmp_path, monkeypatch):
 
     cofw68 = {a["name"] for a in registry["datasets"]["cofw68"]["assets"]}
     cofw29 = {a["name"] for a in registry["datasets"]["cofw29"]["assets"]}
-    assert "cofw6868 benchmark annotations" in cofw68  # annotation asset distinct to cofw68
+    assert (
+        "cofw6868 benchmark annotations" in cofw68
+    )  # annotation asset distinct to cofw68
     assert "cofw6868 benchmark annotations" not in cofw29
     # Both datasets still have their own color-image registry entry.
     assert "cofw68 color images" in cofw68
@@ -168,7 +210,9 @@ def test_invalid_archive_is_rejected_and_removed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(downloader, "_download_url", fake_html)
     with pytest.raises(ValueError, match="not a valid zip/tar archive"):
-        downloader._process_asset(_cofw_color("cofw68"), _args(output_root, keep_going=False))
+        downloader._process_asset(
+            _cofw_color("cofw68"), _args(output_root, keep_going=False)
+        )
 
     # The bogus archive must not be left where a later run would reuse it.
     assert not (output_root / "cofw68" / "archives" / "COFW_color.zip").exists()
@@ -179,7 +223,10 @@ def test_invalid_archive_is_not_reused(tmp_path):
     bogus = output_root / "wflw" / "archives" / "WFLW_images.tar.gz"
     bogus.parent.mkdir(parents=True)
     bogus.write_bytes(b"<html>not a tarball</html>")
-    assert downloader._find_reusable_archive(_asset("wflw", gdrive=True), output_root) is None
+    assert (
+        downloader._find_reusable_archive(_asset("wflw", gdrive=True), output_root)
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -187,13 +234,20 @@ def test_invalid_archive_is_not_reused(tmp_path):
 # ---------------------------------------------------------------------------
 def test_rerun_reuses_existing_url_archive(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
-    monkeypatch.setattr(downloader, "_download_url", lambda url, destination, *, force=False: _valid_zip(destination))
+    monkeypatch.setattr(
+        downloader,
+        "_download_url",
+        lambda url, destination, *, force=False: _valid_zip(destination),
+    )
     first = downloader._process_asset(_cofw_color("cofw68"), _args(output_root))
     assert first["status"] == "downloaded"
 
     monkeypatch.setattr(
-        downloader, "_download_url",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("rerun must reuse, not re-download")),
+        downloader,
+        "_download_url",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("rerun must reuse, not re-download")
+        ),
     )
     second = downloader._process_asset(_cofw_color("cofw68"), _args(output_root))
     assert second["status"] == "reused"
@@ -209,7 +263,9 @@ def test_force_redownloads_even_when_archive_present(tmp_path, monkeypatch):
         return _valid_zip(destination)
 
     monkeypatch.setattr(downloader, "_download_url", counting)
-    result = downloader._process_asset(_cofw_color("cofw68"), _args(output_root, force=True))
+    result = downloader._process_asset(
+        _cofw_color("cofw68"), _args(output_root, force=True)
+    )
     assert result["status"] == "downloaded"
     assert calls["n"] == 1  # --force bypasses reuse
 
@@ -225,7 +281,9 @@ def test_helen_annotation_download_and_source_resolution(tmp_path, monkeypatch):
 
     def fake_json(url, destination, *, force=False):
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps([[["sample.jpg", 256, 256], [[1.0, 2.0]] * 194]]))
+        destination.write_text(
+            json.dumps([[["sample.jpg", 256, 256], [[1.0, 2.0]] * 194]])
+        )
         return destination
 
     monkeypatch.setattr(downloader, "_download_url", fake_json)
@@ -249,11 +307,20 @@ def _make_json_source(extracted: Path, *, dataset: str, count: int) -> None:
     samples = []
     for idx in range(count):
         name = f"{dataset}_{idx}.jpg"
-        assert cv2.imwrite(str(extracted / name), np.full((96, 96, 3), 100, dtype=np.uint8))
-        samples.append(
-            {"sample_id": f"{dataset}/s{idx}", "image": name, "landmarks": pts, "source_schema": "2d_68"}
+        assert cv2.imwrite(
+            str(extracted / name), np.full((96, 96, 3), 100, dtype=np.uint8)
         )
-    (extracted / "samples.json").write_text(json.dumps({"samples": samples}), encoding="utf-8")
+        samples.append(
+            {
+                "sample_id": f"{dataset}/s{idx}",
+                "image": name,
+                "landmarks": pts,
+                "source_schema": "2d_68",
+            }
+        )
+    (extracted / "samples.json").write_text(
+        json.dumps({"samples": samples}), encoding="utf-8"
+    )
 
 
 def test_audit_overlay_limit_applies_per_dataset(tmp_path):
@@ -261,13 +328,32 @@ def test_audit_overlay_limit_applies_per_dataset(tmp_path):
     _make_json_source(tmp_path / "wflwv", dataset="wflw-v", count=4)
     _make_json_source(tmp_path / "vw", dataset="300vw", count=4)
 
-    builder.build(builder._parser().parse_args(
-        ["--dataset", "wflw-v", "--source-dir", str(tmp_path / "wflwv"), "--output-dir", str(out)]
-    ))
-    manifest = builder.build(builder._parser().parse_args(
-        ["--dataset", "300vw", "--source-dir", str(tmp_path / "vw"),
-         "--output-dir", str(out), "--manifest-mode", "merge"]
-    ))
+    builder.build(
+        builder._parser().parse_args(
+            [
+                "--dataset",
+                "wflw-v",
+                "--source-dir",
+                str(tmp_path / "wflwv"),
+                "--output-dir",
+                str(out),
+            ]
+        )
+    )
+    manifest = builder.build(
+        builder._parser().parse_args(
+            [
+                "--dataset",
+                "300vw",
+                "--source-dir",
+                str(tmp_path / "vw"),
+                "--output-dir",
+                str(out),
+                "--manifest-mode",
+                "merge",
+            ]
+        )
+    )
 
     report_path = builder._write_visual_audit(manifest, out, limit=2)
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -276,8 +362,13 @@ def test_audit_overlay_limit_applies_per_dataset(tmp_path):
     for overlay in report["overlays"]:
         per_dataset[overlay["dataset"]] = per_dataset.get(overlay["dataset"], 0) + 1
         # Overlays are organized by dataset/schema on disk.
-        assert f"/overlays/{overlay['dataset']}/" in overlay["overlay"].replace("\\", "/")
-    assert per_dataset == {"wflw-v": 2, "300vw": 2}  # up to N=2 per dataset, not 2 total
+        assert f"/overlays/{overlay['dataset']}/" in overlay["overlay"].replace(
+            "\\", "/"
+        )
+    assert per_dataset == {
+        "wflw-v": 2,
+        "300vw": 2,
+    }  # up to N=2 per dataset, not 2 total
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +382,9 @@ def test_prepare_helen_resolves_annotations_and_300w_cache(tmp_path):
     points = np.stack([np.linspace(16, 220, 194), np.linspace(24, 224, 194)], axis=1)
     annotations = data_root / "helen" / "archives" / "annotations.json"
     annotations.parent.mkdir(parents=True)
-    annotations.write_text(json.dumps([[["sample.jpg", 256, 256], points.tolist()]]), encoding="utf-8")
+    annotations.write_text(
+        json.dumps([[["sample.jpg", 256, 256], points.tolist()]]), encoding="utf-8"
+    )
 
     # Existing 300W Helen image cache that prepare must resolve automatically.
     cache = data_root / "300w" / "extracted"
@@ -300,8 +393,15 @@ def test_prepare_helen_resolves_annotations_and_300w_cache(tmp_path):
     assert cv2.imwrite(str(img), np.full((256, 256, 3), 127, dtype=np.uint8))
 
     rc = prepare.main(
-        ["--datasets", "helen", "--skip-download",
-         "--data-root", str(data_root), "--output-root", str(output_root)]
+        [
+            "--datasets",
+            "helen",
+            "--skip-download",
+            "--data-root",
+            str(data_root),
+            "--output-root",
+            str(output_root),
+        ]
     )
     assert rc == 0
 

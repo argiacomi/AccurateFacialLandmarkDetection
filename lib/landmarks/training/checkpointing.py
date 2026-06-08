@@ -60,7 +60,9 @@ def _collect_rng_state_by_rank() -> dict[str, T.Any]:
     return {local_payload["rank"]: local_payload["rng"]}
 
 
-def _set_checkpoint_rng_state_by_rank(rng_state_by_rank: dict[str, T.Any] | None) -> None:
+def _set_checkpoint_rng_state_by_rank(
+    rng_state_by_rank: dict[str, T.Any] | None,
+) -> None:
     global _CHECKPOINT_RNG_STATE_BY_RANK
     _CHECKPOINT_RNG_STATE_BY_RANK = rng_state_by_rank
 
@@ -71,7 +73,9 @@ def _checkpoint_rng_state_for_payload() -> dict[str, T.Any]:
     return {_current_rank_string(): _local_rng_state_for_checkpoint()}
 
 
-def _rng_state_for_current_rank(checkpoint: dict[str, T.Any]) -> dict[str, T.Any] | None:
+def _rng_state_for_current_rank(
+    checkpoint: dict[str, T.Any],
+) -> dict[str, T.Any] | None:
     rng_by_rank = checkpoint.get("rng_by_rank")
     if isinstance(rng_by_rank, dict):
         rank_key = _current_rank_string()
@@ -97,7 +101,9 @@ def _rng_state_for_current_rank(checkpoint: dict[str, T.Any]) -> dict[str, T.Any
     return None
 
 
-def _torch_load_training_checkpoint(path: str | Path, device: torch.device | str | int) -> T.Any:
+def _torch_load_training_checkpoint(
+    path: str | Path, device: torch.device | str | int
+) -> T.Any:
     """Load trusted local CD-ViT training checkpoints.
 
     Full training checkpoints include optimizer, scheduler, scaler, EMA, RNG,
@@ -139,11 +145,7 @@ def _checkpoint_metadata_payload(payload: dict[str, T.Any]) -> dict[str, T.Any]:
         "rng",
         "rng_by_rank",
     }
-    metadata = {
-        key: value
-        for key, value in payload.items()
-        if key not in heavy_keys
-    }
+    metadata = {key: value for key, value in payload.items() if key not in heavy_keys}
     metadata["has_model"] = "model" in payload
     metadata["has_optimizer"] = payload.get("optimizer") is not None
     metadata["has_scheduler"] = payload.get("scheduler") is not None
@@ -157,7 +159,8 @@ def _write_checkpoint_metadata(path: str | Path, payload: dict[str, T.Any]) -> N
     meta_path = _checkpoint_metadata_path(path)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(
-        json.dumps(_checkpoint_metadata_payload(payload), indent=2, sort_keys=True) + "\n",
+        json.dumps(_checkpoint_metadata_payload(payload), indent=2, sort_keys=True)
+        + "\n",
         encoding="utf-8",
     )
 
@@ -217,7 +220,10 @@ def _restore_training_checkpoint(
     best_record: T.Any,
     args: T.Any,
 ) -> tuple[int, T.Any, T.Any]:
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "cdvit-training-checkpoint-v1":
+    if (
+        not isinstance(checkpoint, dict)
+        or checkpoint.get("format") != "cdvit-training-checkpoint-v1"
+    ):
         return 0, best_nme, best_record
 
     if checkpoint.get("optimizer") is not None:
@@ -243,9 +249,14 @@ def _restore_training_checkpoint(
                 if rng.get("python") is not None:
                     random.setstate(rng["python"])
             except Exception as err:
-                print(f"warning: failed to restore RNG state from checkpoint: {err}", flush=True)
+                print(
+                    f"warning: failed to restore RNG state from checkpoint: {err}",
+                    flush=True,
+                )
 
-    start_epoch = int(checkpoint.get("next_epoch", int(checkpoint.get("epoch", -1)) + 1))
+    start_epoch = int(
+        checkpoint.get("next_epoch", int(checkpoint.get("epoch", -1)) + 1)
+    )
     best_nme = checkpoint.get("best_nme", best_nme)
     best_record = checkpoint.get("best_record", best_record)
     return start_epoch, best_nme, best_record
@@ -274,4 +285,6 @@ def _write_training_complete_sentinel(
         "compat_config": build_training_compat_config_from_args(args),
         "compat_config_digest": training_compat_digest_from_args(args),
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )

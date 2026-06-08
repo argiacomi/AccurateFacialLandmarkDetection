@@ -22,6 +22,6 @@ class WingLoss(nn.Module):
         loss = torch.where(
             delta < self.omega,
             self.omega * torch.log(1 + delta / self.epsilon),
-            delta - C
+            delta - C,
         )
         return loss.mean()

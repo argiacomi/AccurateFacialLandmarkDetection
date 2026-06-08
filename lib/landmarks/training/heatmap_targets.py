@@ -6,7 +6,6 @@ import torch.nn.functional as F
 import math
 
 
-
 def DistPoint2Edge(points: np.ndarray, edge: np.ndarray):
     v = edge[1] - edge[0]
     length = np.linalg.norm(v)
@@ -54,7 +53,10 @@ class encoder_default:
         pointmaps = np.stack(pointmaps, axis=0) / 255.0
         pointmaps = torch.from_numpy(pointmaps).float().unsqueeze(0)
         pointmaps = F.interpolate(
-            pointmaps, size=(int(w * self.scale), int(h * self.scale)), mode="bilinear", align_corners=True
+            pointmaps,
+            size=(int(w * self.scale), int(h * self.scale)),
+            mode="bilinear",
+            align_corners=True,
         ).squeeze()
         return pointmaps
 
@@ -64,7 +66,12 @@ class encoder_default:
         pt = round(float(ptt[0]), 4), round(float(ptt[1]), 4)
         ul = [int(pt[0] - tmp_size), int(pt[1] - tmp_size)]
         br = [int(pt[0] + tmp_size + 1), int(pt[1] + tmp_size + 1)]
-        if ul[0] > img.shape[1] - 1 or ul[1] > img.shape[0] - 1 or br[0] - 1 < 0 or br[1] - 1 < 0:
+        if (
+            ul[0] > img.shape[1] - 1
+            or ul[1] > img.shape[0] - 1
+            or br[0] - 1 < 0
+            or br[1] - 1 < 0
+        ):
             # If not, just return the image as is
             return img
 
@@ -95,7 +102,9 @@ class encoder_default:
         # shape2 = g[g_y[0] : g_y[1], g_x[0] : g_x[1]].shape
         # if shape1[0] != shape2[0] or shape1[1] != shape2[1]:
         #     print("buging....3", pt, sigma, shape1, shape2, img_x, img_y)
-        img[img_y[0] : img_y[1], img_x[0] : img_x[1]] = 255 * g[g_y[0] : g_y[1], g_x[0] : g_x[1]]
+        img[img_y[0] : img_y[1], img_x[0] : img_x[1]] = (
+            255 * g[g_y[0] : g_y[1], g_x[0] : g_x[1]]
+        )
         return img
 
 
@@ -121,6 +130,7 @@ class GenerateHeatmap:
             hm_i = np.exp(-dist * dist / 1.0)  # 32-0.75
             hm[i] = hm_i
         return hm
+
     def GenerateDebug(self, lmk):
         hm = np.zeros((len(lmk), self.img_size, self.img_size), dtype=np.float32)
         for i in range(len(lmk)):
@@ -150,7 +160,7 @@ class GenerateHeatmap:
             hm[i, int(y_t), int(x_t)] = a * b
 
         return hm
-    
+
     def GenerateEdgeHeatmap(self, lmk, edge_info):
         hm = np.zeros((len(edge_info), self.img_size, self.img_size), dtype=np.float32)
         for i in range(len(edge_info)):
@@ -176,7 +186,7 @@ class GenerateHeatmap:
         hm = np.exp(-dist * dist / 1.0)
         return hm
 
-    
+
 class GenerateLineHeatmap:
     def __init__(self, img_size):
         super(GenerateLineHeatmap, self).__init__()
@@ -199,10 +209,8 @@ class GenerateLineHeatmap:
 
             hm[i] = hm_i
         return hm
-    
 
-    
-    
+
 if __name__ == "__main__":
     encoder = encoder_default(256, 256)
 

@@ -44,11 +44,7 @@ def _write_manifest(tmp_path, points, *, schema, extra_sample=None):
     }
     if extra_sample:
         sample.update(extra_sample)
-    manifest = {
-        "samples": [
-            sample
-        ]
-    }
+    manifest = {"samples": [sample]}
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return manifest_path
@@ -215,8 +211,12 @@ def test_standalone_eval_dataset_keeps_native_schema_when_enabled(tmp_path):
 
 
 def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
-    points_68 = torch.stack((torch.linspace(0.1, 0.9, 68), torch.linspace(0.2, 0.8, 68)), dim=1)
-    points_98 = torch.stack((torch.linspace(0.1, 0.9, 98), torch.linspace(0.2, 0.8, 98)), dim=1)
+    points_68 = torch.stack(
+        (torch.linspace(0.1, 0.9, 68), torch.linspace(0.2, 0.8, 68)), dim=1
+    )
+    points_98 = torch.stack(
+        (torch.linspace(0.1, 0.9, 98), torch.linspace(0.2, 0.8, 98)), dim=1
+    )
     batch = _eval_collate(
         [
             (
@@ -259,7 +259,9 @@ def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
                 }
             ]
 
-    report = _evaluate_landmark_model(NativeHeadModel(), [batch], torch.device("cpu"), include_records=True)
+    report = _evaluate_landmark_model(
+        NativeHeadModel(), [batch], torch.device("cpu"), include_records=True
+    )
 
     assert report["overall"]["sample_count"] == 2
     assert report["overall"]["NME_all"] == pytest.approx(0.0)
@@ -269,7 +271,10 @@ def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
     records = {record["sample_id"]: record for record in report["records"]}
     assert records["sample-68"]["evaluation_head"] == "landmarks_68"
     assert records["sample-98"]["evaluation_head"] == "landmarks_98"
-    assert records["sample-98"]["visibility_target_source"] == "metadata.landmark_visibility"
+    assert (
+        records["sample-98"]["visibility_target_source"]
+        == "metadata.landmark_visibility"
+    )
 
 
 def test_builder_materializes_native_98_landmarks_and_schema_metadata(tmp_path):
@@ -307,7 +312,9 @@ def test_landmark_file_parser_accepts_39_point_text_pts_npy_and_mat(tmp_path):
     pts_path = tmp_path / "profile.pts"
     mat_path = tmp_path / "profile.mat"
     np.save(npy_path, points)
-    txt_path.write_text(" ".join(str(float(v)) for v in points.reshape(-1)), encoding="utf-8")
+    txt_path.write_text(
+        " ".join(str(float(v)) for v in points.reshape(-1)), encoding="utf-8"
+    )
     pts_path.write_text(
         "version: 1\nn_points: 39\n{\n"
         + "\n".join(f"{x} {y}" for x, y in points)

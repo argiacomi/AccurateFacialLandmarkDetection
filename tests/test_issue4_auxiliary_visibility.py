@@ -27,8 +27,18 @@ def test_auxiliary_label_resolution_prefers_explicit_labels_and_keeps_provenance
 
 def test_auxiliary_label_resolution_leaves_unknown_missing_instead_of_clean_negative():
     assert resolve_auxiliary_label("occlusion", {}, {}).label == -1
-    assert resolve_auxiliary_label("visibility", {}, {"landmark_mask": torch.ones(68)}).label == -1
-    assert resolve_auxiliary_label("landmark_confidence", {}, {"sample_weight": torch.tensor(5.0)}).label == -1
+    assert (
+        resolve_auxiliary_label(
+            "visibility", {}, {"landmark_mask": torch.ones(68)}
+        ).label
+        == -1
+    )
+    assert (
+        resolve_auxiliary_label(
+            "landmark_confidence", {}, {"sample_weight": torch.tensor(5.0)}
+        ).label
+        == -1
+    )
 
 
 def test_schema_aware_collate_batches_auxiliary_provenance_and_visibility_targets():
@@ -51,7 +61,9 @@ def test_schema_aware_collate_batches_auxiliary_provenance_and_visibility_target
     batch = _schema_aware_collate([item])
 
     assert batch["aux_labels"]["occlusion"].tolist() == [1]
-    assert batch["aux_provenance"]["occlusion"] == ["metadata.auxiliary_labels.occlusion"]
+    assert batch["aux_provenance"]["occlusion"] == [
+        "metadata.auxiliary_labels.occlusion"
+    ]
     assert batch["heads"]["landmarks_68"]["visibility_target"].shape == (1, 68)
 
 
@@ -159,7 +171,9 @@ def test_visibility_head_and_loss_use_masked_targets():
     assert details["visibility_valid_counts"]["landmarks_68"] == 2
     assert details["loss_visibility"].item() > 0.0
     assert stage_pred["visibility_68"].grad[:, :2].abs().sum().item() > 0.0
-    assert stage_pred["visibility_68"].grad[:, 2:].abs().sum().item() == pytest.approx(0.0)
+    assert stage_pred["visibility_68"].grad[:, 2:].abs().sum().item() == pytest.approx(
+        0.0
+    )
 
 
 def test_visibility_loss_schedule_warm_start_and_ramp():

@@ -128,4 +128,3 @@ def test_pipeline_script_help_runs_directly():
 
     assert result.returncode == 0, result.stderr
     assert "--train-data-name" in result.stdout
-

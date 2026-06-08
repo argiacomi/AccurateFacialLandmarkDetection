@@ -40,17 +40,23 @@ def main() -> int:
         max_examples=args.max_examples,
         raise_on_error=False,
     )
-    print(json.dumps({
-        "ok": report["ok"],
-        "manifest": report["manifest"],
-        "total_samples": report["total_samples"],
-        "valid_samples": report["valid_samples"],
-        "invalid_samples": report["invalid_samples"],
-        "schemas": report["schemas"],
-        "heads": report["heads"],
-        "leakage_violations": report["leakage"]["violation_count"],
-        "report": str(args.report) if args.report else None,
-    }, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "ok": report["ok"],
+                "manifest": report["manifest"],
+                "total_samples": report["total_samples"],
+                "valid_samples": report["valid_samples"],
+                "invalid_samples": report["invalid_samples"],
+                "schemas": report["schemas"],
+                "heads": report["heads"],
+                "leakage_violations": report["leakage"]["violation_count"],
+                "report": str(args.report) if args.report else None,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0 if report["ok"] else 1
 
 

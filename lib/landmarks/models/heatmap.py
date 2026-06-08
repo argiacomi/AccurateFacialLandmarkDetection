@@ -39,13 +39,17 @@ class Heatmap(torch.nn.Module):
         super(Heatmap, self).__init__()
 
         A, B = MakeGrid(grid_num)
-        self.register_buffer("A", torch.from_numpy(A).float().unsqueeze(0).unsqueeze(0), False)
-        self.register_buffer("B", torch.from_numpy(B).float().unsqueeze(0).unsqueeze(0), False)
+        self.register_buffer(
+            "A", torch.from_numpy(A).float().unsqueeze(0).unsqueeze(0), False
+        )
+        self.register_buffer(
+            "B", torch.from_numpy(B).float().unsqueeze(0).unsqueeze(0), False
+        )
 
     def forward(self, heatmap):
         heatmap = heatmap - torch.amax(heatmap, dim=(2, 3), keepdim=True)
         heatmap = torch.exp(heatmap)
-        heatmap = heatmap / (1e-6 +  torch.sum(heatmap, dim=(2, 3), keepdim=True))
+        heatmap = heatmap / (1e-6 + torch.sum(heatmap, dim=(2, 3), keepdim=True))
         Pij = heatmap / self.B
 
         xx = (Pij * self.A).sum([2, 3])

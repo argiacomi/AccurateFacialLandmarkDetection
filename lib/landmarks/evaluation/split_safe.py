@@ -92,12 +92,18 @@ def manifest_entry_split(entry: T.Mapping[str, T.Any]) -> str:
 
 
 def sample_dataset(entry: T.Mapping[str, T.Any]) -> str:
-    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), T.Mapping) else {}
+    metadata = (
+        entry.get("metadata") if isinstance(entry.get("metadata"), T.Mapping) else {}
+    )
     source = entry.get("source") if isinstance(entry.get("source"), T.Mapping) else {}
-    return normalize_dataset(entry.get("dataset") or metadata.get("dataset") or source.get("dataset"))
+    return normalize_dataset(
+        entry.get("dataset") or metadata.get("dataset") or source.get("dataset")
+    )
 
 
-def stable_random_hash_split(entry: T.Mapping[str, T.Any], index: int, *, test_percent: int = 5) -> str:
+def stable_random_hash_split(
+    entry: T.Mapping[str, T.Any], index: int, *, test_percent: int = 5
+) -> str:
     dataset = sample_dataset(entry) or "unknown"
     identity = (
         entry.get("sample_id")
@@ -128,13 +134,19 @@ def entry_in_eval_split(
     dataset = sample_dataset(entry)
 
     if mode not in EVAL_MODES:
-        raise ValueError(f"unknown eval mode {eval_mode!r}; expected one of {EVAL_MODES}")
+        raise ValueError(
+            f"unknown eval mode {eval_mode!r}; expected one of {EVAL_MODES}"
+        )
 
     if mode in {"by_dataset", "leave_one_dataset_out"}:
         if not heldout:
-            raise ValueError(f"--eval-mode {mode} requires at least one --heldout-dataset")
+            raise ValueError(
+                f"--eval-mode {mode} requires at least one --heldout-dataset"
+            )
         if mode == "leave_one_dataset_out" and len(heldout) != 1:
-            raise ValueError("--eval-mode leave_one_dataset_out requires exactly one --heldout-dataset")
+            raise ValueError(
+                "--eval-mode leave_one_dataset_out requires exactly one --heldout-dataset"
+            )
         is_heldout = dataset in heldout
         if split_label == "train":
             return not is_heldout
@@ -144,7 +156,9 @@ def entry_in_eval_split(
 
     policy = normalize_label(split_policy) or "declared_or_random_hash"
     if policy not in SPLIT_POLICIES:
-        raise ValueError(f"unknown split policy {split_policy!r}; expected one of {SPLIT_POLICIES}")
+        raise ValueError(
+            f"unknown split policy {split_policy!r}; expected one of {SPLIT_POLICIES}"
+        )
     if policy == "declared":
         entry_split = manifest_entry_split(entry)
         return bool(entry_split) and entry_split == split_label
@@ -172,14 +186,20 @@ def _flatten_sources(value: T.Any) -> list[str]:
 
 
 def _source_values(sample: T.Mapping[str, T.Any], keys: T.Sequence[str]) -> set[str]:
-    metadata = sample.get("metadata") if isinstance(sample.get("metadata"), T.Mapping) else {}
+    metadata = (
+        sample.get("metadata") if isinstance(sample.get("metadata"), T.Mapping) else {}
+    )
     source = sample.get("source") if isinstance(sample.get("source"), T.Mapping) else {}
     values: set[str] = set()
     for key in keys:
         values.update(_flatten_sources(sample.get(key)))
         values.update(_flatten_sources(metadata.get(key)))
         values.update(_flatten_sources(source.get(key)))
-    return {str(Path(value).expanduser()) if "/" in value else value for value in values if value}
+    return {
+        str(Path(value).expanduser()) if "/" in value else value
+        for value in values
+        if value
+    }
 
 
 def image_source_ids(sample: T.Mapping[str, T.Any]) -> set[str]:
@@ -198,20 +218,30 @@ def validate_no_train_test_leakage(
     train_samples: T.Sequence[T.Mapping[str, T.Any]],
     test_samples: T.Sequence[T.Mapping[str, T.Any]],
 ) -> None:
-    train_sources: dict[str, dict[str, str]] = {category: {} for category in LEAKAGE_KEYS}
+    train_sources: dict[str, dict[str, str]] = {
+        category: {} for category in LEAKAGE_KEYS
+    }
     for sample in train_samples:
-        sample_id = str(sample.get("sample_id") or sample.get("image") or sample.get("landmarks"))
+        sample_id = str(
+            sample.get("sample_id") or sample.get("image") or sample.get("landmarks")
+        )
         for category in LEAKAGE_KEYS:
             for source_id in leakage_source_ids(sample, category):
                 train_sources[category].setdefault(source_id, sample_id)
 
-    duplicates: dict[str, list[tuple[str, str, str]]] = {category: [] for category in LEAKAGE_KEYS}
+    duplicates: dict[str, list[tuple[str, str, str]]] = {
+        category: [] for category in LEAKAGE_KEYS
+    }
     for sample in test_samples:
-        sample_id = str(sample.get("sample_id") or sample.get("image") or sample.get("landmarks"))
+        sample_id = str(
+            sample.get("sample_id") or sample.get("image") or sample.get("landmarks")
+        )
         for category in LEAKAGE_KEYS:
             for source_id in leakage_source_ids(sample, category):
                 if source_id in train_sources[category]:
-                    duplicates[category].append((source_id, train_sources[category][source_id], sample_id))
+                    duplicates[category].append(
+                        (source_id, train_sources[category][source_id], sample_id)
+                    )
 
     if any(duplicates.values()):
         details = {
@@ -225,7 +255,9 @@ def validate_no_train_test_leakage(
                 if values
             }
         )
-        raise ValueError(f"train/test source leakage detected: {json.dumps(details, sort_keys=True)}")
+        raise ValueError(
+            f"train/test source leakage detected: {json.dumps(details, sort_keys=True)}"
+        )
 
 
 def _coerce_conditions(meta: T.Mapping[str, T.Any]) -> tuple[str, ...]:
@@ -259,7 +291,10 @@ def _bucket_from_conditions(conditions: T.Sequence[str]) -> str:
     labels = set(conditions)
     if "profile_occlusion" in labels or ("profile" in labels and "occlusion" in labels):
         return "profile_occlusion"
-    if any(label in labels for label in ("profile", "large_yaw", "large_yaw_pose", "profile_pose")):
+    if any(
+        label in labels
+        for label in ("profile", "large_yaw", "large_yaw_pose", "profile_pose")
+    ):
         return "profile"
     if any("occlusion" in label or "occlud" in label for label in labels):
         return "occlusion"
@@ -269,15 +304,25 @@ def _bucket_from_conditions(conditions: T.Sequence[str]) -> str:
 
 
 def _pose_bucket(meta: T.Mapping[str, T.Any], conditions: T.Sequence[str]) -> str:
-    label = _first_label(meta.get("pose_bucket"), meta.get("pose"), meta.get("yaw_bucket"), default="")
+    label = _first_label(
+        meta.get("pose_bucket"), meta.get("pose"), meta.get("yaw_bucket"), default=""
+    )
     if label:
         return label
     labels = set(conditions)
-    if any(label in labels for label in ("large_yaw_left", "profile_left", "left_profile")):
+    if any(
+        label in labels for label in ("large_yaw_left", "profile_left", "left_profile")
+    ):
         return "profile_left"
-    if any(label in labels for label in ("large_yaw_right", "profile_right", "right_profile")):
+    if any(
+        label in labels
+        for label in ("large_yaw_right", "profile_right", "right_profile")
+    ):
         return "profile_right"
-    if any(label in labels for label in ("profile", "large_yaw", "large_yaw_pose", "profile_pose")):
+    if any(
+        label in labels
+        for label in ("profile", "large_yaw", "large_yaw_pose", "profile_pose")
+    ):
         return "profile"
     if any(label in labels for label in ("frontal", "normal", "clean", "anchor")):
         return "frontal"
@@ -295,11 +340,17 @@ def _occlusion_bucket(meta: T.Mapping[str, T.Any], conditions: T.Sequence[str]) 
                 return "no_occlusion"
             return "unknown"
         return "occlusion" if bool(explicit) else "no_occlusion"
-    return "occlusion" if any("occlusion" in label or "occlud" in label for label in conditions) else "no_occlusion"
+    return (
+        "occlusion"
+        if any("occlusion" in label or "occlud" in label for label in conditions)
+        else "no_occlusion"
+    )
 
 
 def _profile_side(meta: T.Mapping[str, T.Any], conditions: T.Sequence[str]) -> str:
-    label = _first_label(meta.get("profile_side"), meta.get("side"), meta.get("yaw_side"), default="")
+    label = _first_label(
+        meta.get("profile_side"), meta.get("side"), meta.get("yaw_side"), default=""
+    )
     if label in {"left", "right"}:
         return label
     joined = set(conditions)
@@ -307,7 +358,10 @@ def _profile_side(meta: T.Mapping[str, T.Any], conditions: T.Sequence[str]) -> s
         return "left"
     if any("right" in label for label in joined):
         return "right"
-    if any(label in joined for label in ("profile", "large_yaw", "large_yaw_pose", "profile_pose")):
+    if any(
+        label in joined
+        for label in ("profile", "large_yaw", "large_yaw_pose", "profile_pose")
+    ):
         return "profile_unknown_side"
     return "not_profile"
 
@@ -364,10 +418,14 @@ def _face_size_bucket(meta: T.Mapping[str, T.Any]) -> str:
 
 def slice_labels(meta: T.Mapping[str, T.Any]) -> dict[str, str]:
     conditions = _coerce_conditions(meta)
-    metadata = meta.get("metadata") if isinstance(meta.get("metadata"), T.Mapping) else {}
+    metadata = (
+        meta.get("metadata") if isinstance(meta.get("metadata"), T.Mapping) else {}
+    )
     merged = {**metadata, **dict(meta)}
     dataset = normalize_dataset(merged.get("dataset")) or "unknown"
-    schema = _first_label(merged.get("source_schema"), merged.get("schema"), merged.get("landmark_schema"))
+    schema = _first_label(
+        merged.get("source_schema"), merged.get("schema"), merged.get("landmark_schema")
+    )
     hard_bucket = _first_label(merged.get("hard_negative_bucket"), default="")
     if not hard_bucket:
         hard_bucket = _bucket_from_conditions(conditions)
@@ -426,7 +484,9 @@ def _average_precision(labels: np.ndarray, scores: np.ndarray) -> float | None:
     return float(np.sum(precision[ranked == 1]) / positives)
 
 
-def _f1_at_threshold(labels: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> float | None:
+def _f1_at_threshold(
+    labels: np.ndarray, scores: np.ndarray, threshold: float = 0.5
+) -> float | None:
     if labels.size == 0:
         return None
     pred = scores >= threshold
@@ -450,7 +510,9 @@ def _roc_auc(labels: np.ndarray, scores: np.ndarray) -> float | None:
     return float(np.mean(comparisons))
 
 
-def visibility_metrics_for_records(records: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, T.Any]:
+def visibility_metrics_for_records(
+    records: T.Sequence[T.Mapping[str, T.Any]],
+) -> dict[str, T.Any]:
     labels: list[int] = []
     scores: list[float] = []
     prediction_skipped = 0
@@ -490,7 +552,13 @@ def visibility_metrics_for_records(records: T.Sequence[T.Mapping[str, T.Any]]) -
     label_arr = np.asarray(labels, dtype=np.int64)
     score_arr = _sigmoid_if_logits(np.asarray(scores, dtype=np.float32))
     return {
-        "visibility_sample_count": int(sum(1 for record in records if record.get("visible_landmark_count") is not None)),
+        "visibility_sample_count": int(
+            sum(
+                1
+                for record in records
+                if record.get("visible_landmark_count") is not None
+            )
+        ),
         "visibility_label_count": int(label_arr.size),
         "visibility_prediction_skipped_count": int(prediction_skipped),
         "visibility_AP": _average_precision(label_arr, score_arr),
@@ -507,7 +575,9 @@ def _nme_ci95(values: np.ndarray) -> dict[str, float | None]:
     return {"low": mean - 1.96 * stderr, "high": mean + 1.96 * stderr}
 
 
-def metrics_for_nmes(values: T.Sequence[float], *, threshold: float = 0.10) -> dict[str, T.Any]:
+def metrics_for_nmes(
+    values: T.Sequence[float], *, threshold: float = 0.10
+) -> dict[str, T.Any]:
     finite_values = []
     for value in values:
         try:
@@ -547,8 +617,12 @@ def metrics_for_nmes(values: T.Sequence[float], *, threshold: float = 0.10) -> d
     }
 
 
-def metrics_for_records(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold: float = 0.10) -> dict[str, T.Any]:
-    metrics = metrics_for_nmes([record.get("nme", float("nan")) for record in records], threshold=threshold)
+def metrics_for_records(
+    records: T.Sequence[T.Mapping[str, T.Any]], *, threshold: float = 0.10
+) -> dict[str, T.Any]:
+    metrics = metrics_for_nmes(
+        [record.get("nme", float("nan")) for record in records], threshold=threshold
+    )
     visible = metrics_for_nmes(
         [record.get("nme_visible", float("nan")) for record in records],
         threshold=threshold,
@@ -563,10 +637,22 @@ def metrics_for_records(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold
             "NME_occluded": occluded["nme"],
             "visible_sample_count": visible["sample_count"],
             "occluded_sample_count": occluded["sample_count"],
-            "visible_landmark_count": int(sum(int(record.get("visible_landmark_count") or 0) for record in records)),
-            "occluded_landmark_count": int(sum(int(record.get("occluded_landmark_count") or 0) for record in records)),
+            "visible_landmark_count": int(
+                sum(
+                    int(record.get("visible_landmark_count") or 0) for record in records
+                )
+            ),
+            "occluded_landmark_count": int(
+                sum(
+                    int(record.get("occluded_landmark_count") or 0)
+                    for record in records
+                )
+            ),
             "visibility_label_skipped_count": int(
-                sum(int(record.get("visibility_label_skipped_count") or 0) for record in records)
+                sum(
+                    int(record.get("visibility_label_skipped_count") or 0)
+                    for record in records
+                )
             ),
         }
     )
@@ -574,9 +660,17 @@ def metrics_for_records(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold
     return metrics
 
 
-def build_slice_report(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold: float = 0.10) -> dict[str, T.Any]:
-    valid = [record for record in records if np.isfinite(float(record.get("nme", float("nan"))))]
-    report: dict[str, T.Any] = {"overall": metrics_for_records(valid, threshold=threshold)}
+def build_slice_report(
+    records: T.Sequence[T.Mapping[str, T.Any]], *, threshold: float = 0.10
+) -> dict[str, T.Any]:
+    valid = [
+        record
+        for record in records
+        if np.isfinite(float(record.get("nme", float("nan"))))
+    ]
+    report: dict[str, T.Any] = {
+        "overall": metrics_for_records(valid, threshold=threshold)
+    }
     for slice_name in (
         "by_dataset",
         "by_schema",
@@ -593,7 +687,11 @@ def build_slice_report(records: T.Sequence[T.Mapping[str, T.Any]], *, threshold:
             groups.setdefault(label, []).append(float(record["nme"]))
         report[slice_name] = {
             label: metrics_for_records(
-                [record for record in valid if str(record.get(slice_name) or "unknown") == label],
+                [
+                    record
+                    for record in valid
+                    if str(record.get(slice_name) or "unknown") == label
+                ],
                 threshold=threshold,
             )
             for label in sorted(groups)
@@ -623,7 +721,9 @@ def write_eval_csv(path: str | Path, payload: T.Mapping[str, T.Any]) -> None:
             elif isinstance(slice_value, T.Mapping):
                 for label, metrics in slice_value.items():
                     if isinstance(metrics, T.Mapping):
-                        rows.append(_csv_row(model_key, slice_name, str(label), metrics))
+                        rows.append(
+                            _csv_row(model_key, slice_name, str(label), metrics)
+                        )
 
     fieldnames = [
         "model",
@@ -656,7 +756,9 @@ def write_eval_csv(path: str | Path, payload: T.Mapping[str, T.Any]) -> None:
         writer.writerows(rows)
 
 
-def write_eval_records_jsonl(path: str | Path, records: T.Sequence[T.Mapping[str, T.Any]]) -> None:
+def write_eval_records_jsonl(
+    path: str | Path, records: T.Sequence[T.Mapping[str, T.Any]]
+) -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as handle:
@@ -664,7 +766,9 @@ def write_eval_records_jsonl(path: str | Path, records: T.Sequence[T.Mapping[str
             handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def write_eval_records_csv(path: str | Path, records: T.Sequence[T.Mapping[str, T.Any]]) -> None:
+def write_eval_records_csv(
+    path: str | Path, records: T.Sequence[T.Mapping[str, T.Any]]
+) -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -693,8 +797,14 @@ def write_eval_records_csv(path: str | Path, records: T.Sequence[T.Mapping[str, 
         writer.writerows(records)
 
 
-def _csv_row(model_key: str, slice_name: str, label: str, metrics: T.Mapping[str, T.Any]) -> dict[str, T.Any]:
-    ci = metrics.get("nme_ci95") if isinstance(metrics.get("nme_ci95"), T.Mapping) else {}
+def _csv_row(
+    model_key: str, slice_name: str, label: str, metrics: T.Mapping[str, T.Any]
+) -> dict[str, T.Any]:
+    ci = (
+        metrics.get("nme_ci95")
+        if isinstance(metrics.get("nme_ci95"), T.Mapping)
+        else {}
+    )
     return {
         "model": model_key,
         "slice": slice_name,
@@ -713,7 +823,9 @@ def _csv_row(model_key: str, slice_name: str, label: str, metrics: T.Mapping[str
         "visibility_sample_count": metrics.get("visibility_sample_count"),
         "visibility_label_count": metrics.get("visibility_label_count"),
         "visibility_label_skipped_count": metrics.get("visibility_label_skipped_count"),
-        "visibility_prediction_skipped_count": metrics.get("visibility_prediction_skipped_count"),
+        "visibility_prediction_skipped_count": metrics.get(
+            "visibility_prediction_skipped_count"
+        ),
         "visibility_AP": metrics.get("visibility_AP"),
         "visibility_F1@0.5": metrics.get("visibility_F1@0.5"),
         "visibility_ROC_AUC": metrics.get("visibility_ROC_AUC"),

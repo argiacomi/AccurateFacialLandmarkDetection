@@ -53,12 +53,18 @@ def parallel_map(
     items = list(items)
     worker_count = resolve_worker_count(workers, len(items))
     if worker_count <= 1 or len(items) <= 1:
-        return [func(item) for item in track(items, desc=desc, total=len(items), unit=unit)]
+        return [
+            func(item) for item in track(items, desc=desc, total=len(items), unit=unit)
+        ]
 
     executor_cls = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
     results: list[_R] = [T.cast(_R, None)] * len(items)
     with executor_cls(max_workers=worker_count) as executor:
-        future_to_index = {executor.submit(func, item): index for index, item in enumerate(items)}
-        for future in track(as_completed(future_to_index), desc=desc, total=len(items), unit=unit):
+        future_to_index = {
+            executor.submit(func, item): index for index, item in enumerate(items)
+        }
+        for future in track(
+            as_completed(future_to_index), desc=desc, total=len(items), unit=unit
+        ):
             results[future_to_index[future]] = future.result()
     return results

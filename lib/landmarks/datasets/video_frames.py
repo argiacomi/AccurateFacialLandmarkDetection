@@ -53,7 +53,9 @@ def selected_frame_indices(
 
 def _safe_video_id(video_path: Path, video_id: str | None = None) -> str:
     text = str(video_id or video_path.stem).strip().replace("\\", "/").strip("/")
-    return "".join(ch if ch.isalnum() or ch in "._-/#" else "_" for ch in text) or "video"
+    return (
+        "".join(ch if ch.isalnum() or ch in "._-/#" else "_" for ch in text) or "video"
+    )
 
 
 def extract_video_frames(
