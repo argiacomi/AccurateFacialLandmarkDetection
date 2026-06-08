@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import types
 
 import pytest
 
@@ -152,12 +153,119 @@ def test_write_recommendation_outputs_flags_and_json(tmp_path):
     assert (tmp_path / "best_training_hyperparameters.json").exists()
 
 
+class _FakeTrial:
+    def __init__(self, number: int):
+        self.number = number
+        self.params = {}
+
+    def suggest_float(self, name, low, high):
+        value = (float(low) + float(high)) / 2.0
+        self.params[name] = value
+        return value
+
+
+class _FakeStudy:
+    def __init__(self):
+        self.asked = []
+        self.told = []
+        self.attrs = {}
+
+    def ask(self):
+        trial = _FakeTrial(len(self.asked))
+        self.asked.append(trial)
+        return trial
+
+    def tell(self, number, value):
+        self.told.append((int(number), float(value)))
+
+    def get_trials(self, deepcopy=False):
+        return []
+
+    def set_user_attr(self, name, value):
+        self.attrs[name] = value
+
+
+class _FakeOptuna:
+    def __init__(self):
+        self.study = _FakeStudy()
+        self.created_kwargs = None
+        self.samplers = types.SimpleNamespace(TPESampler=lambda seed=None: {"seed": seed})
+        self.pruners = types.SimpleNamespace(
+            MedianPruner=lambda n_startup_trials=0, n_warmup_steps=0: {
+                "startup": n_startup_trials,
+                "warmup": n_warmup_steps,
+            }
+        )
+
+    def create_study(self, **kwargs):
+        self.created_kwargs = kwargs
+        return self.study
+
+
+def test_generate_loss_search_uses_optuna_study_when_available(tmp_path, monkeypatch):
+    fake_optuna = _FakeOptuna()
+    monkeypatch.setattr(tuner.importlib, "import_module", lambda name: fake_optuna if name == "optuna" else None)
+    args = tuner.build_arg_parser().parse_args([
+        "--output-dir",
+        str(tmp_path),
+        "--optuna-trials",
+        "2",
+    ])
+
+    runs = tuner.generate_loss_search(args, tuner.baseline_config(args))
+
+    assert fake_optuna.created_kwargs["study_name"] == args.optuna_study_name
+    assert fake_optuna.created_kwargs["direction"] == "minimize"
+    assert fake_optuna.created_kwargs["load_if_exists"] is True
+    assert str(tmp_path / "optuna_study.db") in fake_optuna.created_kwargs["storage"]
+    assert len(fake_optuna.study.asked) == 2
+    assert [run["optuna_source"] for run in runs] == ["optuna", "optuna"]
+    assert runs[0]["params"]["star_loss_weight"] == pytest.approx(0.015)
+    assert (tmp_path / "optuna_trial_plan.json").exists()
+
+
+def test_require_optuna_fails_when_optuna_missing(tmp_path, monkeypatch):
+    def missing_import(name):
+        if name == "optuna":
+            raise ImportError("missing optuna")
+        raise AssertionError(name)
+
+    monkeypatch.setattr(tuner.importlib, "import_module", missing_import)
+    args = tuner.build_arg_parser().parse_args([
+        "--output-dir",
+        str(tmp_path),
+        "--optuna-trials",
+        "1",
+        "--require-optuna",
+    ])
+
+    with pytest.raises(tuner.TuningError, match="Optuna is required"):
+        tuner.generate_loss_search(args, tuner.baseline_config(args))
+
+
+def test_tell_optuna_result_reports_completed_score(tmp_path, monkeypatch):
+    fake_optuna = _FakeOptuna()
+    monkeypatch.setattr(tuner.importlib, "import_module", lambda name: fake_optuna if name == "optuna" else None)
+    args = tuner.build_arg_parser().parse_args(["--output-dir", str(tmp_path)])
+    result = {
+        "stage": "optuna_loss_search",
+        "optuna_source": "optuna",
+        "optuna_trial_number": 3,
+        "score": 0.123,
+    }
+
+    tuner.tell_optuna_result(args, result)
+
+    assert fake_optuna.study.told == [(3, 0.123)]
+
+
 def test_pipeline_mock_metrics_writes_recommendation_and_run_artifacts(tmp_path):
     args = tuner.build_arg_parser().parse_args([
         "--output-dir",
         str(tmp_path),
         "--dry-run",
         "--mock-metrics",
+        "--disable-optuna",
         "--star-bracket",
         "0,0.01",
         "--optuna-trials",
@@ -192,6 +300,7 @@ def test_plain_dry_run_generates_commands_without_metrics(tmp_path, capsys):
         "--output-dir",
         str(tmp_path),
         "--dry-run",
+        "--disable-optuna",
         "--star-bracket",
         "0",
         "--optuna-trials",
