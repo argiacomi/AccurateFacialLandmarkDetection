@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lib.landmarks.datasets.progress import track
 from lib.landmarks.manifest.validator import validate_training_manifest
 from tools.landmarks import build_quality_dataset as builder
 from tools.landmarks import download_landmark_datasets as downloader
@@ -209,7 +210,9 @@ def prepare(args: argparse.Namespace) -> int:
 
     results: list[dict[str, T.Any]] = []
     built_any = False
-    for index, dataset in enumerate(datasets):
+    dataset_bar = track(datasets, desc="Prepare", total=len(datasets), unit="dataset")
+    for dataset in dataset_bar:
+        dataset_bar.set_description(f"Prepare {dataset}")
         # First built dataset honors the requested mode; later ones merge into it.
         mode = args.manifest_mode if not built_any else "merge"
         source, image_root = _resolve_inputs(dataset, registry, data_root, args.image_root)

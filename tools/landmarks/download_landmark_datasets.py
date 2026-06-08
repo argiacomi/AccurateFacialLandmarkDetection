@@ -18,6 +18,12 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lib.landmarks.datasets.progress import track
+
 CHUNK_SIZE = 1024 * 1024
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
 ALL_DATASETS = (
@@ -459,21 +465,14 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
         with urllib.request.urlopen(request) as response, tmp_path.open("wb") as out:
             total_header = response.headers.get("Content-Length")
             total = int(total_header) if total_header and total_header.isdigit() else None
-            downloaded = 0
-            while True:
-                chunk = response.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                out.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    pct = downloaded * 100.0 / total
-                    print(
-                        f"  {downloaded / 1_000_000:.1f} MB / {total / 1_000_000:.1f} MB ({pct:.1f}%)",
-                        end="\r",
-                    )
-            if total:
-                print()
+            bar = track(desc=f"Download {destination.name}", total=total, unit="B", unit_scale=True)
+            with bar:
+                while True:
+                    chunk = response.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    bar.update(len(chunk))
         if tmp_path.stat().st_size == 0:
             raise OSError(f"download produced an empty file: {tmp_path}")
         os.replace(tmp_path, destination)
@@ -522,25 +521,32 @@ def _is_relative_to(path: Path, base: Path) -> bool:
 
 def _extract_zip(path: Path, destination: Path) -> None:
     with zipfile.ZipFile(path, "r") as zf:
-        for member in zf.infolist():
+        members = zf.infolist()
+        for member in members:
             target = (destination / member.filename).resolve()
             if not _is_relative_to(target, destination.resolve()):
                 raise ValueError(f"blocked zip path traversal member: {member.filename}")
-        zf.extractall(destination)
+        for member in track(members, desc=f"Extract {path.name}", total=len(members), unit="file"):
+            zf.extract(member, destination)
 
 
 def _extract_tar(path: Path, destination: Path) -> None:
     with tarfile.open(path, "r:*") as tf:
-        for member in tf.getmembers():
+        members = tf.getmembers()
+        for member in members:
             if member.issym() or member.islnk():
                 raise ValueError(f"blocked tar link member: {member.name}")
             target = (destination / member.name).resolve()
             if not _is_relative_to(target, destination.resolve()):
                 raise ValueError(f"blocked tar path traversal member: {member.name}")
-        try:
-            tf.extractall(destination, filter="data")
-        except TypeError:
-            tf.extractall(destination)
+        extract_kwargs: dict[str, str] = {"filter": "data"}
+        for member in track(members, desc=f"Extract {path.name}", total=len(members), unit="file"):
+            try:
+                tf.extract(member, destination, **extract_kwargs)
+            except TypeError:
+                # Python without the data filter kwarg; drop it for this and later members.
+                extract_kwargs = {}
+                tf.extract(member, destination)
 
 
 def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
@@ -847,7 +853,10 @@ def download_datasets(
         skip_checksum=skip_checksum,
         keep_going=keep_going,
     )
-    results = [_process_asset(asset, args) for asset in sources]
+    results = [
+        _process_asset(asset, args)
+        for asset in track(sources, desc="Datasets", total=len(sources), unit="asset")
+    ]
     _write_summary(results, output_root)
     write_registry(results, output_root)
     return results, load_registry(output_root) or build_registry(results, output_root)
@@ -894,7 +903,10 @@ def main(argv: list[str] | None = None) -> int:
         print(format_list_table(sources))
         return 0
 
-    results = [_process_asset(asset, args) for asset in sources]
+    results = [
+        _process_asset(asset, args)
+        for asset in track(sources, desc="Datasets", total=len(sources), unit="asset")
+    ]
     summary = _write_summary(results, Path(args.output_root))
     registry = write_registry(results, Path(args.output_root))
     print(f"\nWrote summary: {summary}")

@@ -48,6 +48,7 @@ from lib.landmarks.core.schema import (
     point_count_for_schema,
     projection_audit_for_schema,
 )
+from lib.landmarks.datasets.progress import track
 from lib.landmarks.datasets.sources import extract_archive_to_temp
 from lib.landmarks.datasets.video_frames import extract_video_frames, video_files
 from lib.landmarks.manifest.contract import (
@@ -872,7 +873,7 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
     skipped: list[dict[str, str]] = []
     schema_counts: dict[str, int] = {}
     emitted = 0
-    for index, entry in enumerate(entries):
+    for index, entry in enumerate(track(entries, desc="Overlays", total=len(entries), unit="overlay")):
         if not isinstance(entry, dict):
             continue
         schema = str(entry.get("target_schema") or entry.get("source_schema") or "unknown")
@@ -1067,7 +1068,7 @@ def _build_directory(
         for path in sorted(root.rglob(f"*{suffix}"))
         if path.name != "manifest.json" and not path.name.startswith(".")
     ]
-    for landmark_path in landmark_paths:
+    for landmark_path in track(landmark_paths, desc=f"Build {dataset}", total=len(landmark_paths), unit="file"):
         if landmark_path.suffix.lower() == ".txt" and "98pt" in landmark_path.name.lower():
             continue
         try:
@@ -1552,7 +1553,7 @@ def _build_expected_schema_dataset(
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for landmark_path in _landmark_paths(root):
+    for landmark_path in track(_landmark_paths(root), desc=f"Build {dataset}", unit="file"):
         try:
             points, detected_schema = _load_landmark_file(landmark_path)
             if detected_schema != expected_schema:
@@ -2396,7 +2397,7 @@ def _build_subject_session_dataset(
     image_index = _build_image_index(image_base)
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for landmark_path in _landmark_paths(root):
+    for landmark_path in track(_landmark_paths(root), desc=f"Build {dataset}", unit="file"):
         try:
             points, source_schema = _load_landmark_file(landmark_path)
             image = _matching_image(landmark_path, root=image_base, image_index=image_index)
@@ -3363,7 +3364,7 @@ def _build_video_dataset(
     frame_root = Path(frame_output_dir) if frame_output_dir else output_dir / "frames" / dataset
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for video_path in videos:
+    for video_path in track(videos, desc=f"Videos {dataset}", total=len(videos), unit="video"):
         video_id = video_path.resolve().relative_to(videos_root.resolve()).with_suffix("").as_posix()
         split = _deterministic_split(dataset, video_id)
         try:

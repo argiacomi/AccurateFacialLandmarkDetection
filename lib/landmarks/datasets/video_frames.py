@@ -7,6 +7,8 @@ from pathlib import Path
 
 import cv2
 
+from lib.landmarks.datasets.progress import track
+
 VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".mpg", ".mpeg", ".webm")
 
 
@@ -84,7 +86,7 @@ def extract_video_frames(
             max_frames=max_frames,
         )
         records: list[dict[str, T.Any]] = []
-        for frame_index in indices:
+        for frame_index in track(indices, desc=f"Frames {video_key}", total=len(indices), unit="frame"):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
             ok, frame = cap.read()
             if not ok or frame is None:

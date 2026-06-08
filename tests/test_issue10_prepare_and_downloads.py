@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
+import tarfile
+import zipfile
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
+from lib.landmarks.datasets.progress import track
 from tools.landmarks import download_landmark_datasets as downloader
 from tools.landmarks import prepare_landmark_dataset as prepare
 
@@ -44,6 +49,53 @@ def _make_json_source(extracted: Path, *, dataset: str, count: int = 3) -> None:
             }
         )
     (extracted / "samples.json").write_text(json.dumps({"samples": samples}), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Progress tracking
+# ---------------------------------------------------------------------------
+def test_progress_track_disables_on_non_tty():
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        collected = list(track(range(5), desc="x"))
+    assert collected == list(range(5))
+    assert buf.getvalue() == ""
+
+
+def test_progress_track_renders_when_forced():
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        list(track(range(3), desc="loud", disable=False))
+    assert "loud" in buf.getvalue()
+
+
+def test_progress_track_manual_bar_updates():
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        bar = track(desc="dl", total=4, unit="B", disable=False)
+        with bar:
+            bar.update(4)
+    assert bar.n == 4
+
+
+def test_extract_zip_and_tar_roundtrip(tmp_path):
+    zip_path = tmp_path / "a.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("dir/one.txt", "1")
+        zf.writestr("two.txt", "2")
+    zip_out = tmp_path / "zip_out"
+    downloader._extract_zip(zip_path, zip_out)
+    assert (zip_out / "dir" / "one.txt").read_text() == "1"
+    assert (zip_out / "two.txt").read_text() == "2"
+
+    tar_path = tmp_path / "a.tar.gz"
+    payload = tmp_path / "payload.txt"
+    payload.write_text("hello")
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(payload, arcname="nested/hello.txt")
+    tar_out = tmp_path / "tar_out"
+    downloader._extract_tar(tar_path, tar_out)
+    assert (tar_out / "nested" / "hello.txt").read_text() == "hello"
 
 
 # ---------------------------------------------------------------------------
