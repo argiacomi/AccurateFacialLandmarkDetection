@@ -228,9 +228,31 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         "--auxiliary-heads",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable optional pose/quality/visibility auxiliary heads for schema-aware manifest training.",
+        help="Enable optional pose/quality auxiliary heads for schema-aware manifest training.",
     )
     parser.add_argument("--auxiliary-loss-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--auxiliary-loss-weights",
+        default="",
+        help="Optional comma-separated per-task auxiliary loss weights, e.g. occlusion=1.0,blur_quality=0.5.",
+    )
+    parser.add_argument(
+        "--auxiliary-loss-stage",
+        choices=("all", "final"),
+        default="final",
+        help="Apply auxiliary and visibility losses on all stacks or final stack only.",
+    )
+    parser.add_argument(
+        "--visibility-heads",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable schema-aware per-point visibility heads.",
+    )
+    parser.add_argument("--visibility-loss-weight", type=float, default=0.0)
+    parser.add_argument("--visibility-loss-initial-weight", type=float, default=0.0)
+    parser.add_argument("--visibility-loss-start-epoch", type=int, default=1)
+    parser.add_argument("--visibility-loss-ramp-epochs", type=int, default=0)
+    parser.add_argument("--visibility-pseudo-loss-weight", type=float, default=0.0)
     parser.add_argument(
         "--synchronize-runtime-timing",
         action=argparse.BooleanOptionalAction,

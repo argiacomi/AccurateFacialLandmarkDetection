@@ -429,6 +429,7 @@ def main():
                     )
             return
         for epoch in range(start_epoch, args.epoch):
+            args.current_epoch = int(epoch)
             n = 0
             net.train()
             if is_rank_zero():
@@ -486,6 +487,7 @@ def main():
                 loss_aux = torch.tensor(0.0, device=device)
                 loss_consistency = torch.tensor(0.0, device=device)
                 loss_star = torch.tensor(0.0, device=device)
+                loss_visibility = torch.tensor(0.0, device=device)
                 loss_details = None
                 # if True:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
@@ -515,6 +517,7 @@ def main():
                             loss_details = stage_details
                             loss_consistency = stage_details["loss_consistency"]
                             loss_star = stage_details["loss_star"]
+                            loss_visibility = stage_details.get("loss_visibility", loss_visibility)
                             loss = loss + stage_loss * weights[i]
                         else:
                             pred_loc, pred_heatmap = pred_info[i]
@@ -610,7 +613,7 @@ def main():
                         f"train epoch {epoch} batch_idx {batch_idx} rank {distributed_rank()}  {n}/{len(train_dataset)} "
                         f"loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} "
                         f"loss_consistency: {loss_consistency.item()} loss_star: {loss_star.item()} "
-                        f"loss_aux: {loss_aux.item()}{mix_text}"
+                        f"loss_visibility: {loss_visibility.item()} loss_aux: {loss_aux.item()}{mix_text}"
                     )
                     if loss_details is not None:
                         head_counts = loss_details.get("head_sample_counts", {})
@@ -621,7 +624,10 @@ def main():
                             ).items()
                         }
                         print(
-                            f"schema head loss details counts={head_counts} contributions={head_losses}",
+                            f"schema head loss details counts={head_counts} contributions={head_losses} "
+                            f"aux_valid={loss_details.get('auxiliary_valid_counts', {})} "
+                            f"visibility_valid={loss_details.get('visibility_valid_counts', {})} "
+                            f"visibility_weight={float(loss_details.get('visibility_loss_weight', torch.tensor(0.0)).item())}",
                             flush=True,
                         )
                 batch_fetch_start_time = time.time()

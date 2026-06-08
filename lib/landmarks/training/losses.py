@@ -7,6 +7,12 @@ import torch
 import torch.nn.functional as F
 
 from lib.landmarks.core.schema import MAP_98_TO_68
+from lib.landmarks.training.auxiliary import (
+    masked_visibility_bce_loss,
+    parse_auxiliary_loss_weights,
+    visibility_key_for_head,
+    visibility_loss_weight_for_epoch,
+)
 from loss import STARLoss_v2
 
 
@@ -110,11 +116,17 @@ def schema_head_loss(
     loss_aux = torch.tensor(0.0, device=loss.device)
     loss_consistency = torch.tensor(0.0, device=loss.device)
     loss_star = torch.tensor(0.0, device=loss.device)
+    loss_visibility = torch.tensor(0.0, device=loss.device)
     details = {
         "head_sample_counts": {},
         "head_loss_contributions": {},
+        "visibility_valid_counts": {},
+        "auxiliary_valid_counts": {},
+        "auxiliary_loss_contributions": {},
         "loss_consistency": loss_consistency,
         "loss_star": loss_star,
+        "loss_visibility": loss_visibility,
+        "visibility_loss_weight": torch.tensor(0.0, device=loss.device),
     }
     head_weight_map = _schema_head_weight_map(
         getattr(args, "schema_head_loss_weights", "")
@@ -154,6 +166,7 @@ def schema_head_loss(
             * args.hw
         )
         head_star = torch.tensor(0.0, device=loss.device)
+        head_visibility = torch.tensor(0.0, device=loss.device)
         if float(getattr(args, "star_loss_weight", 0.0)) > 0.0:
             if star_loss_func is None:
                 star_loss_func = STARLoss_v2()
@@ -168,11 +181,26 @@ def schema_head_loss(
                 * float(args.star_loss_weight)
             )
 
+        visibility_weight = visibility_loss_weight_for_epoch(args)
+        visibility_key = visibility_key_for_head(head_name)
+        if visibility_weight > 0.0 and visibility_key in stage_pred and "visibility_target" in payload:
+            visibility_logits = stage_pred[visibility_key].index_select(0, indices)
+            head_visibility_raw, visibility_valid = masked_visibility_bce_loss(
+                visibility_logits,
+                payload["visibility_target"],
+                sample_weight=sample_weight,
+                landmark_mask=landmark_mask,
+            )
+            head_visibility = head_visibility_raw * visibility_weight
+            loss_visibility = loss_visibility + head_visibility.detach()
+            details["visibility_valid_counts"][head_name] = visibility_valid
+            details["visibility_loss_weight"] = torch.tensor(visibility_weight, device=loss.device)
+
         head_samples = int(indices.numel())
         head_scale = float(head_weight_map.get(head_name, 1.0))
         if weighting == "sample_count":
             head_scale *= float(head_samples) / float(total_head_samples)
-        head_loss = (head_loc + head_heatmap + head_star) * head_scale
+        head_loss = (head_loc + head_heatmap + head_star + head_visibility) * head_scale
         loss = loss + head_loss
         loss_loc = loss_loc + head_loc.detach()
         loss_heatmap = loss_heatmap + head_heatmap.detach()
@@ -197,19 +225,32 @@ def schema_head_loss(
 
     aux_outputs = stage_pred.get("_aux", {}) if isinstance(stage_pred, dict) else {}
     if args.auxiliary_loss_weight > 0 and aux_outputs:
+        task_weights = parse_auxiliary_loss_weights(getattr(args, "auxiliary_loss_weights", ""))
+        valid_task_count = 0
         for task, logits in aux_outputs.items():
             labels = aux_labels.get(task)
             if labels is None:
                 continue
             valid = labels >= 0
-            if bool(valid.any()):
-                loss_aux = loss_aux + F.cross_entropy(
-                    logits[valid], labels[valid]
-                ) * float(args.auxiliary_loss_weight)
-        loss = loss + loss_aux
+            valid_count = int(valid.sum().item())
+            details["auxiliary_valid_counts"][task] = valid_count
+            if valid_count <= 0:
+                continue
+            task_weight = float(task_weights.get(task, 1.0))
+            if task_weight <= 0.0:
+                continue
+            task_loss = F.cross_entropy(logits[valid], labels[valid])
+            contribution = task_loss * float(args.auxiliary_loss_weight) * task_weight
+            details["auxiliary_loss_contributions"][task] = contribution.detach()
+            loss_aux = loss_aux + contribution
+            valid_task_count += 1
+        if valid_task_count > 0:
+            loss_aux = loss_aux / float(valid_task_count)
+            loss = loss + loss_aux
 
     details["loss_consistency"] = loss_consistency.detach()
     details["loss_star"] = loss_star.detach()
+    details["loss_visibility"] = loss_visibility.detach()
     if return_details:
         return loss, loss_loc, loss_heatmap, loss_aux, details
     return loss, loss_loc, loss_heatmap, loss_aux

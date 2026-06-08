@@ -6,21 +6,11 @@ from torch.utils.data._utils.collate import default_collate
 
 from lib.landmarks.core.manifest_aliases import is_schema_aware_manifest_dataset
 from lib.landmarks.training.domain_balanced_sampler import sample_bucket, sample_dataset, sample_schema
-
-AUXILIARY_CLASS_NAMES = {
-    "pose_bucket": ("frontal", "profile", "profile_left", "profile_right"),
-    "occlusion": ("no_occlusion", "occlusion"),
-    "visibility": ("all_visible", "partially_visible"),
-    "blur_quality": ("clear", "blurred"),
-    "illumination_quality": ("normal", "challenging"),
-    "profile_side": ("not_profile", "left", "right"),
-    "landmark_confidence": ("normal", "low"),
-}
-
-AUXILIARY_CLASS_INDEX = {
-    name: {label: index for index, label in enumerate(labels)}
-    for name, labels in AUXILIARY_CLASS_NAMES.items()
-}
+from lib.landmarks.training.auxiliary import (
+    AUXILIARY_CLASS_INDEX,
+    AUXILIARY_CLASS_NAMES,
+    resolve_auxiliary_label,
+)
 
 class LegacyBatchWithMix(tuple):
     """Tuple-compatible legacy batch with domain-mix diagnostics attached."""
@@ -100,6 +90,11 @@ def unpack_train_batch(batch, device, non_blocking=False):
                 "landmark_mask": payload["landmark_mask"].to(device, non_blocking=non_blocking).float(),
                 "sample_weight": payload["sample_weight"].to(device, non_blocking=non_blocking).float(),
             }
+            if "visibility_target" in payload:
+                heads[head_name]["visibility_target"] = payload["visibility_target"].to(
+                    device,
+                    non_blocking=non_blocking,
+                ).float()
             heads[head_name]["sample_weight"] = heads[head_name][
                 "sample_weight"
             ] / heads[head_name]["sample_weight"].mean().clamp_min(1e-6)
@@ -179,6 +174,7 @@ def schema_aware_collate(batch):
                 "heatmap": [],
                 "landmark_mask": [],
                 "sample_weight": [],
+                "visibility_target": [],
                 "metadata": [],
             },
         )
@@ -187,6 +183,12 @@ def schema_aware_collate(batch):
         grouped[head_name]["heatmap"].append(item["heatmap"])
         grouped[head_name]["landmark_mask"].append(item["landmark_mask"])
         grouped[head_name]["sample_weight"].append(item["sample_weight"])
+        grouped[head_name]["visibility_target"].append(
+            item.get(
+                "visibility_target",
+                torch.full((item["target"].shape[0],), -1.0, dtype=torch.float32),
+            )
+        )
         grouped[head_name]["metadata"].append(item.get("metadata", {}))
 
     heads = {}
@@ -197,10 +199,13 @@ def schema_aware_collate(batch):
             "heatmap": default_collate(payload["heatmap"]),
             "landmark_mask": default_collate(payload["landmark_mask"]),
             "sample_weight": default_collate(payload["sample_weight"]),
+            "visibility_target": default_collate(payload["visibility_target"]),
             "metadata": payload["metadata"],
         }
+
     mix = {"bucket": {}, "dataset": {}, "schema": {}}
     aux_labels = {name: [] for name in AUXILIARY_CLASS_NAMES}
+    aux_provenance = {name: [] for name in AUXILIARY_CLASS_NAMES}
     for item in batch:
         metadata = item.get("metadata", {})
         sample = dict(metadata)
@@ -213,7 +218,10 @@ def schema_aware_collate(batch):
         mix["dataset"][dataset] = mix["dataset"].get(dataset, 0) + 1
         mix["schema"][schema] = mix["schema"].get(schema, 0) + 1
         for task in aux_labels:
-            aux_labels[task].append(auxiliary_label(task, metadata, item))
+            resolved = resolve_auxiliary_label(task, metadata, item)
+            aux_labels[task].append(resolved.label)
+            aux_provenance[task].append(resolved.provenance)
+
     return {
         "image": images,
         "heads": heads,
@@ -222,106 +230,18 @@ def schema_aware_collate(batch):
             task: torch.as_tensor(values, dtype=torch.long)
             for task, values in aux_labels.items()
         },
+        "aux_provenance": aux_provenance,
     }
+
 
 def auxiliary_label(task, metadata, item):
-    attributes = (
-        metadata.get("attributes")
-        if isinstance(metadata.get("attributes"), dict)
-        else {}
-    )
-    conditions = metadata.get("conditions") or ()
-    if isinstance(conditions, str):
-        conditions = (conditions,)
-    condition_labels = {
-        str(value).strip().lower().replace("-", "_") for value in conditions
-    }
-    condition = str(metadata.get("condition") or "").strip().lower().replace("-", "_")
-    if condition:
-        condition_labels.add(condition)
+    """Compatibility wrapper returning only the integer label.
 
-    label = None
-    if task == "pose_bucket":
-        raw = (
-            str(metadata.get("pose_bucket") or metadata.get("pose") or "")
-            .strip()
-            .lower()
-            .replace("-", "_")
-        )
-        if raw in {"profile_left", "large_yaw_left", "left_profile"}:
-            label = "profile_left"
-        elif raw in {"profile_right", "large_yaw_right", "right_profile"}:
-            label = "profile_right"
-        elif raw in {"profile", "large_yaw", "1"} or attributes.get("pose"):
-            label = "profile"
-        elif (
-            raw in {"frontal", "normal", "0"}
-            or "frontal" in condition_labels
-            or "anchor" in condition_labels
-        ):
-            label = "frontal"
-    elif task == "occlusion":
-        raw = metadata.get("occlusion", attributes.get("occlusion"))
-        if raw is not None:
-            label = (
-                "occlusion"
-                if bool(raw) and str(raw).lower() not in {"0", "false", "none"}
-                else "no_occlusion"
-            )
-        elif any(
-            "occlusion" in value or "occlud" in value for value in condition_labels
-        ):
-            label = "occlusion"
-        else:
-            label = "no_occlusion"
-    elif task == "visibility":
-        mask = item.get("landmark_mask")
-        if mask is not None:
-            label = (
-                "all_visible"
-                if bool(torch.as_tensor(mask).float().min().item() > 0.5)
-                else "partially_visible"
-            )
-    elif task == "blur_quality":
-        raw = metadata.get("blur", attributes.get("blur"))
-        if raw is not None:
-            label = (
-                "blurred"
-                if bool(raw) and str(raw).lower() not in {"0", "false", "none"}
-                else "clear"
-            )
-    elif task == "illumination_quality":
-        raw = metadata.get("illumination", attributes.get("illumination"))
-        if raw is not None:
-            label = (
-                "challenging"
-                if bool(raw) and str(raw).lower() not in {"0", "false", "none"}
-                else "normal"
-            )
-    elif task == "profile_side":
-        raw = (
-            str(metadata.get("profile_side") or metadata.get("side") or "")
-            .strip()
-            .lower()
-        )
-        if raw in {"left", "right"}:
-            label = raw
-        elif any("left" in value for value in condition_labels):
-            label = "left"
-        elif any("right" in value for value in condition_labels):
-            label = "right"
-        elif not any(
-            value in condition_labels
-            for value in ("profile", "large_yaw", "profile_pose")
-        ):
-            label = "not_profile"
-    elif task == "landmark_confidence":
-        weight = float(item.get("sample_weight", torch.tensor(1.0)).item())
-        label = "low" if weight > 2.0 else "normal"
+    New training code should use resolve_auxiliary_label() so provenance is kept.
+    """
 
-    if label is None:
-        return -1
-    return AUXILIARY_CLASS_INDEX[task].get(label, -1)
+    return resolve_auxiliary_label(task, metadata, item).label
+
 
 # Public trainer data API.
 __all__ = [

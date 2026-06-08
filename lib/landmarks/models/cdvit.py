@@ -1373,6 +1373,7 @@ class VitAttnStage(nn.Module):
         num_dvit_per_pred_blk=2,
         schema_heads=None,
         auxiliary_heads=None,
+        visibility_heads=False,
     ):
         super(VitAttnStage, self).__init__()
         # assert heatmap_size == 32
@@ -1384,10 +1385,12 @@ class VitAttnStage(nn.Module):
         if self.multi_schema:
             self.schema_heads.setdefault("landmarks_68", lmk_num)
         self.auxiliary_heads = dict(auxiliary_heads or {})
+        self.visibility_heads_enabled = bool(visibility_heads and self.multi_schema)
 
         stages = []
         output_layers = []
         schema_output_layers = {name: [] for name in self.schema_heads if name != "landmarks_68"}
+        visibility_output_layers = {name: [] for name in self.schema_heads} if self.visibility_heads_enabled else {}
         merge = []
         for i in range(nstack):
             vit_list = []
@@ -1408,12 +1411,18 @@ class VitAttnStage(nn.Module):
             for name, point_count in schema_output_layers.items():
                 point_count = int(self.schema_heads[name])
                 schema_output_layers[name].append(nn.Conv2d(max_depth, point_count, 1))
+            for name, point_count in visibility_output_layers.items():
+                point_count = int(self.schema_heads[name])
+                visibility_output_layers[name].append(nn.Conv2d(max_depth, point_count, 1))
             if i > 0:
                 merge.append(DoubleConv(max_depth * 2, max_depth, max_depth))
         self.stages = nn.ModuleList(stages)
         self.output_layers = nn.ModuleList(output_layers)
         self.schema_output_layers = nn.ModuleDict(
             {name: nn.ModuleList(layers) for name, layers in schema_output_layers.items()}
+        )
+        self.visibility_output_layers = nn.ModuleDict(
+            {name: nn.ModuleList(layers) for name, layers in visibility_output_layers.items()}
         )
         self.auxiliary_output_layers = nn.ModuleDict(
             {name: nn.Linear(max_depth, int(classes)) for name, classes in self.auxiliary_heads.items()}
@@ -1447,6 +1456,9 @@ class VitAttnStage(nn.Module):
         for name, layers in self.schema_output_layers.items():
             head_hm = layers[stage_index](feature)
             out[name] = (self.GetCoord(head_hm), head_hm)
+        for name, layers in self.visibility_output_layers.items():
+            visibility_key = "visibility_profile39" if name == "profile39" else "visibility_" + name.split("_", 1)[1]
+            out[visibility_key] = layers[stage_index](feature).mean(dim=(2, 3))
         if self.auxiliary_output_layers:
             pooled = F.adaptive_avg_pool2d(feature, 1).flatten(1)
             out["_aux"] = {name: layer(pooled) for name, layer in self.auxiliary_output_layers.items()}

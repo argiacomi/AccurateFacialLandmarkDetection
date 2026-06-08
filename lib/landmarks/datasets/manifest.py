@@ -741,6 +741,9 @@ class LandmarkDataset(Dataset):
                 skipped_non_trainable_schema += 1
                 continue
 
+            if isinstance(entry.get("auxiliary_labels"), dict):
+                metadata = dict(metadata)
+                metadata.setdefault("auxiliary_labels", entry["auxiliary_labels"])
             landmark_mask = _landmark_mask_from_entry(entry, metadata, landmark_count)
             visibility_target, visibility_target_source = _visibility_target_from_entry(entry, metadata, landmark_count)
             conditions = _coerce_conditions(entry, metadata)
@@ -901,12 +904,26 @@ class LandmarkDataset(Dataset):
                         "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                     }
                 )
+                visibility_target = sample.get("visibility_target")
+                if visibility_target is None:
+                    visibility_target_t = torch.full(
+                        (int(sample.get("landmark_count", lmk.shape[0])),),
+                        -1.0,
+                        dtype=torch.float32,
+                    )
+                else:
+                    visibility_target_t = torch.as_tensor(
+                        visibility_target,
+                        dtype=torch.float32,
+                    )
                 return {
                     "image": img,
                     "target": lmk,
                     "heatmap": heatmap,
                     "sample_weight": torch.tensor(sample["sample_weight"], dtype=torch.float32),
                     "landmark_mask": landmark_mask_t,
+                    "visibility_target": visibility_target_t,
+                    "visibility_target_provenance": sample.get("visibility_target_source", ""),
                     "schema": sample["source_schema"],
                     "head_name": sample["head_name"],
                     "metadata": metadata,
