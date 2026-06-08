@@ -1,0 +1,339 @@
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import torch
+from torch.utils.data._utils.collate import default_collate
+from tqdm import tqdm
+
+from lib.landmarks.core.schema import head_name_for_schema
+from lib.landmarks.evaluation.split_safe import build_slice_report, record_for_sample
+
+
+def _eval_collate(batch):
+    if batch and len(batch[0]) >= 4 and isinstance(batch[0][3], dict):
+        data = default_collate([item[0] for item in batch])
+        metadata = [item[3] for item in batch]
+        head_names = []
+        for item in batch:
+            meta = item[3]
+            head_name = str(meta.get("head_name") or "")
+            if not head_name:
+                schema = meta.get("source_schema") or meta.get("schema") or ""
+                if schema:
+                    try:
+                        head_name = head_name_for_schema(schema)
+                    except ValueError:
+                        head_name = ""
+            head_names.append(head_name or "landmarks_68")
+        target_shapes = {tuple(item[1].shape) for item in batch}
+        if len(target_shapes) == 1 and set(head_names) == {"landmarks_68"}:
+            target = default_collate([item[1] for item in batch])
+            landmark_mask = default_collate([item[2] for item in batch])
+            return data, target, landmark_mask, metadata
+
+        grouped = {}
+        for index, (item, head_name) in enumerate(zip(batch, head_names)):
+            grouped.setdefault(
+                head_name,
+                {"indices": [], "target": [], "landmark_mask": [], "metadata": []},
+            )
+            grouped[head_name]["indices"].append(index)
+            grouped[head_name]["target"].append(item[1])
+            grouped[head_name]["landmark_mask"].append(item[2])
+            meta = dict(item[3])
+            meta["head_name"] = head_name
+            grouped[head_name]["metadata"].append(meta)
+        return {
+            "image": data,
+            "heads": {
+                head_name: {
+                    "indices": torch.as_tensor(payload["indices"], dtype=torch.long),
+                    "target": default_collate(payload["target"]),
+                    "landmark_mask": default_collate(payload["landmark_mask"]),
+                    "metadata": payload["metadata"],
+                }
+                for head_name, payload in grouped.items()
+            },
+        }
+    return default_collate(batch)
+
+def _unpack_eval_batch(batch):
+    data = batch[0]
+    target = batch[1]
+    if len(batch) >= 3:
+        landmark_mask = batch[2]
+    else:
+        landmark_mask = torch.ones(target.shape[:2], dtype=torch.float32)
+    if len(batch) >= 4:
+        metadata = batch[3]
+    else:
+        metadata = [{} for _ in range(int(target.shape[0]))]
+    return data, target, landmark_mask, metadata
+
+def _masked_nme_values(pred_keypoints, keypoints, landmark_mask):
+    pred = pred_keypoints.detach().float().cpu().numpy()
+    target = keypoints.detach().float().cpu().numpy()
+    mask = landmark_mask.detach().float().cpu().numpy() > 0.5
+
+    values = []
+    for pred_i, target_i, mask_i in zip(pred, target, mask):
+        if mask_i.sum() <= 0:
+            values.append(float("nan"))
+            continue
+
+        valid = target_i[mask_i]
+        if valid.shape[0] <= 1:
+            values.append(float("nan"))
+            continue
+
+        span = np.max(valid, axis=0) - np.min(valid, axis=0)
+        span_norm = float(max(span[0], span[1]))
+
+        eye_norm = None
+        if mask_i.shape[0] > 45 and mask_i[36] and mask_i[45]:
+            eye_norm = float(np.linalg.norm(target_i[36] - target_i[45]))
+
+        # Prefer canonical outer-eye interocular only when it is plausible.
+        #
+        # MERL-RAV has some frontal samples where landmarks 36/45 are valid but
+        # nearly collapsed, e.g. eye_norm ~= 0.04 in normalized coordinates.
+        # That explodes NME even when the rest of the face is reasonable.
+        #
+        # Since targets are normalized to roughly [0, 1], 0.05 is ~12.75px on
+        # a 256 crop. Also require eye_norm to be at least 15% of the visible
+        # landmark span, otherwise fall back to span normalization.
+        if (
+            eye_norm is not None
+            and np.isfinite(eye_norm)
+            and eye_norm > 0.05
+            and np.isfinite(span_norm)
+            and span_norm > 1e-6
+            and eye_norm >= 0.15 * span_norm
+        ):
+            normalizer = eye_norm
+        else:
+            normalizer = span_norm
+
+        if not np.isfinite(normalizer) or normalizer <= 1e-6:
+            values.append(float("nan"))
+            continue
+
+        dist = np.linalg.norm(target_i[mask_i] - pred_i[mask_i], axis=1)
+        values.append(float(dist.mean() / normalizer))
+
+    return np.asarray(values, dtype=np.float32)
+
+def _normalizer_for_masked_target(target_i, mask_i):
+    valid = target_i[mask_i]
+    if valid.shape[0] <= 1:
+        return None
+    span = np.max(valid, axis=0) - np.min(valid, axis=0)
+    span_norm = float(max(span[0], span[1]))
+    eye_norm = None
+    if mask_i.shape[0] > 45 and mask_i[36] and mask_i[45]:
+        eye_norm = float(np.linalg.norm(target_i[36] - target_i[45]))
+    if (
+        eye_norm is not None
+        and np.isfinite(eye_norm)
+        and eye_norm > 0.05
+        and np.isfinite(span_norm)
+        and span_norm > 1e-6
+        and eye_norm >= 0.15 * span_norm
+    ):
+        return eye_norm
+    if np.isfinite(span_norm) and span_norm > 1e-6:
+        return span_norm
+    return None
+
+def _visibility_target_from_meta(meta, expected_count):
+    raw = meta.get("visibility_target") if isinstance(meta, dict) else None
+    if raw is None:
+        return np.full((expected_count,), -1, dtype=np.int64)
+    arr = np.asarray(raw, dtype=np.int64).reshape(-1)
+    if arr.size != expected_count:
+        return np.full((expected_count,), -1, dtype=np.int64)
+    return arr
+
+def _visibility_logits_from_stage(stage_pred, head_name="landmarks_68"):
+    if not isinstance(stage_pred, dict):
+        return None
+    point_suffix = head_name.removeprefix("landmarks_").removeprefix("profile")
+    for key in (
+        f"{head_name}_visibility_logits",
+        f"visibility_{point_suffix}_logits",
+        "visibility_logits",
+    ):
+        value = stage_pred.get(key)
+        if torch.is_tensor(value):
+            return value
+    head_payload = stage_pred.get(head_name)
+    if (
+        isinstance(head_payload, (list, tuple))
+        and len(head_payload) >= 3
+        and torch.is_tensor(head_payload[2])
+    ):
+        return head_payload[2]
+    return None
+
+def _visibility_aware_records(
+    pred_keypoints, keypoints, landmark_mask, metadata, visibility_logits=None
+):
+    pred = pred_keypoints.detach().float().cpu().numpy()
+    target = keypoints.detach().float().cpu().numpy()
+    mask = landmark_mask.detach().float().cpu().numpy() > 0.5
+    logits = None
+    if visibility_logits is not None:
+        logits = visibility_logits.detach().float().cpu().numpy()
+
+    records = []
+    for index, (pred_i, target_i, mask_i, meta) in enumerate(
+        zip(pred, target, mask, metadata)
+    ):
+        meta = meta if isinstance(meta, dict) else {}
+        normalizer = _normalizer_for_masked_target(target_i, mask_i)
+        if normalizer is None:
+            continue
+        point_errors = np.full((target_i.shape[0],), np.nan, dtype=np.float32)
+        point_errors[mask_i] = np.linalg.norm(
+            target_i[mask_i] - pred_i[mask_i], axis=1
+        ) / float(normalizer)
+        nme = float(np.nanmean(point_errors[mask_i]))
+
+        visibility_target = _visibility_target_from_meta(meta, target_i.shape[0])
+        visible_mask = mask_i & (visibility_target == 1)
+        occluded_mask = mask_i & (visibility_target == 0)
+        unknown_mask = mask_i & ~np.isin(visibility_target, (0, 1))
+
+        record = record_for_sample(meta, nme)
+        record["evaluation_head"] = str(meta.get("head_name") or "")
+        record["visibility_target_source"] = str(
+            meta.get("visibility_target_source") or ""
+        )
+        record["visible_landmark_count"] = int(np.sum(visible_mask))
+        record["occluded_landmark_count"] = int(np.sum(occluded_mask))
+        record["visibility_label_skipped_count"] = int(np.sum(unknown_mask))
+        record["nme_visible"] = (
+            float(np.nanmean(point_errors[visible_mask]))
+            if np.any(visible_mask)
+            else None
+        )
+        record["nme_occluded"] = (
+            float(np.nanmean(point_errors[occluded_mask]))
+            if np.any(occluded_mask)
+            else None
+        )
+        record["visibility_targets"] = [
+            int(value) if mask_i[pos] else -1
+            for pos, value in enumerate(visibility_target.tolist())
+        ]
+        if (
+            logits is not None
+            and index < logits.shape[0]
+            and logits.shape[1] == target_i.shape[0]
+        ):
+            record["visibility_scores"] = [
+                float(value) if mask_i[pos] else float("nan")
+                for pos, value in enumerate(logits[index].tolist())
+            ]
+        records.append(record)
+    return records
+
+def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
+    values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
+    return values[np.isfinite(values)]
+
+def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=False, non_blocking=False):
+    model.eval()
+    records = []
+    for batch_idx, batch in enumerate(tqdm(test_dataloader)):
+        if isinstance(batch, dict) and "heads" in batch:
+            data = batch["image"].to(device, non_blocking=non_blocking)
+            stage_pred = model(data)[-1]
+            for head_name, payload in batch["heads"].items():
+                indices = payload["indices"].to(device, non_blocking=non_blocking)
+                pred_keypoints, heatmap = _landmark_prediction_for_head(
+                    stage_pred, head_name
+                )
+                pred_keypoints = pred_keypoints.index_select(0, indices)
+                keypoints = payload["target"].to(device, non_blocking=non_blocking)
+                landmark_mask = payload["landmark_mask"].to(device, non_blocking=non_blocking)
+                visibility_logits = _visibility_logits_from_stage(stage_pred, head_name)
+                if visibility_logits is not None:
+                    visibility_logits = visibility_logits.index_select(0, indices)
+                records.extend(
+                    _visibility_aware_records(
+                        pred_keypoints,
+                        keypoints,
+                        landmark_mask,
+                        payload["metadata"],
+                        visibility_logits=visibility_logits,
+                    )
+                )
+            continue
+
+        data, target, landmark_mask, metadata = _unpack_eval_batch(batch)
+        data = data.to(device, non_blocking=non_blocking)
+        keypoints = target.to(device, non_blocking=non_blocking)
+        landmark_mask = landmark_mask.to(device, non_blocking=non_blocking)
+        stage_pred = model(data)[-1]
+        pred_keypoints, heatmap = _landmark_prediction_for_head(
+            stage_pred, "landmarks_68"
+        )
+        records.extend(
+            _visibility_aware_records(
+                pred_keypoints,
+                keypoints,
+                landmark_mask,
+                metadata,
+                visibility_logits=_visibility_logits_from_stage(
+                    stage_pred, "landmarks_68"
+                ),
+            )
+        )
+    report = build_slice_report(records)
+    if include_records:
+        report["records"] = records
+    return report
+
+def _records_from_report(report):
+    records = report.get("records", [])
+    return records if isinstance(records, list) else []
+
+def _landmarks_68_prediction(stage_pred):
+    return _landmark_prediction_for_head(stage_pred, "landmarks_68")
+
+def _landmark_prediction_for_head(stage_pred, head_name):
+    if isinstance(stage_pred, dict):
+        if head_name not in stage_pred:
+            available = ", ".join(
+                sorted(key for key in stage_pred if not key.startswith("_"))
+            )
+            raise ValueError(
+                f"model output does not include evaluation head '{head_name}' (available: {available})"
+            )
+        return stage_pred[head_name]
+    if head_name != "landmarks_68":
+        raise ValueError(
+            f"legacy model output can only evaluate landmarks_68, not '{head_name}'"
+        )
+    return stage_pred
+
+def _print_eval_summary(title, report):
+    metrics = report["overall"]
+    print(f"\n------------ {title} ------------")
+    if metrics["sample_count"] == 0:
+        print("NME %: nan")
+        print("FR_{}% : nan".format(0.10))
+        print("AUC_{}: nan".format(0.10))
+        return
+    print("NME %: {}".format(metrics["nme_percent"]))
+    print("FR_{}% : {}".format(0.10, metrics["fr_percent"]))
+    print("AUC_{}: {}".format(0.10, metrics["auc"]))
+
+def _eval_report_json_path(args):
+    if args.eval_report_json:
+        return args.eval_report_json
+    return os.path.join(args.ckpt_folder, "eval_report.json")
