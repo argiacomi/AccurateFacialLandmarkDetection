@@ -320,6 +320,43 @@ def _pipeline_effective_manifest(args: argparse.Namespace, paths: PipelinePaths)
     )
 
 
+def _pipeline_effective_training_manifest_for_compat(
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+) -> str:
+    """Mirror TrainHeatmapStageFP16._training_manifest_path_for_compat.
+
+    The trainer uses args.train_manifest or args.manifest or args.root_folder
+    when computing checkpoint manifest compatibility. The pipeline always
+    generates --manifest, but train_arg values are appended after generated
+    args, so split-manifest overrides must win here too.
+    """
+    train_manifest = _pipeline_train_arg_option(
+        args,
+        "--train_manifest",
+        "--train-manifest",
+        default="",
+    )
+    if train_manifest:
+        return _normalize_path_for_signature(train_manifest)
+
+    manifest = _pipeline_train_arg_option(
+        args,
+        "--manifest",
+        default=paths.hard_negative_manifest,
+    )
+    if manifest:
+        return _normalize_path_for_signature(manifest)
+
+    root_folder = _pipeline_train_arg_option(
+        args,
+        "--root_folder",
+        "--root-folder",
+        default="",
+    )
+    return _normalize_path_for_signature(root_folder)
+
+
 def _pipeline_training_compat_config(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
     """Mirror TrainHeatmapStageFP16._training_compat_config for auto-resume.
 
@@ -344,7 +381,7 @@ def _pipeline_training_compat_config(args: argparse.Namespace, paths: PipelinePa
         split_policy = "random_hash"
 
     return {
-        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))),
+        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_training_manifest_for_compat(args, paths))),
         "train_manifest_sha256": _safe_sha256_file(
             Path(_pipeline_train_arg_option(args, "--train_manifest", "--train-manifest", default=""))
         ),
@@ -563,7 +600,7 @@ def _checkpoint_matches_pipeline_request(
             "with a fresh checkpoint folder, or choose a checkpoint before the final epoch"
         )
 
-    current_manifest_sha = _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths)))
+    current_manifest_sha = _safe_sha256_file(Path(_pipeline_effective_training_manifest_for_compat(args, paths)))
     checkpoint_manifest_sha = payload.get("manifest_sha256")
     if current_manifest_sha and checkpoint_manifest_sha and current_manifest_sha != checkpoint_manifest_sha:
         return False, "checkpoint manifest SHA differs from the current manifest"
