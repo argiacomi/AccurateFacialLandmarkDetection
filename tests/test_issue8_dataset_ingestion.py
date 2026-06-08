@@ -505,6 +505,43 @@ def test_cofw_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_pa
     assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
 
 
+def test_cofw_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "out"
+
+    # 29 points inside a 40(H) x 60(W) annotation frame.
+    phis = np.zeros((87, 1), dtype=np.float32)
+    phis[:29, 0] = np.linspace(2, 58, 29)  # x in [0, 60)
+    phis[29:58, 0] = np.linspace(2, 38, 29)  # y in [0, 40)
+
+    # HDF5/MATLAB layout is channel-first and H/W swapped vs the annotation frame,
+    # so input[c, x, y] maps to output[y, x, c]: build a (C=3, W=60, H=40) plane.
+    image = np.zeros((3, 60, 40), dtype=np.uint8)
+    image[:, 5, 10] = 255  # white marker at annotation (x=5, y=10)
+
+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+        image_ds = handle.create_dataset("image_0000", data=image)
+        refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
+        refs[0, 0] = image_ds.ref
+        handle.create_dataset("phisTr", data=phis)
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset", "cofw-original", "--source-dir", str(source), "--output-dir", str(output)
+        )
+    )
+    sample = _load_manifest(manifest_path)["samples"][0]
+    saved = cv2.imread(sample["image"], cv2.IMREAD_COLOR)
+
+    # Annotation frame is 40 rows x 60 cols; a transposed image would be 60x40.
+    assert saved.shape[:2] == (40, 60)
+    # The marker at annotation (x=5, y=10) must land at image[row=10, col=5].
+    assert saved[10, 5].min() > 200
+    assert saved[0, 0].max() < 50
+
+
 @pytest.mark.parametrize(
     ("dataset", "release_dir", "list_name", "image_rel", "expected_identity"),
     [

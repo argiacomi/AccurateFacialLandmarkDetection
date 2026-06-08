@@ -2623,7 +2623,9 @@ def _cofw_original_hdf5_arrays(
         image_refs = handle[images_key]
         for index in range(len(points_rows)):
             ref = image_refs[0, index] if image_refs.ndim == 2 and image_refs.shape[0] == 1 else image_refs[index]
-            images.append(np.asarray(handle[ref]))
+            # Reorient to the annotation frame so 29-point landmarks/bboxes align
+            # (the COFW68 reader applies the same transpose).
+            images.append(_orient_cofw_hdf5_image(np.asarray(handle[ref])))
 
         bbox_rows: list[list[float] | None] = [None] * len(points_rows)
         if bboxes_key and bboxes_key in handle:
@@ -2814,6 +2816,26 @@ def _cofw_points_and_occ(path: Path) -> tuple[np.ndarray, list[bool], dict[str, 
     return points68, visibility, metadata
 
 
+def _orient_cofw_hdf5_image(arr: np.ndarray) -> np.ndarray:
+    """Normalize a COFW HDF5 image plane to the annotation coordinate frame.
+
+    COFW MATLAB v7.3 (HDF5) stores image planes channel-first and with H/W
+    swapped relative to the landmark/bbox frame. Points and bboxes only align
+    once the channels are moved last and the spatial axes are transposed. This
+    applies to every COFW HDF5 image, so both the COFW68 and COFW-original
+    readers must use it.
+    """
+    arr = np.asarray(arr)
+    # COFW HDF5 images are usually channel-first: C,H,W.
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4):
+        arr = np.moveaxis(arr, 0, -1)
+    if arr.ndim == 3:
+        arr = np.transpose(arr, (1, 0, 2))
+    elif arr.ndim == 2:
+        arr = arr.T
+    return arr
+
+
 def _cofw_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
     import h5py
 
@@ -2822,16 +2844,7 @@ def _cofw_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
         ref = refs.reshape(-1)[index]
         arr = np.asarray(h5[ref])
 
-    # COFW HDF5 images are usually channel-first: C,H,W.
-    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4):
-        arr = np.moveaxis(arr, 0, -1)
-
-    # MATLAB/HDF5 stores COFW image planes transposed relative to the
-    # annotation coordinate frame. Points/bboxes align after swapping H/W.
-    if arr.ndim == 3:
-        arr = np.transpose(arr, (1, 0, 2))
-    elif arr.ndim == 2:
-        arr = arr.T
+    arr = _orient_cofw_hdf5_image(arr)
 
     if arr.ndim == 3 and arr.shape[-1] == 1:
         arr = arr[:, :, 0]
