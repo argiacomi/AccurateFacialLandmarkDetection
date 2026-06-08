@@ -76,7 +76,7 @@
     ],
     "train_data_name": "FS68Manifest"
   },
-  "created_at": "2026-06-08T03:30:58Z",
+  "created_at": "2026-06-08T03:34:17Z",
   "paths": {
     "checkpoint_dir": "runs/landmarks/cdvit_fs68_profile_mix_example/checkpoints",
     "dataset_root": "runs/landmarks/cdvit_fs68_profile_mix_example/datasets",

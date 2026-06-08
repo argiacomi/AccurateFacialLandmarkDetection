@@ -136,6 +136,11 @@ class PipelinePaths:
             "stage_signature_dir",
             self.run_root / STAGE_SIGNATURE_DIR_NAME,
         )
+        object.__setattr__(
+            self,
+            "stage_signature_dir",
+            self.run_root / STAGE_SIGNATURE_DIR_NAME,
+        )
 
 
 @dataclass
@@ -297,6 +302,246 @@ def _safe_sha256_file(path: Path) -> str | None:
         return _sha256_file(path) if path.is_file() else None
     except OSError:
         return None
+
+
+def _stage_signature_path(paths: PipelinePaths, stage: str) -> Path:
+    return paths.stage_signature_dir / f"{stage}.json"
+
+
+def _json_digest(payload: T.Mapping[str, T.Any]) -> str:
+    encoded = json.dumps(
+        _json_safe_pipeline_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _path_fingerprint(path: Path | str | None) -> dict[str, T.Any]:
+    if path in (None, ""):
+        return {
+            "path": "",
+            "exists": False,
+            "is_file": False,
+            "is_dir": False,
+            "sha256": None,
+        }
+
+    path = Path(path)
+    fingerprint: dict[str, T.Any] = {
+        "path": _normalize_path_for_signature(path),
+        "exists": path.exists(),
+        "is_file": path.is_file(),
+        "is_dir": path.is_dir(),
+        "sha256": _safe_sha256_file(path),
+    }
+    try:
+        stat = path.stat()
+    except OSError:
+        return fingerprint
+    fingerprint["size"] = int(stat.st_size)
+    fingerprint["mtime_ns"] = int(stat.st_mtime_ns)
+    return fingerprint
+
+
+def _path_fingerprints(paths: T.Iterable[Path | str]) -> dict[str, dict[str, T.Any]]:
+    fingerprints: dict[str, dict[str, T.Any]] = {}
+    for raw_path in paths:
+        path = Path(raw_path)
+        fingerprints[_normalize_path_for_signature(path)] = _path_fingerprint(path)
+    return fingerprints
+
+
+def _tool_fingerprint(relative_path: str) -> dict[str, T.Any]:
+    return _path_fingerprint(TOOLS_ROOT / relative_path)
+
+
+def _dataset_source_fingerprints(args: argparse.Namespace) -> dict[str, dict[str, T.Any]]:
+    paths: list[Path] = []
+    paths.extend(Path(path) for path in _dataset_source_map(args).values())
+    paths.extend(Path(path) for path in _dataset_source_zip_map(args).values())
+    if args.source_dir:
+        paths.append(Path(args.source_dir))
+    if args.source_zip:
+        paths.append(Path(args.source_zip))
+    if _has_prod_dir(args):
+        paths.append(Path(args.prod_dir))
+    return _path_fingerprints(paths)
+
+
+def _manifest_stage_common_args(args: argparse.Namespace) -> dict[str, T.Any]:
+    return {
+        "dataset": args.dataset,
+        "dataset_source": list(args.dataset_source or []),
+        "dataset_source_zip": list(args.dataset_source_zip or []),
+        "source_dir": args.source_dir,
+        "source_zip": args.source_zip,
+        "prod_dir": args.prod_dir,
+        "include_39pt_profile": bool(args.include_39pt_profile),
+        "python_executable": args.python_executable,
+    }
+
+
+def _build_dataset_manifest_stage_request(
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+) -> dict[str, T.Any]:
+    return {
+        "version": 1,
+        "stage": "build_dataset_manifests",
+        "args": {
+            **_manifest_stage_common_args(args),
+            "dataset_build_arg": list(args.dataset_build_arg or []),
+            "production_build_arg": list(args.production_build_arg or []),
+        },
+        "commands": _dataset_build_commands(args, paths),
+        "source_fingerprints": _dataset_source_fingerprints(args),
+        "outputs": _build_manifest_outputs(args, paths),
+        "tools": {
+            "build_quality_dataset.py": _tool_fingerprint("build_quality_dataset.py"),
+            "build_production_validated_manifest.py": (
+                _tool_fingerprint("build_production_validated_manifest.py")
+                if _has_prod_dir(args)
+                else None
+            ),
+        },
+    }
+
+
+def _hard_negative_manifest_stage_request(
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+) -> dict[str, T.Any]:
+    inputs = [Path(path) for path in _build_manifest_outputs(args, paths)]
+    if args.exclude_image_ids_file is not None:
+        inputs.append(Path(args.exclude_image_ids_file))
+    return {
+        "version": 1,
+        "stage": "build_hard_negative_manifest",
+        "args": {
+            **_manifest_stage_common_args(args),
+            "hard_negative_arg": list(args.hard_negative_arg or []),
+            "exclude_image_ids_file": args.exclude_image_ids_file,
+            "max_profile_occlusion": args.max_profile_occlusion,
+            "max_profile": args.max_profile,
+            "max_occlusion": args.max_occlusion,
+            "max_anchors": args.max_anchors,
+        },
+        "command": _hard_negative_command(args, paths),
+        "inputs": _path_fingerprints(inputs),
+        "outputs": [str(paths.hard_negative_manifest)],
+        "tools": {
+            "build_hard_negative_manifest.py": _tool_fingerprint(
+                "build_hard_negative_manifest.py"
+            ),
+        },
+    }
+
+
+def _validate_manifest_stage_request(
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+) -> dict[str, T.Any]:
+    return {
+        "version": 1,
+        "stage": "validate_cdvit_manifest",
+        "args": {
+            "skip_image_exists_check": bool(args.skip_image_exists_check),
+            "allow_legacy_68_projection": bool(args.allow_legacy_68_projection),
+            "allow_missing_projection_audit": bool(args.allow_missing_projection_audit),
+            "allow_legacy_missing_contract_fields": bool(
+                args.allow_legacy_missing_contract_fields
+            ),
+            "max_validation_examples": int(args.max_validation_examples),
+        },
+        "inputs": _path_fingerprints([Path(_pipeline_effective_manifest(args, paths))]),
+        "outputs": [str(paths.validation_report)],
+        "tools": {
+            "validator_module": "lib.landmarks.manifest.validator.validate_training_manifest",
+        },
+    }
+
+
+def _manifest_stage_request(
+    stage: str,
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+) -> dict[str, T.Any]:
+    if stage == "build_dataset_manifests":
+        return _build_dataset_manifest_stage_request(args, paths)
+    if stage == "build_hard_negative_manifest":
+        return _hard_negative_manifest_stage_request(args, paths)
+    if stage == "validate_cdvit_manifest":
+        return _validate_manifest_stage_request(args, paths)
+    raise ValueError(f"stage does not use manifest-stage signatures: {stage}")
+
+
+def _read_stage_signature(paths: PipelinePaths, stage: str) -> dict[str, T.Any] | None:
+    signature_path = _stage_signature_path(paths, stage)
+    if not signature_path.is_file():
+        return None
+    try:
+        payload = json.loads(signature_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _stage_signature_matches(
+    stage: str,
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+    outputs: T.Sequence[str],
+) -> bool:
+    if not all(Path(output).is_file() for output in outputs):
+        return False
+
+    stored = _read_stage_signature(paths, stage)
+    if not stored:
+        return False
+
+    current_request = _manifest_stage_request(stage, args, paths)
+    if stored.get("request_digest") != _json_digest(current_request):
+        return False
+
+    stored_outputs = stored.get("output_fingerprints")
+    if not isinstance(stored_outputs, dict):
+        return False
+
+    current_outputs = _path_fingerprints(outputs)
+    for normalized_path, fingerprint in current_outputs.items():
+        stored_fingerprint = stored_outputs.get(normalized_path)
+        if not isinstance(stored_fingerprint, dict):
+            return False
+        if stored_fingerprint.get("sha256") != fingerprint.get("sha256"):
+            return False
+        if not fingerprint.get("exists"):
+            return False
+
+    return True
+
+
+def _write_stage_signature(
+    stage: str,
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+    outputs: T.Sequence[str],
+    *,
+    command: T.Sequence[str] | None = None,
+    notes: T.Sequence[str] | None = None,
+) -> None:
+    request = _manifest_stage_request(stage, args, paths)
+    payload = {
+        "version": 1,
+        "stage": stage,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "request": request,
+        "request_digest": _json_digest(request),
+        "output_fingerprints": _path_fingerprints(outputs),
+        "command": list(command or []),
+        "notes": list(notes or []),
+    }
+    _write_json(_stage_signature_path(paths, stage), payload)
 
 
 def _stage_signature_path(paths: PipelinePaths, stage: str) -> Path:

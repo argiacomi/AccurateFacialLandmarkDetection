@@ -3,3 +3,10 @@ __pycache__/
 *$py.class
 tmp
 *.bak.*
+
+# Generated local training/pipeline artifacts
+runs/
+*.bak
+*.pre_*.bak
+*.pre_modularization.bak
+*.pre_stage_signatures.bak

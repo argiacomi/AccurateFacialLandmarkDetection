@@ -373,7 +373,7 @@ def main():
         # if True:
 
         schema_aware_training = (
-            _is_schema_aware_manifest_dataset(args.data_name)
+            is_schema_aware_manifest_dataset(args.data_name)
             and args.schema_aware_training
         )
         train_dataset = _build_dataset(
@@ -392,7 +392,7 @@ def main():
             include_metadata=True,
             schema_aware_training=schema_aware_training,
         )
-        if _is_schema_aware_manifest_dataset(args.data_name):
+        if is_schema_aware_manifest_dataset(args.data_name):
             validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
         eval_dataset = _maybe_limit_eval_dataset(test_dataset, args.eval_max_samples, args.seed)
         test_dataloader = torch.utils.data.DataLoader(
@@ -409,7 +409,7 @@ def main():
                 collate_fn=_eval_collate,
                 **_dataloader_kwargs(args, eval_loader=True),
             )
-        if args.domain_balanced_sampling and _is_schema_aware_manifest_dataset(
+        if args.domain_balanced_sampling and is_schema_aware_manifest_dataset(
             args.data_name
         ):
             train_sampler = DomainBalancedBatchSampler(
