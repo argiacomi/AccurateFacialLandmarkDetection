@@ -1717,7 +1717,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Stages: {', '.join(selected_stages)}")
 
     for stage in selected_stages:
-        result = _run_stage(stage, args, paths)
+        try:
+            result = _run_stage(stage, args, paths)
+        except KeyboardInterrupt:
+            print(
+                f"\nInterrupted by user (Ctrl-C) during stage '{stage}'. "
+                f"Resume with --start-at {stage} (run root: {paths.run_root}).",
+                file=sys.stderr,
+            )
+            return 130
         _append_progress(paths, result)
         print(json.dumps(result.to_json(), indent=2), flush=True)
         if result.status == "error":

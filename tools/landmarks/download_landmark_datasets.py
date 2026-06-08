@@ -477,7 +477,8 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
             raise OSError(f"download produced an empty file: {tmp_path}")
         os.replace(tmp_path, destination)
         return destination
-    except Exception:
+    except BaseException:
+        # BaseException so a Ctrl-C (KeyboardInterrupt) also removes the partial file.
         if tmp_path.exists():
             tmp_path.unlink()
         raise
@@ -894,8 +895,7 @@ def _resolve_requested_datasets(args: argparse.Namespace) -> list[str] | None:
     return normalize_datasets(tokens)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+def _run(args: argparse.Namespace) -> int:
     requested = _resolve_requested_datasets(args)
     sources = _selected_sources(requested, include_alternates=args.include_alternates)
 
@@ -915,6 +915,15 @@ def main(argv: list[str] | None = None) -> int:
 
     errored = [result for result in results if result.get("status") == "error"]
     return 1 if errored else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        return _run(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted by user (Ctrl-C); the partial download was cleaned up.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

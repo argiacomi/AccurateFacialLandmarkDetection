@@ -99,6 +99,53 @@ def test_extract_zip_and_tar_roundtrip(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Keyboard interrupt handling
+# ---------------------------------------------------------------------------
+def test_download_url_cleans_partial_file_on_interrupt(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(downloader.urllib.request, "urlopen", boom)
+    destination = tmp_path / "archives" / "file.zip"
+
+    with pytest.raises(KeyboardInterrupt):
+        downloader._download_url("http://example.com/file.zip", destination, force=False)
+
+    assert not destination.exists()
+    assert list(destination.parent.glob("*.part")) == []
+
+
+def test_downloader_main_returns_130_on_interrupt(tmp_path, monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(downloader, "_process_asset", boom)
+    rc = downloader.main(["--datasets", "helen", "--output-root", str(tmp_path)])
+    assert rc == 130
+    assert "Ctrl-C" in capsys.readouterr().err
+
+
+def test_prepare_main_returns_130_on_interrupt(tmp_path, monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(prepare, "_build_dataset", boom)
+    rc = prepare.main(
+        [
+            "--datasets",
+            "wflw-v",
+            "--skip-download",
+            "--data-root",
+            str(tmp_path / "data"),
+            "--output-root",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert rc == 130
+    assert "Ctrl-C" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # --datasets parsing
 # ---------------------------------------------------------------------------
 def test_normalize_datasets_space_and_comma():

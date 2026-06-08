@@ -3665,6 +3665,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s:%(name)s:%(message)s")
     try:
         manifest = build(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted by user (Ctrl-C).", file=sys.stderr)
+        return 130
     except Exception as err:  # noqa: BLE001
         logger.error("manifest build failed: %s", err)
         return 1

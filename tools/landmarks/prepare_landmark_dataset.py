@@ -317,7 +317,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    return prepare(args)
+    try:
+        return prepare(args)
+    except KeyboardInterrupt:
+        print(
+            "\nInterrupted by user (Ctrl-C). Any partially built manifest in the output "
+            "root may be incomplete; re-run to finish.",
+            file=sys.stderr,
+        )
+        return 130
 
 
 if __name__ == "__main__":
