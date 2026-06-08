@@ -342,6 +342,7 @@ def _prepare_args(**overrides) -> argparse.Namespace:
         audit_overlay_limit=50,
         frame_stride=1,
         max_frames_per_video=None,
+        workers=1,
         force=False,
         skip_checksum=True,
         skip_download=True,

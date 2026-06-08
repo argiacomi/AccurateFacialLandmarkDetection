@@ -146,6 +146,7 @@ def _build_dataset(
         arglist += ["--image-root", str(image_root)]
     if args.allow_overlap:
         arglist += ["--allow-overlap"]
+    arglist += ["--workers", str(args.workers)]
     if dataset in VIDEO_DATASETS:
         arglist += ["--frame-stride", str(args.frame_stride)]
         if args.max_frames_per_video is not None:
@@ -306,6 +307,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit-overlay-limit", type=int, default=50)
     parser.add_argument("--frame-stride", type=int, default=1, help="Frame stride for video datasets.")
     parser.add_argument("--max-frames-per-video", type=int, default=None, help="Cap frames per video for video datasets.")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).")
     parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
     parser.add_argument("--skip-checksum", action="store_true", help="Skip stored checksum verification.")
     parser.add_argument("--skip-download", action="store_true", help="Reuse already-downloaded/extracted assets from --data-root.")

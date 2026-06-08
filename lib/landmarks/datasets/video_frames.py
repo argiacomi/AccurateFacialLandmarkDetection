@@ -64,6 +64,7 @@ def extract_video_frames(
     max_frames: int | None = None,
     video_id: str | None = None,
     image_ext: str = ".jpg",
+    progress: bool = True,
 ) -> list[dict[str, T.Any]]:
     """Extract selected video frames into a stable derived-data directory.
 
@@ -86,7 +87,13 @@ def extract_video_frames(
             max_frames=max_frames,
         )
         records: list[dict[str, T.Any]] = []
-        for frame_index in track(indices, desc=f"Frames {video_key}", total=len(indices), unit="frame"):
+        for frame_index in track(
+            indices,
+            desc=f"Frames {video_key}",
+            total=len(indices),
+            unit="frame",
+            disable=None if progress else True,
+        ):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
             ok, frame = cap.read()
             if not ok or frame is None:

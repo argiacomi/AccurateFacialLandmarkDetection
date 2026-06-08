@@ -31,6 +31,7 @@ import logging
 import re
 import sys
 import typing as T
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -48,6 +49,7 @@ from lib.landmarks.core.schema import (
     point_count_for_schema,
     projection_audit_for_schema,
 )
+from lib.landmarks.datasets.parallel import parallel_map
 from lib.landmarks.datasets.progress import track
 from lib.landmarks.datasets.sources import extract_archive_to_temp
 from lib.landmarks.datasets.video_frames import extract_video_frames, video_files
@@ -872,7 +874,33 @@ def _draw_manifest_overlay(
         raise OSError(f"failed to write overlay image: {output_path}")
 
 
-def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 50) -> Path:
+@dataclass(frozen=True, slots=True)
+class _OverlayTask:
+    """Inputs for rendering one audit overlay in a worker."""
+
+    sample_id: str
+    schema: str
+    image_path: Path
+    landmarks_path: Path
+    overlay_path: Path
+    visibility: tuple[T.Any, ...] | None
+
+
+def _draw_overlay_task(task: _OverlayTask) -> tuple[_OverlayTask, str | None]:
+    """Render one overlay; return (task, error)."""
+    try:
+        _draw_manifest_overlay(
+            task.image_path,
+            task.landmarks_path,
+            task.overlay_path,
+            visibility=task.visibility,
+        )
+        return task, None
+    except Exception as err:  # noqa: BLE001
+        return task, str(err)
+
+
+def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 50, max_workers: int = 1) -> Path:
     payload = _read_json(manifest_path)
     entries = payload.get("samples", [])
     if not isinstance(entries, list):
@@ -882,13 +910,16 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
     overlays: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     schema_counts: dict[str, int] = {}
-    emitted = 0
-    for index, entry in enumerate(track(entries, desc="Overlays", total=len(entries), unit="overlay")):
+
+    # Select up to `limit` overlay tasks deterministically, then render them in
+    # parallel (image decode/encode releases the GIL). Results stay input-ordered.
+    tasks: list[_OverlayTask] = []
+    for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
         schema = str(entry.get("target_schema") or entry.get("source_schema") or "unknown")
         schema_counts[schema] = schema_counts.get(schema, 0) + 1
-        if emitted >= int(limit):
+        if len(tasks) >= int(limit):
             continue
         image_value = entry.get("image")
         landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
@@ -896,28 +927,36 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
         if not image_value or not landmarks_value:
             skipped.append({"sample_id": sample_id, "reason": "missing image or landmarks"})
             continue
-        image_path = _resolve_path(image_value, base_dir=base_dir)
-        landmarks_path = _resolve_path(landmarks_value, base_dir=base_dir)
-        overlay_name = _safe_id(sample_id).replace("/", "_").replace("#", "_")
-        overlay_path = audit_dir / "overlays" / schema / f"{overlay_name}.jpg"
         visibility = entry.get("visibility")
         if visibility is None and isinstance(entry.get("metadata"), dict):
             visibility = entry["metadata"].get("visibility")
-        try:
-            _draw_manifest_overlay(image_path, landmarks_path, overlay_path, visibility=visibility)
-        except Exception as err:  # noqa: BLE001
-            skipped.append({"sample_id": sample_id, "reason": str(err)})
+        overlay_name = _safe_id(sample_id).replace("/", "_").replace("#", "_")
+        tasks.append(
+            _OverlayTask(
+                sample_id=sample_id,
+                schema=schema,
+                image_path=_resolve_path(image_value, base_dir=base_dir),
+                landmarks_path=_resolve_path(landmarks_value, base_dir=base_dir),
+                overlay_path=audit_dir / "overlays" / schema / f"{overlay_name}.jpg",
+                visibility=tuple(visibility) if visibility is not None else None,
+            )
+        )
+
+    for task, error in parallel_map(
+        _draw_overlay_task, tasks, workers=max_workers, desc="Overlays", unit="overlay"
+    ):
+        if error is not None:
+            skipped.append({"sample_id": task.sample_id, "reason": error})
             continue
         overlays.append(
             {
-                "sample_id": sample_id,
-                "schema": schema,
-                "image": str(image_path),
-                "landmarks": str(landmarks_path),
-                "overlay": str(overlay_path),
+                "sample_id": task.sample_id,
+                "schema": task.schema,
+                "image": str(task.image_path),
+                "landmarks": str(task.landmarks_path),
+                "overlay": str(task.overlay_path),
             }
         )
-        emitted += 1
 
     report = {
         "manifest": str(manifest_path),
@@ -3342,6 +3381,35 @@ def _find_frame_landmark_file(root: Path, video_id: str, frame_index: int) -> Pa
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class _VideoFrameTask:
+    """Inputs for decoding one video's frames in a worker."""
+
+    video_path: Path
+    video_id: str
+    frame_root: Path
+    frame_stride: int
+    max_frames_per_video: int | None
+
+
+def _extract_video_frames_task(
+    task: _VideoFrameTask,
+) -> tuple[str, list[dict[str, T.Any]] | None, str | None]:
+    """Decode one video; return (video_id, frame_records, error)."""
+    try:
+        records = extract_video_frames(
+            task.video_path,
+            task.frame_root,
+            stride=task.frame_stride,
+            max_frames=task.max_frames_per_video,
+            video_id=task.video_id,
+            progress=False,
+        )
+        return task.video_id, records, None
+    except Exception as err:  # noqa: BLE001
+        return task.video_id, None, str(err)
+
+
 def _build_video_dataset(
     root: Path,
     output_dir: Path,
@@ -3357,6 +3425,7 @@ def _build_video_dataset(
     frame_output_dir: str | None,
     frame_stride: int,
     max_frames_per_video: int | None,
+    max_workers: int = 1,
 ) -> Path:
     json_path = _json_source(root)
     if json_path is not None:
@@ -3390,21 +3459,34 @@ def _build_video_dataset(
     frame_root = Path(frame_output_dir) if frame_output_dir else output_dir / "frames" / dataset
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for video_path in track(videos, desc=f"Videos {dataset}", total=len(videos), unit="video"):
-        video_id = video_path.resolve().relative_to(videos_root.resolve()).with_suffix("").as_posix()
-        split = _deterministic_split(dataset, video_id)
-        try:
-            frame_records = extract_video_frames(
-                video_path,
-                frame_root,
-                stride=frame_stride,
-                max_frames=max_frames_per_video,
-                video_id=video_id,
-            )
-        except Exception as err:  # noqa: BLE001
-            skipped.append({"sample_id": video_id, "reason": str(err)})
-            continue
 
+    # Decode every video in parallel (OpenCV releases the GIL); the per-frame
+    # sample assembly below stays sequential to keep manifest ordering and
+    # split assignment deterministic regardless of worker count.
+    tasks = [
+        _VideoFrameTask(
+            video_path=video_path,
+            video_id=video_path.resolve().relative_to(videos_root.resolve()).with_suffix("").as_posix(),
+            frame_root=frame_root,
+            frame_stride=frame_stride,
+            max_frames_per_video=max_frames_per_video,
+        )
+        for video_path in videos
+    ]
+    extracted = parallel_map(
+        _extract_video_frames_task,
+        tasks,
+        workers=max_workers,
+        desc=f"Videos {dataset}",
+        unit="video",
+    )
+
+    for task, (video_id, frame_records, error) in zip(tasks, extracted):
+        if error is not None:
+            skipped.append({"sample_id": video_id, "reason": error})
+            continue
+        video_path = task.video_path
+        split = _deterministic_split(dataset, video_id)
         for record in frame_records:
             frame_index = int(record["frame_index"])
             sample_id = f"{dataset}/{video_id}/frame_{frame_index:06d}"
@@ -3634,6 +3716,7 @@ def build(args: argparse.Namespace) -> Path:
                 frame_output_dir=args.frame_output_dir,
                 frame_stride=args.frame_stride,
                 max_frames_per_video=args.max_frames_per_video,
+                max_workers=args.workers,
             )
         else:
             if root is None:
@@ -3651,7 +3734,9 @@ def build(args: argparse.Namespace) -> Path:
             )
 
     if args.write_overlays:
-        _write_visual_audit(manifest_path, output_dir, limit=args.audit_overlay_limit)
+        _write_visual_audit(
+            manifest_path, output_dir, limit=args.audit_overlay_limit, max_workers=args.workers
+        )
     return manifest_path
 
 
@@ -3676,6 +3761,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cofw-json", default=None)
     parser.add_argument("--write-overlays", action="store_true", help="Write visual landmark overlay audit images for built samples.")
     parser.add_argument("--audit-overlay-limit", type=int, default=50)
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).")
     parser.add_argument("--no-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
     parser.add_argument("--include-39pt-profile", action="store_true", help="Accepted for compatibility; non-68 samples are skipped.")
     parser.add_argument("--cache-dir", default=None, help="Accepted for compatibility; explicit sources are preferred.")
