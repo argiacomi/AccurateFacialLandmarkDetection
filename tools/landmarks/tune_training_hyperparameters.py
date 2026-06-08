@@ -202,6 +202,7 @@ def make_run_config(
 
 def build_train_command(args: argparse.Namespace, run: dict[str, T.Any], run_dir: Path) -> list[str]:
     params = dict(run["params"])
+    metrics_path = run_dir / args.metrics_file_name
     cmd = shlex.split(args.train_command)
     cmd += [
         "--star-loss-weight",
@@ -220,8 +221,10 @@ def build_train_command(args: argparse.Namespace, run: dict[str, T.Any], run_dir
         str(run["seed"]),
         "--ckpt_folder",
         str(run_dir / "checkpoints"),
-        "--runtime-metrics-path",
-        str(run_dir / args.metrics_file_name),
+        "--eval-report-json",
+        str(metrics_path),
+        "--runtime-metrics-jsonl",
+        str(run_dir / "runtime_metrics.jsonl"),
     ]
     if args.extra_train_args:
         cmd += shlex.split(args.extra_train_args)
@@ -234,6 +237,75 @@ def select_metric(metrics: dict[str, T.Any], keys: tuple[str, ...]) -> float | N
         if value is not None:
             return value
     return None
+
+
+def _metric_from_group(report: dict[str, T.Any], group_name: str, labels: tuple[str, ...]) -> float | None:
+    group = report.get(group_name)
+    if not isinstance(group, dict):
+        return None
+    for label in labels:
+        metrics = group.get(label)
+        if isinstance(metrics, dict):
+            value = _float(metrics.get("nme"))
+            if value is not None:
+                return value
+    return None
+
+
+def normalize_metrics(raw_metrics: dict[str, T.Any]) -> dict[str, T.Any]:
+    """Flatten trainer/evaluator JSON into objective metric keys.
+
+    The tuner also accepts already-flat metrics for external evaluation jobs.
+    When the trainer writes its normal eval report, metrics live under
+    ``model.overall`` and slice groups such as ``by_hard_negative_bucket``.
+    """
+
+    metrics = dict(raw_metrics)
+    report = raw_metrics.get("model") if isinstance(raw_metrics.get("model"), dict) else raw_metrics
+    if not isinstance(report, dict):
+        return metrics
+
+    overall = report.get("overall")
+    if isinstance(overall, dict):
+        nme = _float(overall.get("nme"))
+        if nme is not None:
+            metrics.setdefault("heldout_68_nme", nme)
+            metrics.setdefault("overall_68_nme", nme)
+
+    slice_specs = {
+        "profile_nme": (
+            ("by_hard_negative_bucket", ("profile",)),
+            ("by_pose_bucket", ("profile", "profile_left", "profile_right")),
+        ),
+        "occlusion_nme": (
+            ("by_hard_negative_bucket", ("occlusion",)),
+            ("by_occlusion", ("occlusion",)),
+        ),
+        "profile_occlusion_nme": (
+            ("by_hard_negative_bucket", ("profile_occlusion", "profile+occlusion")),
+        ),
+        "blur_nme": (
+            ("by_blur_quality", ("blurred", "blur", "low_quality")),
+            ("by_face_size", ("small",)),
+        ),
+        "low_quality_nme": (
+            ("by_landmark_confidence", ("low", "low_quality")),
+            ("by_face_size", ("small",)),
+        ),
+        "frontal_nme": (
+            ("by_pose_bucket", ("frontal",)),
+            ("by_hard_negative_bucket", ("anchor",)),
+        ),
+    }
+    for metric_key, specs in slice_specs.items():
+        if _float(metrics.get(metric_key)) is not None:
+            continue
+        for group_name, labels in specs:
+            value = _metric_from_group(report, group_name, labels)
+            if value is not None:
+                metrics[metric_key] = value
+                break
+    return metrics
 
 
 def objective_score(
@@ -504,7 +576,8 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
         print("SKIP", run["id"], "training did not write metrics", metrics_path)
         return None
 
-    metrics = _read_json(metrics_path)
+    raw_metrics = _read_json(metrics_path)
+    metrics = normalize_metrics(raw_metrics)
     score, diagnostics = objective_score(
         metrics,
         baseline_metrics=baseline_metrics,
@@ -516,6 +589,7 @@ def run_one(args: argparse.Namespace, run: dict[str, T.Any], *, baseline_metrics
         **run,
         "run_dir": str(run_dir),
         "command": command,
+        "raw_metrics": raw_metrics,
         "metrics": metrics,
         "score": score,
         "objective": diagnostics,

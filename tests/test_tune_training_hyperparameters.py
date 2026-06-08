@@ -105,6 +105,52 @@ def test_lr_sweep_freezes_loss_weights(tmp_path):
     assert {run["params"]["auxiliary_loss_weight"] for run in runs} == {0.05}
 
 
+def test_build_train_command_uses_eval_report_and_runtime_jsonl(tmp_path):
+    args = tuner.build_arg_parser().parse_args([
+        "--output-dir",
+        str(tmp_path),
+        "--train-command",
+        "python TrainHeatmapStageFP16.py",
+    ])
+    run = tuner.make_run_config(
+        stage="baseline",
+        params=tuner.baseline_config(args),
+        seed=17,
+        index=0,
+    )
+    command = tuner.build_train_command(args, run, tmp_path / "runs" / run["id"])
+
+    assert "--eval-report-json" in command
+    assert command[command.index("--eval-report-json") + 1].endswith("metrics.json")
+    assert "--runtime-metrics-jsonl" in command
+    assert command[command.index("--runtime-metrics-jsonl") + 1].endswith("runtime_metrics.jsonl")
+    assert "--runtime-metrics-path" not in command
+
+
+def test_normalize_metrics_flattens_trainer_eval_report():
+    metrics = tuner.normalize_metrics(
+        {
+            "model": {
+                "overall": {"nme": 0.04},
+                "by_hard_negative_bucket": {
+                    "profile": {"nme": 0.06},
+                    "occlusion": {"nme": 0.05},
+                    "profile_occlusion": {"nme": 0.08},
+                    "anchor": {"nme": 0.035},
+                },
+                "by_face_size": {"small": {"nme": 0.07}},
+            }
+        }
+    )
+
+    assert metrics["heldout_68_nme"] == pytest.approx(0.04)
+    assert metrics["profile_nme"] == pytest.approx(0.06)
+    assert metrics["occlusion_nme"] == pytest.approx(0.05)
+    assert metrics["profile_occlusion_nme"] == pytest.approx(0.08)
+    assert metrics["blur_nme"] == pytest.approx(0.07)
+    assert metrics["frontal_nme"] == pytest.approx(0.035)
+
+
 def test_write_recommendation_outputs_flags_and_json(tmp_path):
     args = tuner.build_arg_parser().parse_args(["--output-dir", str(tmp_path)])
     selected_loss = {

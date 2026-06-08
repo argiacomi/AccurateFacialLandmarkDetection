@@ -75,7 +75,8 @@ Each run receives flags like:
 --hw ...
 --seed ...
 --ckpt_folder <run>/checkpoints
---runtime-metrics-path <run>/metrics.json
+--eval-report-json <run>/metrics.json
+--runtime-metrics-jsonl <run>/runtime_metrics.jsonl
 ```
 
 ## Execute real training
@@ -90,7 +91,7 @@ python tools/landmarks/tune_training_hyperparameters.py \
   --extra-train-args "--data_name FS68Manifest --manifest data/train.json --test_manifest data/val.json --epoch 20"
 ```
 
-Training/evaluation should write JSON metrics to the path passed through `--runtime-metrics-path`. The objective looks for `heldout_68_nme` first, then other overall 68 NME aliases.
+Training/evaluation should write the evaluation JSON to the path passed through `--eval-report-json`. The tuner accepts already-flat metric JSON, and also normalizes the trainer's nested eval report under `model.overall` and slice groups such as `model.by_hard_negative_bucket`.
 
 ## Objective
 
@@ -137,6 +138,7 @@ python tools/landmarks/tune_training_hyperparameters.py \
 - `runs/<run-id>/config.json`
 - `runs/<run-id>/command.txt`
 - `runs/<run-id>/metrics.json`
+- `runs/<run-id>/runtime_metrics.jsonl`
 - `runs/<run-id>/result.json`
 
 The final JSON contains the selected values for:
