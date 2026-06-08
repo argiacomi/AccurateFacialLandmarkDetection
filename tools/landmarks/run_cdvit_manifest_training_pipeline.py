@@ -13,6 +13,7 @@ Pipeline stages:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import shlex
@@ -1152,11 +1153,59 @@ def _require_local_tools(args: argparse.Namespace) -> None:
         raise FileNotFoundError("missing local manifest tool(s): " + ", ".join(missing))
 
 
+def _format_command(argv: T.Sequence[str]) -> str:
+    return "+ " + " ".join(shlex.quote(str(part)) for part in argv)
+
+
 def _run_command(argv: list[str], *, cwd: Path, dry_run: bool) -> None:
-    print("+ " + " ".join(shlex.quote(part) for part in argv), flush=True)
+    print(_format_command(argv), flush=True)
     if dry_run:
         return
     subprocess.run(argv, cwd=str(cwd), check=True)
+
+
+def _effective_manifest_build_workers(command_count: int, requested_workers: int) -> int:
+    if command_count <= 0:
+        return 0
+    requested_workers = int(requested_workers or 0)
+    if requested_workers <= 0:
+        # Auto mode: enough parallelism to overlap independent dataset builders,
+        # but capped to avoid starting every extraction/conversion job at once on
+        # large local runs.
+        requested_workers = min(4, command_count)
+    return max(1, min(requested_workers, command_count))
+
+
+def _run_dataset_build_commands(
+    commands: T.Sequence[list[str]],
+    *,
+    cwd: Path,
+    dry_run: bool,
+    max_workers: int,
+) -> None:
+    if not commands:
+        return
+
+    workers = _effective_manifest_build_workers(len(commands), max_workers)
+    if dry_run or workers <= 1:
+        for command in commands:
+            _run_command(command, cwd=cwd, dry_run=dry_run)
+        return
+
+    print(
+        f"+ running {len(commands)} independent manifest build command(s) "
+        f"with {workers} worker(s)",
+        flush=True,
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_command = {
+            executor.submit(_run_command, command, cwd=cwd, dry_run=False): command
+            for command in commands
+        }
+        for future in concurrent.futures.as_completed(future_to_command):
+            # Propagate the first failed subprocess as a stage error. The executor
+            # context waits for already-started sibling builds before unwinding.
+            future.result()
 
 
 def _validate_training_manifest(
@@ -1253,11 +1302,22 @@ def _run_stage(
             )
 
         if stage == "build_dataset_manifests":
-            for command in _dataset_build_commands(args, paths):
-                _run_command(command, cwd=CDVIT_ROOT, dry_run=args.dry_run)
+            commands = _dataset_build_commands(args, paths)
+            _run_dataset_build_commands(
+                commands,
+                cwd=CDVIT_ROOT,
+                dry_run=args.dry_run,
+                max_workers=args.manifest_build_workers,
+            )
+            workers = _effective_manifest_build_workers(
+                len(commands),
+                args.manifest_build_workers,
+            )
+            notes.append(f"manifest_build_workers={workers}")
             outputs = _build_manifest_outputs(args, paths)
+            command = commands[-1] if commands else []
             if not args.dry_run:
-                _write_stage_signature(stage, args, paths, outputs, command=command)
+                _write_stage_signature(stage, args, paths, outputs, command=command, notes=notes)
 
         elif stage == "build_hard_negative_manifest":
             if args.manifest:
@@ -1389,6 +1449,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Extra quoted arg(s) passed to build_production_validated_manifest.py; repeatable.",
+    )
+    parser.add_argument(
+        "--manifest-build-workers",
+        type=int,
+        default=0,
+        help=(
+            "Number of independent dataset/production manifest build subprocesses "
+            "to run concurrently. Use 0 for auto mode capped at 4; use 1 for "
+            "serial behavior."
+        ),
     )
     parser.add_argument(
         "--hard-negative-arg",
