@@ -775,6 +775,7 @@ def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths)
             "full_eval_every": int(args.full_eval_every),
             "eval_ema_every": int(args.eval_ema_every),
             "eval_max_samples": int(args.eval_max_samples),
+            "eval_slice_reports_every": int(args.eval_slice_reports_every),
         },
         "checkpoint": {
             "save_last_checkpoint": bool(args.save_last_checkpoint),
@@ -1082,6 +1083,7 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
     argv.extend(["--full-eval-every", str(args.full_eval_every)])
     argv.extend(["--eval-ema-every", str(args.eval_ema_every)])
     argv.extend(["--eval-max-samples", str(args.eval_max_samples)])
+    argv.extend(["--eval-slice-reports-every", str(args.eval_slice_reports_every)])
     argv.extend(["--log-every", str(args.log_every)])
     if args.save_last_checkpoint:
         argv.append("--save-last-checkpoint")
@@ -1563,10 +1565,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--eval-batch-size", type=int, default=8)
     parser.add_argument("--eval-num-workers", type=int, default=0)
-    parser.add_argument("--eval-every", type=int, default=1)
-    parser.add_argument("--full-eval-every", type=int, default=0)
-    parser.add_argument("--eval-ema-every", "--eval-on-ema-every", dest="eval_ema_every", type=int, default=1)
-    parser.add_argument("--eval-max-samples", type=int, default=0)
+    parser.add_argument("--eval-every", type=int, default=5)
+    parser.add_argument("--full-eval-every", type=int, default=25)
+    parser.add_argument("--eval-ema-every", "--eval-on-ema-every", dest="eval_ema_every", type=int, default=5)
+    parser.add_argument("--eval-max-samples", type=int, default=2048)
+    parser.add_argument(
+        "--eval-slice-reports-every",
+        type=int,
+        default=25,
+        help=(
+            "Build expensive per-sample slice reports every N epochs in pipeline runs. "
+            "Overall NME/FR/AUC still run on --eval-every. Use 1 to preserve "
+            "per-epoch slice-report behavior; 0 disables periodic slice reports "
+            "except when record outputs are requested."
+        ),
+    )
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument(
         "--synchronize-runtime-timing",

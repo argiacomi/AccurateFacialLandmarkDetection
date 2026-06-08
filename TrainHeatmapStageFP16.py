@@ -199,6 +199,16 @@ def main():
     parser.add_argument("--full-eval-every", type=int, default=0)
     parser.add_argument("--eval-ema-every", "--eval-on-ema-every", dest="eval_ema_every", type=int, default=1)
     parser.add_argument("--eval-max-samples", type=int, default=0)
+    parser.add_argument(
+        "--eval-slice-reports-every",
+        type=int,
+        default=1,
+        help=(
+            "Build per-sample slice reports every N evaluated epochs. "
+            "Default 1 preserves direct trainer behavior; pipeline runs "
+            "override this to a larger value for throughput."
+        ),
+    )
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument(
         "--save-last-checkpoint",
@@ -750,6 +760,17 @@ def main():
                 is_full_eval = eval_scope == "full"
                 model_report = None
                 ema_report = None
+                should_build_eval_records = bool(
+                    args.eval_records_jsonl
+                    or args.eval_records_csv
+                    or args.eval_report_csv
+                    or _should_run_interval(args.eval_slice_reports_every, epoch, final_epoch)
+                )
+                if should_eval_model and not should_build_eval_records:
+                    print(
+                        f"running fast overall-only eval at epoch {epoch}; "
+                        f"slice reports every {args.eval_slice_reports_every} evaluated epoch(s)"
+                    )
 
                 if should_eval_model:
                     eval_start_time = _start_timing(device=device, synchronize=args.synchronize_runtime_timing)
@@ -762,6 +783,7 @@ def main():
                                 args.eval_records_jsonl or args.eval_records_csv
                             ),
                             non_blocking=args.pin_memory,
+                            build_records=should_build_eval_records,
                         )
                     eval_seconds = _elapsed_timing(eval_start_time, device=device, synchronize=args.synchronize_runtime_timing)
                     epoch_timing["eval_seconds"] = float(epoch_timing.get("eval_seconds", 0.0)) + eval_seconds
@@ -820,6 +842,7 @@ def main():
                             eval_loader,
                             device,
                             non_blocking=args.pin_memory,
+                            build_records=should_build_eval_records,
                         )
                     _accumulate_timing(
                         epoch_timing,

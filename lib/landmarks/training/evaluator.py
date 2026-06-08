@@ -9,7 +9,11 @@ from torch.utils.data._utils.collate import default_collate
 from tqdm import tqdm
 
 from lib.landmarks.core.schema import head_name_for_schema
-from lib.landmarks.evaluation.split_safe import build_slice_report, record_for_sample
+from lib.landmarks.evaluation.split_safe import (
+    build_slice_report,
+    metrics_for_nmes,
+    record_for_sample,
+)
 
 
 def _eval_collate(batch):
@@ -245,9 +249,35 @@ def _masked_nme_list(pred_keypoints, keypoints, landmark_mask):
     values = _masked_nme_values(pred_keypoints, keypoints, landmark_mask)
     return values[np.isfinite(values)]
 
-def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=False, non_blocking=False):
+
+
+def _append_finite_nmes(target, values):
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return
+    target.extend(float(value) for value in arr[np.isfinite(arr)])
+
+def _evaluate_landmark_model(
+    model,
+    test_dataloader,
+    device,
+    *,
+    include_records=False,
+    non_blocking=False,
+    build_records=True,
+):
+    """Evaluate landmarks with optional per-sample slice-report records.
+
+    ``build_records=False`` keeps the expensive CPU/NumPy per-sample record path
+    off for routine sampled evaluations. It still computes overall NME/FR/AUC via
+    vectorized batch NME values. Record construction is forced on whenever callers
+    request record output files.
+    """
     model.eval()
+    build_records = bool(build_records or include_records)
     records = []
+    nme_values = []
+
     for batch_idx, batch in enumerate(tqdm(test_dataloader)):
         if isinstance(batch, dict) and "heads" in batch:
             data = batch["image"].to(device, non_blocking=non_blocking)
@@ -260,18 +290,25 @@ def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=
                 pred_keypoints = pred_keypoints.index_select(0, indices)
                 keypoints = payload["target"].to(device, non_blocking=non_blocking)
                 landmark_mask = payload["landmark_mask"].to(device, non_blocking=non_blocking)
-                visibility_logits = _visibility_logits_from_stage(stage_pred, head_name)
-                if visibility_logits is not None:
-                    visibility_logits = visibility_logits.index_select(0, indices)
-                records.extend(
-                    _visibility_aware_records(
-                        pred_keypoints,
-                        keypoints,
-                        landmark_mask,
-                        payload["metadata"],
-                        visibility_logits=visibility_logits,
+
+                if build_records:
+                    visibility_logits = _visibility_logits_from_stage(stage_pred, head_name)
+                    if visibility_logits is not None:
+                        visibility_logits = visibility_logits.index_select(0, indices)
+                    records.extend(
+                        _visibility_aware_records(
+                            pred_keypoints,
+                            keypoints,
+                            landmark_mask,
+                            payload["metadata"],
+                            visibility_logits=visibility_logits,
+                        )
                     )
-                )
+                else:
+                    _append_finite_nmes(
+                        nme_values,
+                        _masked_nme_values(pred_keypoints, keypoints, landmark_mask),
+                    )
             continue
 
         data, target, landmark_mask, metadata = _unpack_eval_batch(batch)
@@ -282,21 +319,35 @@ def _evaluate_landmark_model(model, test_dataloader, device, *, include_records=
         pred_keypoints, heatmap = _landmark_prediction_for_head(
             stage_pred, "landmarks_68"
         )
-        records.extend(
-            _visibility_aware_records(
-                pred_keypoints,
-                keypoints,
-                landmark_mask,
-                metadata,
-                visibility_logits=_visibility_logits_from_stage(
-                    stage_pred, "landmarks_68"
-                ),
+
+        if build_records:
+            records.extend(
+                _visibility_aware_records(
+                    pred_keypoints,
+                    keypoints,
+                    landmark_mask,
+                    metadata,
+                    visibility_logits=_visibility_logits_from_stage(
+                        stage_pred, "landmarks_68"
+                    ),
+                )
             )
-        )
-    report = build_slice_report(records)
-    if include_records:
-        report["records"] = records
-    return report
+        else:
+            _append_finite_nmes(
+                nme_values,
+                _masked_nme_values(pred_keypoints, keypoints, landmark_mask),
+            )
+
+    if build_records:
+        report = build_slice_report(records)
+        if include_records:
+            report["records"] = records
+        return report
+
+    return {
+        "overall": metrics_for_nmes(nme_values),
+        "record_mode": "overall_only",
+    }
 
 def _records_from_report(report):
     records = report.get("records", [])
