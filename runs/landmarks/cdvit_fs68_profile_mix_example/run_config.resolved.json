@@ -67,7 +67,7 @@
     "source_dir": null,
     "source_zip": null,
     "start_at": null,
-    "stop_after": "build_dataset_manifests",
+    "stop_after": null,
     "synchronize_runtime_timing": true,
     "torchrun_executable": "torchrun",
     "train_arg": [
@@ -76,7 +76,7 @@
     ],
     "train_data_name": "FS68Manifest"
   },
-  "created_at": "2026-06-08T03:22:29Z",
+  "created_at": "2026-06-08T03:30:58Z",
   "paths": {
     "checkpoint_dir": "runs/landmarks/cdvit_fs68_profile_mix_example/checkpoints",
     "dataset_root": "runs/landmarks/cdvit_fs68_profile_mix_example/datasets",
@@ -84,11 +84,15 @@
     "hard_negative_manifest": "runs/landmarks/cdvit_fs68_profile_mix_example/hard_negative_mix/manifest.json",
     "progress_log": "runs/landmarks/cdvit_fs68_profile_mix_example/pipeline_progress.jsonl",
     "run_root": "runs/landmarks/cdvit_fs68_profile_mix_example",
+    "stage_signature_dir": "runs/landmarks/cdvit_fs68_profile_mix_example/stage_signatures",
     "train_command_json": "runs/landmarks/cdvit_fs68_profile_mix_example/train_command.json",
     "validation_report": "runs/landmarks/cdvit_fs68_profile_mix_example/training_manifest_validation.json"
   },
   "selected_stages": [
-    "build_dataset_manifests"
+    "build_dataset_manifests",
+    "build_hard_negative_manifest",
+    "validate_cdvit_manifest",
+    "train_cdvit"
   ],
   "training_signature": {
     "batch_size": 16,
