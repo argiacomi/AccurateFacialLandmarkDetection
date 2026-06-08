@@ -15,7 +15,7 @@ below.
 ## Datasets
 
 - `Dataset.py` -> `lib.landmarks.datasets.wflw`
-- `DatasetCOFW.py` -> `lib.landmarks.datasets.cofw`
+- `Datasetcofw68.py` -> `lib.landmarks.datasets.cofw`
 - `Dataset300W.py` -> `lib.landmarks.datasets.w300`
 - `DatasetFS68Manifest.py` -> `lib.landmarks.datasets.manifest`
 - `DatasetMultiSchemaLandmarkManifest.py` -> `lib.landmarks.datasets.multischema_manifest`

@@ -8,10 +8,10 @@ trainable landmark ``.npy`` file.
 Supported raw inputs by dataset:
 
 * WFLW: official 98-point annotation text plus images, or generic sources.
-* COFW: faceswap-style 68-point JSON export, or generic 68/98 landmark files.
+* cofw68: faceswap-style 68-point JSON export, or generic 68/98 landmark files.
 * 300W: iBUG ``.pts`` files plus same-stem images, JSON, ``.npy``, or ``.mat``.
 * AFLW2000-3D: same-stem ``.mat`` files with 68 2D/3D landmarks plus images.
-* HELEN, LaPa, JD-landmark, FFL2, FLL3, COFW original, XM2VTS, FRGC:
+* HELEN, LaPa, JD-landmark, fll2, FLL3, cofw68 original, XM2VTS, FRGC:
   native release layouts, with generic JSON/``.npy``/``.pts``/``.mat`` staging
   retained as a fallback.
 * MERL-RAV, Menpo2D, MultiPIE: JSON, ``.npy``, ``.pts``, ``.mat`` sources.
@@ -66,13 +66,12 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
 LANDMARK_EXTS = (".npy", ".pts", ".mat", ".txt")
 SUPPORTED_DATASETS = (
     "wflw",
-    "cofw",
-    "cofw-original",
+    "cofw68",
+    "cofw29",
     "helen",
-
     "lapa",
     "jd-landmark",
-    "ffl2",
+    "fll2",
     "fll3",
     "xm2vts",
     "frgc",
@@ -113,18 +112,18 @@ def _dataset(value: str) -> str:
         "300w": "300w",
         "300-w": "300w",
         "wflw": "wflw",
-        "cofw": "cofw",
-        "cofw-original": "cofw-original",
-        "cofw-original-29": "cofw-original",
-        "cofw29": "cofw-original",
-        "cofw-original-color": "cofw-original",
+        "cofw68": "cofw68",
+        "cofw29": "cofw29",
+        "cofw29-29": "cofw29",
+        "cofw29": "cofw29",
+        "cofw29-color": "cofw29",
         "helen": "helen",
         "lapa": "lapa",
         "jd": "jd-landmark",
         "jdlandmark": "jd-landmark",
         "jd-landmark": "jd-landmark",
         "jd-landmarks": "jd-landmark",
-        "ffl2": "ffl2",
+        "fll2": "fll2",
         "fll3": "fll3",
         "xm2vts": "xm2vts",
         "frgc": "frgc",
@@ -1065,7 +1064,7 @@ def _build_json(
 def _condition_for_landmark_file(dataset: str, path: Path, scenario: str) -> tuple[str, tuple[str, ...]]:
     parts = {_label(part) for part in path.parts}
     labels: list[str] = []
-    if dataset == "cofw":
+    if dataset == "cofw68":
         labels.append("occlusion")
     if dataset in {"300w", "w300"}:
         labels.append("anchor")
@@ -1208,9 +1207,9 @@ def _source_image_roots(root: Path, dataset: str) -> tuple[Path, ...]:
         "helen": ("images", "annotation", "annotations", "labels"),
         "lapa": ("images", "landmarks", "labels", "LaPa"),
         "jd-landmark": ("images", "landmarks", "labels"),
-        "ffl2": ("images", "landmarks", "labels"),
+        "fll2": ("images", "landmarks", "labels"),
         "fll3": ("images", "landmarks", "labels"),
-        "cofw-original": ("images", "annotations", "landmarks"),
+        "cofw29": ("images", "annotations", "landmarks"),
         "xm2vts": ("images", "annotations", "landmarks"),
         "frgc": ("images", "annotations", "landmarks"),
     }.get(dataset, ("images",))
@@ -2165,7 +2164,7 @@ def _build_jd_landmark(
 
 
 def _ffl_split_dirs(root: Path, dataset: str) -> list[tuple[Path, str]]:
-    if dataset == "ffl2":
+    if dataset == "fll2":
         candidates = [(root / "train", "train"), (root, "train")]
     else:
         base_candidates = [root / "FLL3_dataset", root]
@@ -2503,11 +2502,11 @@ def _build_subject_session_dataset(
     )
 
 
-def _cofw_original_mat_files(root: Path) -> list[tuple[Path, str]]:
+def _cofw68_original_mat_files(root: Path) -> list[tuple[Path, str]]:
     out: list[tuple[Path, str]] = []
     for path in sorted(root.rglob("*.mat"), key=lambda item: len(item.parts)):
         name = path.name.lower()
-        if "cofw" not in name:
+        if "cofw68" not in name:
             continue
         if "train" in name:
             out.append((path, "train"))
@@ -2530,7 +2529,7 @@ def _mat_first_key(payload: T.Mapping[str, T.Any], names: tuple[str, ...]) -> T.
     return None
 
 
-def _cofw_original_points_array(value: T.Any) -> list[np.ndarray]:
+def _cofw68_original_points_array(value: T.Any) -> list[np.ndarray]:
     if value is None:
         return []
     arr = np.asarray(value)
@@ -2568,7 +2567,7 @@ def _cofw_original_points_array(value: T.Any) -> list[np.ndarray]:
     return []
 
 
-def _cofw_original_image_array(value: T.Any) -> list[np.ndarray]:
+def _cofw68_original_image_array(value: T.Any) -> list[np.ndarray]:
     if value is None:
         return []
     arr = np.asarray(value)
@@ -2585,7 +2584,7 @@ def _cofw_original_image_array(value: T.Any) -> list[np.ndarray]:
     return []
 
 
-def _cofw_original_visibility(value: T.Any, count: int) -> list[list[bool]]:
+def _cofw68_original_visibility(value: T.Any, count: int) -> list[list[bool]]:
     if value is None:
         return [[True] * 29 for _ in range(count)]
     arr = np.asarray(value)
@@ -2601,15 +2600,22 @@ def _cofw_original_visibility(value: T.Any, count: int) -> list[list[bool]]:
         rows = []
     out: list[list[bool]] = []
     for row in rows[:count]:
-        # COFW stores occlusion flags in common releases: 1 means occluded.
+        # cofw68 stores occlusion flags in common releases: 1 means occluded.
         out.append([not bool(item) for item in np.asarray(row).reshape(-1)[:29]])
     while len(out) < count:
         out.append([True] * 29)
     return out
 
 
-def _write_cofw_original_image(output_dir: Path, sample_id: str, image: np.ndarray) -> Path:
-    path = output_dir / "images" / "cofw-original" / f"{_safe_id(sample_id).replace('/', '_')}.png"
+def _write_cofw68_original_image(
+    output_dir: Path, sample_id: str, image: np.ndarray
+) -> Path:
+    path = (
+        output_dir
+        / "images"
+        / "cofw29"
+        / f"{_safe_id(sample_id).replace('/', '_')}.png"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(image)
     if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
@@ -2625,7 +2631,7 @@ def _write_cofw_original_image(output_dir: Path, sample_id: str, image: np.ndarr
     write_arr = np.clip(write_arr, 0, 255).astype(np.uint8)
     ok = cv2.imwrite(str(path), write_arr)
     if not ok:
-        raise OSError(f"failed to write COFW original image: {path}")
+        raise OSError(f"failed to write cofw68 original image: {path}")
     return path
 
 
@@ -2638,14 +2644,18 @@ def _is_hdf5_mat(path: Path) -> bool:
         return False
 
 
-def _cofw_original_hdf5_arrays(
+def _cofw68_original_hdf5_arrays(
     path: Path,
     declared_split: str,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[list[bool]], list[list[float] | None]]:
+) -> tuple[
+    list[np.ndarray], list[np.ndarray], list[list[bool]], list[list[float] | None]
+]:
     try:
         import h5py
     except ImportError as err:
-        raise RuntimeError("h5py is required to read COFW original MATLAB v7.3 files") from err
+        raise RuntimeError(
+            "h5py is required to read cofw68 original MATLAB v7.3 files"
+        ) from err
 
     with h5py.File(path, "r") as handle:
         trainish = declared_split == "train"
@@ -2654,13 +2664,15 @@ def _cofw_original_hdf5_arrays(
         bboxes_key = "bboxesTr" if trainish and "bboxesTr" in handle else "bboxesT" if "bboxesT" in handle else None
         phis = np.asarray(handle[phis_key], dtype=np.float32)
         if phis.ndim != 2:
-            raise ValueError(f"COFW original phis must be 2D, got {phis.shape}")
+            raise ValueError(f"cofw68 original phis must be 2D, got {phis.shape}")
         if phis.shape[0] == 87:
             columns = [phis[:, index] for index in range(phis.shape[1])]
         elif phis.shape[1] == 87:
             columns = [phis[index, :] for index in range(phis.shape[0])]
         else:
-            raise ValueError(f"COFW original phis must have 87 rows/columns, got {phis.shape}")
+            raise ValueError(
+                f"cofw68 original phis must have 87 rows/columns, got {phis.shape}"
+            )
 
         points_rows = [
             np.stack((column[:29], column[29:58]), axis=1).astype(np.float32)
@@ -2676,8 +2688,8 @@ def _cofw_original_hdf5_arrays(
         for index in range(len(points_rows)):
             ref = image_refs[0, index] if image_refs.ndim == 2 and image_refs.shape[0] == 1 else image_refs[index]
             # Reorient to the annotation frame so 29-point landmarks/bboxes align
-            # (the COFW68 reader applies the same transpose).
-            images.append(_orient_cofw_hdf5_image(np.asarray(handle[ref])))
+            # (the cofw6868 reader applies the same transpose).
+            images.append(_orient_cofw68_hdf5_image(np.asarray(handle[ref])))
 
         bbox_rows: list[list[float] | None] = [None] * len(points_rows)
         if bboxes_key and bboxes_key in handle:
@@ -2691,7 +2703,7 @@ def _cofw_original_hdf5_arrays(
     return points_rows, images, visibility_rows, bbox_rows
 
 
-def _build_cofw_original(
+def _build_cofw68_original(
     root: Path,
     output_dir: Path,
     *,
@@ -2702,14 +2714,14 @@ def _build_cofw_original(
     allow_overlap: bool,
     image_root: str | None,
 ) -> Path:
-    mat_files = _cofw_original_mat_files(root)
+    mat_files = _cofw68_original_mat_files(root)
     if not mat_files:
         return _build_expected_schema_dataset(
             root,
             output_dir,
-            dataset="cofw-original",
+            dataset="cofw29",
             expected_schema="2d_29",
-            parser_name="cofw_original_29",
+            parser_name="cofw68_original_29",
             scenario=scenario,
             scenarios=scenarios,
             limit=limit,
@@ -2724,23 +2736,32 @@ def _build_cofw_original(
     for mat_path, declared_split in mat_files:
         try:
             if _is_hdf5_mat(mat_path):
-                points_rows, images, visibility_rows, bbox_rows = _cofw_original_hdf5_arrays(mat_path, declared_split)
+                points_rows, images, visibility_rows, bbox_rows = (
+                    _cofw68_original_hdf5_arrays(mat_path, declared_split)
+                )
             else:
                 if sio is None:
                     try:
                         import scipy.io as sio_module
                     except ImportError as err:
-                        raise RuntimeError("scipy is required to read COFW original .mat files") from err
+                        raise RuntimeError(
+                            "scipy is required to read cofw68 original .mat files"
+                        ) from err
                     sio = sio_module
                 payload = sio.loadmat(mat_path)
-                points_rows = _cofw_original_points_array(
-                    _mat_first_key(payload, ("phisTr", "phisT", "phis", "points", "landmarks"))
+                points_rows = _cofw68_original_points_array(
+                    _mat_first_key(
+                        payload, ("phisTr", "phisT", "phis", "points", "landmarks")
+                    )
                 )
-                images = _cofw_original_image_array(
+                images = _cofw68_original_image_array(
                     _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
                 )
-                visibility_rows = _cofw_original_visibility(
-                    _mat_first_key(payload, ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded")),
+                visibility_rows = _cofw68_original_visibility(
+                    _mat_first_key(
+                        payload,
+                        ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded"),
+                    ),
                     len(points_rows),
                 )
                 bbox_rows = [None] * len(points_rows)
@@ -2748,28 +2769,32 @@ def _build_cofw_original(
             skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
             continue
         for index, points in enumerate(points_rows):
-            sample_id = f"cofw_original/{declared_split}/{mat_path.stem}_{index:04d}"
+            sample_id = f"cofw68_original/{declared_split}/{mat_path.stem}_{index:04d}"
             try:
                 points29 = normalize_landmark_array(points, schema="2d_29")
                 if index < len(images):
-                    image_path = _write_cofw_original_image(output_dir, sample_id, images[index])
+                    image_path = _write_cofw68_original_image(
+                        output_dir, sample_id, images[index]
+                    )
                 else:
                     image = _matching_image(mat_path, root=Path(image_root) if image_root else root)
                     if image is None:
-                        raise FileNotFoundError("COFW original image not found in MAT or image root")
+                        raise FileNotFoundError(
+                            "cofw68 original image not found in MAT or image root"
+                        )
                     image_path = image
             except Exception as err:  # noqa: BLE001
                 skipped.append({"sample_id": sample_id, "reason": str(err)})
                 continue
             visibility = visibility_rows[index] if index < len(visibility_rows) else [True] * 29
             metadata = {
-                "dataset": "cofw-original",
-                "dataset_parser": "cofw_original_29",
+                "dataset": "cofw29",
+                "dataset_parser": "cofw68_original_29",
                 "parser_type": "dataset_specific",
                 "annotation_file": str(mat_path.resolve()),
                 "source_schema": "2d_29",
                 "split": declared_split,
-                "cofw_original_index": index,
+                "cofw68_original_index": index,
                 "occlusion_mask": [not bool(item) for item in visibility],
                 "landmark_score_visibility_mask": visibility,
             }
@@ -2780,12 +2805,14 @@ def _build_cofw_original(
                 _with_split(
                     _sample(
                         output_dir=output_dir,
-                        dataset="cofw-original",
+                        dataset="cofw29",
                         sample_id=sample_id,
                         image=image_path,
                         points68=points29,
                         condition=condition,
-                        conditions=tuple(dict.fromkeys((_label(condition), f"{declared_split}set"))),
+                        conditions=tuple(
+                            dict.fromkeys((_label(condition), f"{declared_split}set"))
+                        ),
                         source_schema="2d_29",
                         source_id=sample_id,
                         metadata=metadata,
@@ -2796,10 +2823,12 @@ def _build_cofw_original(
             )
 
     if not samples:
-        raise ValueError(f"no COFW original 29-point samples built; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no cofw68 original 29-point samples built; skipped={skipped[:10]}"
+        )
     return _write_manifest(
         output_dir,
-        "cofw-original",
+        "cofw29",
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,
@@ -2810,22 +2839,26 @@ def _build_cofw_original(
 
 
 
-def _cofw68_annotation_paths(root: Path) -> list[Path]:
+def _cofw6868_annotation_paths(root: Path) -> list[Path]:
     return sorted(
         path for path in root.rglob("*_points.mat")
         if path.is_file() and "test_annotations" in path.as_posix()
     )
 
 
-def _cofw_test_color_mat(root: Path) -> Path:
-    matches = sorted(root.rglob("COFW_test_color.mat"), key=lambda item: len(item.parts))
+def _cofw68_test_color_mat(root: Path) -> Path:
+    matches = sorted(
+        root.rglob("cofw68_test_color.mat"), key=lambda item: len(item.parts)
+    )
     if not matches:
-        raise FileNotFoundError(f"COFW_test_color.mat not found below {root}")
+        raise FileNotFoundError(f"cofw68_test_color.mat not found below {root}")
     return matches[0]
 
 
-def _cofw_test_bboxes(root: Path) -> np.ndarray | None:
-    matches = sorted(root.rglob("cofw68_test_bboxes.mat"), key=lambda item: len(item.parts))
+def _cofw68_test_bboxes(root: Path) -> np.ndarray | None:
+    matches = sorted(
+        root.rglob("cofw6868_test_bboxes.mat"), key=lambda item: len(item.parts)
+    )
     if not matches:
         return None
     try:
@@ -2837,17 +2870,19 @@ def _cofw_test_bboxes(root: Path) -> np.ndarray | None:
         return None
 
 
-def _cofw_annotation_index(path: Path) -> int:
+def _cofw68_annotation_index(path: Path) -> int:
     text = path.stem.replace("_points", "")
     return int(text) - 1
 
 
-def _cofw_points_and_occ(path: Path) -> tuple[np.ndarray, list[bool], dict[str, T.Any]]:
+def _cofw68_points_and_occ(
+    path: Path,
+) -> tuple[np.ndarray, list[bool], dict[str, T.Any]]:
     import scipy.io as sio
 
     payload = sio.loadmat(path)
     if "Points" not in payload:
-        raise ValueError(f"COFW68 annotation missing Points: {path}")
+        raise ValueError(f"cofw6868 annotation missing Points: {path}")
     points68, schema = _canonical_points(payload["Points"], source_schema="2d_68")
 
     occ_raw = payload.get("Occ")
@@ -2868,17 +2903,17 @@ def _cofw_points_and_occ(path: Path) -> tuple[np.ndarray, list[bool], dict[str, 
     return points68, visibility, metadata
 
 
-def _orient_cofw_hdf5_image(arr: np.ndarray) -> np.ndarray:
-    """Normalize a COFW HDF5 image plane to the annotation coordinate frame.
+def _orient_cofw68_hdf5_image(arr: np.ndarray) -> np.ndarray:
+    """Normalize a cofw68 HDF5 image plane to the annotation coordinate frame.
 
-    COFW MATLAB v7.3 (HDF5) stores image planes channel-first and with H/W
+    cofw68 MATLAB v7.3 (HDF5) stores image planes channel-first and with H/W
     swapped relative to the landmark/bbox frame. Points and bboxes only align
     once the channels are moved last and the spatial axes are transposed. This
-    applies to every COFW HDF5 image, so both the COFW68 and COFW-original
+    applies to every cofw68 HDF5 image, so both the cofw6868 and cofw29
     readers must use it.
     """
     arr = np.asarray(arr)
-    # COFW HDF5 images are usually channel-first: C,H,W.
+    # cofw68 HDF5 images are usually channel-first: C,H,W.
     if arr.ndim == 3 and arr.shape[0] in (1, 3, 4):
         arr = np.moveaxis(arr, 0, -1)
     if arr.ndim == 3:
@@ -2888,7 +2923,7 @@ def _orient_cofw_hdf5_image(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-def _cofw_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
+def _cofw68_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
     import h5py
 
     with h5py.File(mat_path, "r") as h5:
@@ -2896,7 +2931,7 @@ def _cofw_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
         ref = refs.reshape(-1)[index]
         arr = np.asarray(h5[ref])
 
-    arr = _orient_cofw_hdf5_image(arr)
+    arr = _orient_cofw68_hdf5_image(arr)
 
     if arr.ndim == 3 and arr.shape[-1] == 1:
         arr = arr[:, :, 0]
@@ -2905,17 +2940,17 @@ def _cofw_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
     return np.ascontiguousarray(arr)
 
 
-def _write_cofw_image(output_dir: Path, index: int, image: np.ndarray) -> Path:
+def _write_cofw68_image(output_dir: Path, index: int, image: np.ndarray) -> Path:
     from PIL import Image
 
-    path = output_dir / "images" / f"cofw_test_{index + 1:04d}.png"
+    path = output_dir / "images" / f"cofw68_test_{index + 1:04d}.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.is_file():
         Image.fromarray(image).save(path)
     return path
 
 
-def _build_cofw(
+def _build_cofw68(
     root: Path,
     output_dir: Path,
     *,
@@ -2925,21 +2960,21 @@ def _build_cofw(
     mode: str,
     allow_overlap: bool,
 ) -> Path:
-    color_mat = _cofw_test_color_mat(root)
-    annotations = _cofw68_annotation_paths(root)
-    boxes = _cofw_test_bboxes(root)
+    color_mat = _cofw68_test_color_mat(root)
+    annotations = _cofw6868_annotation_paths(root)
+    boxes = _cofw68_test_bboxes(root)
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
 
     for ann in annotations:
         try:
-            idx = _cofw_annotation_index(ann)
-            sample_id = f"cofw_test_{idx + 1:04d}"
-            split = _deterministic_split("cofw", sample_id)
-            points68, visibility, metadata = _cofw_points_and_occ(ann)
-            image_arr = _cofw_hdf5_image_by_index(color_mat, idx)
-            image_path = _write_cofw_image(output_dir, idx, image_arr)
+            idx = _cofw68_annotation_index(ann)
+            sample_id = f"cofw68_test_{idx + 1:04d}"
+            split = _deterministic_split("cofw68", sample_id)
+            points68, visibility, metadata = _cofw68_points_and_occ(ann)
+            image_arr = _cofw68_hdf5_image_by_index(color_mat, idx)
+            image_path = _write_cofw68_image(output_dir, idx, image_arr)
 
             raw_bbox = None
             if boxes is not None and 0 <= idx < len(boxes):
@@ -2947,15 +2982,15 @@ def _build_cofw(
                 x, y, width, height = raw_bbox
                 metadata["face_bbox_raw"] = raw_bbox
                 metadata["face_bbox_raw_format"] = "xywh"
-                metadata["face_bbox_raw_source"] = "cofw68_test_bboxes"
+                metadata["face_bbox_raw_source"] = "cofw6868_test_bboxes"
                 metadata["face_bbox"] = [x, y, x + width, y + height]
                 metadata["face_bbox_format"] = "ltrb"
-                metadata["face_bbox_source"] = "cofw68_test_bboxes"
+                metadata["face_bbox_source"] = "cofw6868_test_bboxes"
 
             metadata.update(
                 {
                     "annotation_file": str(ann.resolve()),
-                    "cofw_index": idx + 1,
+                    "cofw68_index": idx + 1,
                     "split": split,
                     "image_source_mat": str(color_mat.resolve()),
                     "source_schema": "2d_68",
@@ -2963,8 +2998,10 @@ def _build_cofw(
             )
 
             entry_for_crop = {"visibility": visibility}
-            visible_mask, visible_mask_source = _cofw_visibility_mask_and_source(entry_for_crop, metadata)
-            bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(
+            visible_mask, visible_mask_source = _cofw68_visibility_mask_and_source(
+                entry_for_crop, metadata
+            )
+            bbox_ltrb, bbox_source = _cofw68_choose_crop_bbox(
                 entry_for_crop,
                 metadata,
                 image_path,
@@ -2973,7 +3010,7 @@ def _build_cofw(
             )
             crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
                 output_dir=output_dir,
-                dataset="cofw",
+                dataset="cofw68",
                 sample_id=sample_id,
                 image_path=image_path,
                 points68=points68,
@@ -2997,7 +3034,7 @@ def _build_cofw(
             _with_split(
                 _sample(
                     output_dir=output_dir,
-                    dataset="cofw",
+                    dataset="cofw68",
                     sample_id=sample_id,
                     image=crop_image_path,
                     points68=crop_points68,
@@ -3013,11 +3050,11 @@ def _build_cofw(
         )
 
     if not samples:
-        raise ValueError(f"no COFW68 test samples built; skipped={skipped[:5]}")
+        raise ValueError(f"no cofw6868 test samples built; skipped={skipped[:5]}")
 
     return _write_manifest(
         output_dir,
-        "cofw",
+        "cofw68",
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,
@@ -3567,8 +3604,8 @@ def build(args: argparse.Namespace) -> Path:
     output_dir = Path(args.output_dir)
     scenarios = _parse_csv(args.scenarios)
     limit = None if not args.samples_per_scenario else int(args.samples_per_scenario)
-    if args.cofw_json and dataset != "cofw":
-        raise ValueError("--cofw-json is only valid with --dataset cofw")
+    if args.cofw68_json and dataset != "cofw68":
+        raise ValueError("--cofw68-json is only valid with --dataset cofw68")
 
     with _source_context(args.source_dir, args.source_zip) as root:
         if dataset == "wflw":
@@ -3583,10 +3620,10 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
             )
-        elif dataset == "cofw":
-            if args.cofw_json:
-                manifest_path = _build_cofw_json_cropped(
-                    Path(args.cofw_json),
+        elif dataset == "cofw68":
+            if args.cofw68_json:
+                manifest_path = _build_cofw68_json_cropped(
+                    Path(args.cofw68_json),
                     output_dir,
                     scenario=args.scenario,
                     scenarios=scenarios,
@@ -3597,8 +3634,10 @@ def build(args: argparse.Namespace) -> Path:
                 )
             else:
                 if root is None:
-                    raise ValueError("--source-dir or --source-zip is required for COFW")
-                manifest_path = _build_cofw(
+                    raise ValueError(
+                        "--source-dir or --source-zip is required for cofw68"
+                    )
+                manifest_path = _build_cofw68(
                     root,
                     output_dir,
                     scenario=args.scenario,
@@ -3619,10 +3658,12 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
             )
-        elif dataset == "cofw-original":
+        elif dataset == "cofw29":
             if root is None:
-                raise ValueError("--source-dir or --source-zip is required for COFW original")
-            manifest_path = _build_cofw_original(
+                raise ValueError(
+                    "--source-dir or --source-zip is required for cofw68 original"
+                )
+            manifest_path = _build_cofw68_original(
                 root,
                 output_dir,
                 scenario=args.scenario,
@@ -3671,7 +3712,7 @@ def build(args: argparse.Namespace) -> Path:
                 allow_overlap=args.allow_overlap,
                 image_root=args.image_root,
             )
-        elif dataset in {"ffl2", "fll3"}:
+        elif dataset in {"fll2", "fll3"}:
             if root is None:
                 raise ValueError(f"--source-dir or --source-zip is required for {dataset}")
             manifest_path = _build_ffl_family(
@@ -3720,7 +3761,9 @@ def build(args: argparse.Namespace) -> Path:
             )
         else:
             if root is None:
-                raise ValueError("--source-dir, --source-zip, --wflw-annotations, or --cofw-json is required")
+                raise ValueError(
+                    "--source-dir, --source-zip, --wflw-annotations, or --cofw68-json is required"
+                )
             manifest_path = _build_directory(
                 root,
                 output_dir,
@@ -3758,7 +3801,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-frames-per-video", type=int, default=None)
     parser.add_argument("--recursive", action="store_true", help="Accepted for compatibility; scans are recursive.")
     parser.add_argument("--wflw-annotations", default=None)
-    parser.add_argument("--cofw-json", default=None)
+    parser.add_argument("--cofw68-json", default=None)
     parser.add_argument("--write-overlays", action="store_true", help="Write visual landmark overlay audit images for built samples.")
     parser.add_argument("--audit-overlay-limit", type=int, default=50)
     parser.add_argument("--workers", type=int, default=1, help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).")
@@ -3789,14 +3832,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# COFW bbox helpers.
+# cofw68 bbox helpers.
 #
-# Some local COFW materializations mark benchmark boxes as ltrb even when the
+# Some local cofw68 materializations mark benchmark boxes as ltrb even when the
 # values are effectively xywh. Choose a bbox by checking whether it contains the
 # visible/valid landmarks. Fall back to visible-landmark bbox when the benchmark
 # bbox is inconsistent.
 # ---------------------------------------------------------------------------
-def _cofw_visibility_mask_and_source(entry, metadata):
+def _cofw68_visibility_mask_and_source(entry, metadata):
     raw = entry.get("visibility", metadata.get("visibility"))
     if isinstance(raw, (list, tuple)) and len(raw) == 68:
         return np.asarray([bool(v) for v in raw], dtype=bool), "visibility"
@@ -3805,7 +3848,7 @@ def _cofw_visibility_mask_and_source(entry, metadata):
     if isinstance(raw, (list, tuple)) and len(raw) == 68:
         return np.asarray([bool(v) for v in raw], dtype=bool), "landmark_score_visibility_mask"
 
-    # COFW Occ is occluded=True. If present, invert it.
+    # cofw68 Occ is occluded=True. If present, invert it.
     occ = metadata.get("occlusion", entry.get("occlusion"))
     if not isinstance(occ, (list, tuple)):
         occ = metadata.get("occlusion_mask")
@@ -3815,11 +3858,11 @@ def _cofw_visibility_mask_and_source(entry, metadata):
     return np.ones((68,), dtype=bool), "all_landmarks_fallback"
 
 
-def _cofw_visibility_mask_for_crop(entry, metadata):
-    return _cofw_visibility_mask_and_source(entry, metadata)[0]
+def _cofw68_visibility_mask_for_crop(entry, metadata):
+    return _cofw68_visibility_mask_and_source(entry, metadata)[0]
 
 
-def _cofw_bbox_candidates(entry, metadata):
+def _cofw68_bbox_candidates(entry, metadata):
     candidates = []
 
     def add(label, bbox, fmt):
@@ -3874,9 +3917,9 @@ def _cofw_bbox_candidates(entry, metadata):
 
     bbox = entry.get("face_bbox") or entry.get("bbox") or metadata.get("face_bbox") or metadata.get("bbox")
     if bbox is not None:
-        if "cofw" in source and raw_bbox is None:
+        if "cofw68" in source and raw_bbox is None:
             # The local builder has shown stale/misleading "ltrb" metadata for
-            # COFW. For COFW benchmark boxes, consider xywh first.
+            # cofw68. For cofw68 benchmark boxes, consider xywh first.
             add("face_bbox", bbox, "xywh")
             add("face_bbox", bbox, "ltrb")
         else:
@@ -3893,7 +3936,7 @@ def _cofw_bbox_candidates(entry, metadata):
     return out
 
 
-def _cofw_score_bbox_candidate(bbox_ltrb, points68, visible_mask, image_hw):
+def _cofw68_score_bbox_candidate(bbox_ltrb, points68, visible_mask, image_hw):
     try:
         left, top, right, bottom = _bbox_to_square_with_padding(
             bbox_ltrb,
@@ -3920,10 +3963,10 @@ def _cofw_score_bbox_candidate(bbox_ltrb, points68, visible_mask, image_hw):
     return count_inside, area
 
 
-def _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
+def _cofw68_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
     image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image_bgr is None:
-        raise FileNotFoundError(f"could not read COFW image: {image_path}")
+        raise FileNotFoundError(f"could not read cofw68 image: {image_path}")
     image_hw = image_bgr.shape[:2]
 
     visible_mask = np.asarray(visible_mask, dtype=bool)
@@ -3932,22 +3975,26 @@ def _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask):
     required = int(visible_mask.sum())
     best = None
 
-    for label, bbox in _cofw_bbox_candidates(entry, metadata):
-        score, area = _cofw_score_bbox_candidate(bbox, points68, visible_mask, image_hw)
+    for label, bbox in _cofw68_bbox_candidates(entry, metadata):
+        score, area = _cofw68_score_bbox_candidate(
+            bbox, points68, visible_mask, image_hw
+        )
         if best is None or score > best[0] or (score == best[0] and area < best[1]):
             best = (score, area, label, bbox)
 
     if best is not None and best[0] >= max(1, int(0.95 * required)):
-        return best[3], f"cofw_bbox_v2:{best[2]}"
+        return best[3], f"cofw68_bbox_v2:{best[2]}"
 
     # Benchmark bbox is inconsistent with visible landmarks. Use visible
     # landmarks to derive the crop. This is safer for CD-ViT than training on
     # exploded coordinates.
     pts = np.asarray(points68, dtype=np.float32)
-    return _bbox_from_points_xyxy(pts[visible_mask]), "cofw_bbox_v2:visible_landmark_bbox_fallback"
+    return _bbox_from_points_xyxy(
+        pts[visible_mask]
+    ), "cofw68_bbox_v2:visible_landmark_bbox_fallback"
 
 
-def _cofw_bbox4(value: T.Any) -> list[float] | None:
+def _cofw68_bbox4(value: T.Any) -> list[float] | None:
     if value is None:
         return None
     try:
@@ -3959,7 +4006,9 @@ def _cofw_bbox4(value: T.Any) -> list[float] | None:
     return values
 
 
-def _cofw_entry_is_materialized_crop(entry: T.Mapping[str, T.Any], metadata: T.Mapping[str, T.Any]) -> bool:
+def _cofw68_entry_is_materialized_crop(
+    entry: T.Mapping[str, T.Any], metadata: T.Mapping[str, T.Any]
+) -> bool:
     crop_bbox = entry.get("crop_bbox_xyxy") or metadata.get("crop_bbox_xyxy")
     crop_output_size = entry.get("crop_output_size") or metadata.get("crop_output_size")
     original_image = entry.get("original_image") or metadata.get("original_image")
@@ -3970,7 +4019,7 @@ def _cofw_entry_is_materialized_crop(entry: T.Mapping[str, T.Any], metadata: T.M
     return crop_bbox is not None or output_size == 256 or original_image is not None
 
 
-def _build_cofw_json_cropped(
+def _build_cofw68_json_cropped(
     path: Path,
     output_dir: Path,
     *,
@@ -3984,7 +4033,9 @@ def _build_cofw_json_cropped(
     payload = _read_json(path)
     entries = payload.get("samples", payload.get("entries", payload)) if isinstance(payload, dict) else payload
     if not isinstance(entries, list):
-        raise ValueError(f"COFW JSON source must contain list, entries, or samples list: {path}")
+        raise ValueError(
+            f"cofw68 JSON source must contain list, entries, or samples list: {path}"
+        )
 
     image_base = Path(image_root) if image_root else path.parent
     samples: list[dict[str, T.Any]] = []
@@ -3997,12 +4048,17 @@ def _build_cofw_json_cropped(
         metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
         image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
         landmark_value = entry.get("landmarks") or entry.get("points") or entry.get("ground_truth") or entry.get("pts")
-        sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or f"cofw/{idx:04d}")
+        sample_id = str(
+            entry.get("sample_id")
+            or entry.get("id")
+            or entry.get("name")
+            or f"cofw68/{idx:04d}"
+        )
 
-        if _cofw_entry_is_materialized_crop(entry, metadata):
+        if _cofw68_entry_is_materialized_crop(entry, metadata):
             raise ValueError(
-                "--cofw-json points to an already-cropped manifest entry "
-                f"{sample_id!r}; use raw COFW JSON/source instead"
+                "--cofw68-json points to an already-cropped manifest entry "
+                f"{sample_id!r}; use raw cofw68 JSON/source instead"
             )
 
         if image_value is None or landmark_value is None:
@@ -4018,11 +4074,15 @@ def _build_cofw_json_cropped(
                 source_schema=source_schema,
             )
             visibility = entry.get("visibility", metadata.get("visibility"))
-            visible_mask, visible_mask_source = _cofw_visibility_mask_and_source(entry, metadata)
-            bbox_ltrb, bbox_source = _cofw_choose_crop_bbox(entry, metadata, image_path, points68, visible_mask)
+            visible_mask, visible_mask_source = _cofw68_visibility_mask_and_source(
+                entry, metadata
+            )
+            bbox_ltrb, bbox_source = _cofw68_choose_crop_bbox(
+                entry, metadata, image_path, points68, visible_mask
+            )
             crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
                 output_dir=output_dir,
-                dataset="cofw",
+                dataset="cofw68",
                 sample_id=sample_id,
                 image_path=image_path,
                 points68=points68,
@@ -4039,7 +4099,11 @@ def _build_cofw_json_cropped(
             is_occluded = any(not bool(v) for v in visibility)
 
         explicit_split = _label(entry.get("split") or metadata.get("split") or "")
-        split = explicit_split if explicit_split in {"train", "test"} else _deterministic_split("cofw", sample_id)
+        split = (
+            explicit_split
+            if explicit_split in {"train", "test"}
+            else _deterministic_split("cofw68", sample_id)
+        )
 
         conds = _conditions(entry, "occlusion" if is_occluded else scenario)
         if is_occluded and "occlusion" not in conds:
@@ -4049,7 +4113,12 @@ def _build_cofw_json_cropped(
             conds = tuple(dict.fromkeys((*conds, split_condition)))
 
         merged_metadata = dict(metadata)
-        input_bbox = _cofw_bbox4(entry.get("face_bbox") or entry.get("bbox") or metadata.get("face_bbox") or metadata.get("bbox"))
+        input_bbox = _cofw68_bbox4(
+            entry.get("face_bbox")
+            or entry.get("bbox")
+            or metadata.get("face_bbox")
+            or metadata.get("bbox")
+        )
         if input_bbox is not None:
             merged_metadata.setdefault("face_bbox_input", input_bbox)
             input_format = str(
@@ -4066,11 +4135,16 @@ def _build_cofw_json_cropped(
                 or entry.get("bbox_source")
                 or metadata.get("face_bbox_source")
                 or metadata.get("bbox_source")
-                or "cofw_json"
+                or "cofw68_json"
             )
             merged_metadata.setdefault("face_bbox_input_source", input_source)
 
-        raw_bbox = _cofw_bbox4(entry.get("face_bbox_raw") or entry.get("bbox_raw") or metadata.get("face_bbox_raw") or metadata.get("bbox_raw"))
+        raw_bbox = _cofw68_bbox4(
+            entry.get("face_bbox_raw")
+            or entry.get("bbox_raw")
+            or metadata.get("face_bbox_raw")
+            or metadata.get("bbox_raw")
+        )
         if raw_bbox is not None:
             merged_metadata.setdefault("face_bbox_raw", raw_bbox)
             raw_format = str(
@@ -4086,7 +4160,7 @@ def _build_cofw_json_cropped(
                 or entry.get("bbox_raw_source")
                 or metadata.get("face_bbox_raw_source")
                 or metadata.get("bbox_raw_source")
-                or "cofw_json"
+                or "cofw68_json"
             )
             merged_metadata.setdefault("face_bbox_raw_source", raw_source)
 
@@ -4104,11 +4178,13 @@ def _build_cofw_json_cropped(
             _with_split(
                 _sample(
                     output_dir=output_dir,
-                    dataset="cofw",
+                    dataset="cofw68",
                     sample_id=sample_id,
                     image=crop_image_path,
                     points68=crop_points68,
-                    condition="occlusion" if is_occluded else str(entry.get("condition") or conds[0]),
+                    condition="occlusion"
+                    if is_occluded
+                    else str(entry.get("condition") or conds[0]),
                     conditions=tuple(_label(item) for item in conds),
                     source_schema=source_schema or detected_schema,
                     source_id=str(entry.get("source_id") or sample_id),
@@ -4120,11 +4196,13 @@ def _build_cofw_json_cropped(
         )
 
     if not samples:
-        raise ValueError(f"no cropped COFW JSON samples built; skipped={skipped[:10]}")
+        raise ValueError(
+            f"no cropped cofw68 JSON samples built; skipped={skipped[:10]}"
+        )
 
     return _write_manifest(
         output_dir,
-        "cofw",
+        "cofw68",
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,

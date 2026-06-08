@@ -1,5 +1,5 @@
-import torch
 import numpy as np
+
 try:
     from scipy.integrate import simps
 except ImportError:
@@ -17,7 +17,7 @@ def compute_fr_and_auc(nmes, thres=0.10, step=0.0001):
     return nme, fr, auc
 
 
-def GetNormCOFW(landmarks_gt):
+def GetNormcofw68(landmarks_gt):
     left = np.mean(landmarks_gt[[8, 12, 13, 10]], axis=0)
     right = np.mean(landmarks_gt[[9, 11, 14, 15]], axis=0)
     norm = np.linalg.norm(left - right)
@@ -37,7 +37,7 @@ def calc_nme(landmarks_pred, landmarks_gt, data_name="WFLW"):
     ION_list = []  # inner occular norm
     if data_name == "WFLW":
         norm_indices = [60, 72]  # WFLW
-    elif data_name == "COFW":
+    elif data_name == "cofw68":
         norm_indices = [16, 17]
 
     # target_w_size and preds : n, 98 , 2
@@ -48,8 +48,8 @@ def calc_nme(landmarks_pred, landmarks_gt, data_name="WFLW"):
         diff = target - pred
         if data_name == "WFLW":
             norm = np.linalg.norm(target[norm_indices[0]] - target[norm_indices[1]])
-        elif data_name == "COFW":
-            norm = GetNormCOFW(target)
+        elif data_name == "cofw68":
+            norm = GetNormcofw68(target)
         elif data_name in ("300W", "FS68Manifest"):
             norm = GetNorm300W(target)
         else:

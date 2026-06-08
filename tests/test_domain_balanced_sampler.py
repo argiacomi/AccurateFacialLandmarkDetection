@@ -3,10 +3,10 @@ import torch
 from lib.landmarks.training.data import batch_mix, legacy_domain_balanced_collate
 from lib.landmarks.training.domain_balanced_sampler import (
     DomainBalancedBatchSampler,
-    parse_target_spec_for_kind,
     parse_target_spec,
-    sample_dataset,
+    parse_target_spec_for_kind,
     sample_bucket,
+    sample_dataset,
 )
 
 
@@ -66,7 +66,7 @@ def test_dataset_target_aliases_reuse_split_safe_normalization():
 def test_domain_balanced_sampler_is_reproducible():
     samples = [
         _sample("wflw", "2d_98", "profile"),
-        _sample("cofw", "2d_68", "occlusion"),
+        _sample("cofw68", "2d_68", "occlusion"),
         _sample("300w", "2d_68", "anchor"),
         _sample("multipie", "multipie_profile_39", "profile_occlusion"),
     ]
@@ -129,7 +129,7 @@ def test_domain_balanced_sampler_infers_dataset_and_schema_targets():
     samples = [
         _sample("300W", "2d_68", "anchor"),
         _sample("WFLW", "2d_98", "profile"),
-        _sample("COFW", "2d_68", "occlusion"),
+        _sample("cofw68", "2d_68", "occlusion"),
     ]
     sampler = DomainBalancedBatchSampler(
         samples,
@@ -140,14 +140,18 @@ def test_domain_balanced_sampler_infers_dataset_and_schema_targets():
         seed=5,
     )
 
-    assert sampler.resolved_targets()["dataset"] == {"cofw": 1.0, "w300": 1.0, "wflw": 1.0}
+    assert sampler.resolved_targets()["dataset"] == {
+        "cofw68": 1.0,
+        "w300": 1.0,
+        "wflw": 1.0,
+    }
     assert sampler.resolved_targets()["schema"] == {"2d_68": 1.0, "2d_98": 1.0}
 
 
 def test_domain_balanced_sampler_falls_back_for_sparse_targets():
     samples = [
         _sample("wflw", "2d_98", "profile"),
-        _sample("cofw", "2d_68", "occlusion"),
+        _sample("cofw68", "2d_68", "occlusion"),
     ]
     sampler = DomainBalancedBatchSampler(
         samples,
@@ -182,7 +186,11 @@ def test_legacy_domain_balanced_collate_reports_mix():
             heatmap,
             weight,
             mask,
-            {"dataset": "300W", "source_schema": "2d_68", "hard_negative_bucket": "large_yaw"},
+            {
+                "dataset": "300W",
+                "source_schema": "2d_68",
+                "hard_negative_bucket": "large_yaw",
+            },
         ),
         (
             image,
@@ -190,7 +198,11 @@ def test_legacy_domain_balanced_collate_reports_mix():
             heatmap,
             weight,
             mask,
-            {"dataset": "COFW", "source_schema": "2d_68", "hard_negative_bucket": "occluded"},
+            {
+                "dataset": "cofw68",
+                "source_schema": "2d_68",
+                "hard_negative_bucket": "occluded",
+            },
         ),
     ]
 
@@ -199,6 +211,6 @@ def test_legacy_domain_balanced_collate_reports_mix():
     assert len(collated) == 5
     assert batch_mix(collated) == {
         "bucket": {"profile": 1, "occlusion": 1},
-        "dataset": {"w300": 1, "cofw": 1},
+        "dataset": {"w300": 1, "cofw68": 1},
         "schema": {"2d_68": 2},
     }

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import json
 import logging
 import os
 import shutil
@@ -29,7 +28,7 @@ IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
 WFLW_ANNOTATIONS_URL = "https://wywu.github.io/projects/LAB/support/WFLW_annotations.tar.gz"
 WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID = "1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC"
-COFW_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/COFW_color.zip"
+cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/cofw68_color.zip"
 MERL_RAV_LABELS_URL = "https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip"
 AFLW2000_3D_URL = "http://www.cbsr.ia.ac.cn/users/xiangyuzhu/projects/3DDFA/Database/AFLW2000-3D.zip"
 AFLW2000_3D_SHA256 = "252bc35274d65ff27b6e573aa96c2f4c116ad88452cc984fb882258c0ed6e2d8"
@@ -47,9 +46,9 @@ OFFICIAL_SOURCE_NOTES: dict[str, str] = {
         "Official WFLW is distributed as separate image and annotation downloads. "
         "Place both extracted parts in the cache or pass --source-dir/--source-zip."
     ),
-    "COFW": (
-        "Official COFW color images are available separately, but this builder expects "
-        "a COFW JSON export or complete local source bundle."
+    "cofw68": (
+        "Official cofw68 color images are available separately, but this builder expects "
+        "a cofw68 JSON export or complete local source bundle."
     ),
     "MERL-RAV": (
         "MERL-RAV labels are public, but AFLW images must be requested separately. "
@@ -107,8 +106,16 @@ WFLW_OFFICIAL_SOURCE = MultiDatasetSourceSpec(
     dataset="WFLW",
     cache_subdir="wflw",
     parts=(
-        MultiSourcePart(name="annotations", archive_name="WFLW_annotations.tar.gz", url=WFLW_ANNOTATIONS_URL),
-        MultiSourcePart(name="images", archive_name="WFLW_images.zip", google_drive_file_id=WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID),
+        MultiSourcePart(
+            name="annotations",
+            archive_name="WFLW_annotations.tar.gz",
+            url=WFLW_ANNOTATIONS_URL,
+        ),
+        MultiSourcePart(
+            name="images",
+            archive_name="WFLW_images.tar.gz",
+            google_drive_file_id=WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID,
+        ),
     ),
     manual_hint="Official WFLW requires both annotation and image downloads.",
 )

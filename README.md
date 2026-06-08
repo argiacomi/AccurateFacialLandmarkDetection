@@ -2,7 +2,7 @@
 
 Code for the WACV 2025 paper **"Cascaded Dual Vision Transformer for Accurate Facial Landmark Detection"**.
 
-This fork also includes a local schema-aware landmark manifest workflow for training CD-ViT from WFLW, COFW, 300W, AFLW2000-3D, MERL-RAV, Menpo2D, MultiPIE-style sources, and Faceswap production alignment directories.
+This fork also includes a local schema-aware landmark manifest workflow for training CD-ViT from WFLW, cofw68, 300W, AFLW2000-3D, MERL-RAV, Menpo2D, MultiPIE-style sources, and Faceswap production alignment directories.
 
 ## Setup
 
@@ -130,7 +130,7 @@ You can also let the CD-ViT pipeline build and include it automatically:
 
 ```bash
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
-  --dataset wflw,cofw,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
+  --dataset wflw,cofw68,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
   $(tr "\n" " " < runs/landmarks/quality_datasets/dataset_source_args.txt) \
   --prod-dir /path/to/production_dir_or_zip \
   --nproc-per-node 2 \
@@ -149,7 +149,7 @@ After running the setup script, launch the pipeline using the generated source a
 
 ```bash
 python tools/landmarks/run_cdvit_manifest_training_pipeline.py \
-  --dataset wflw,cofw,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
+  --dataset wflw,cofw68,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
   $(tr "\n" " " < runs/landmarks/quality_datasets/dataset_source_args.txt) \
   --nproc-per-node 2 \
   --batch-size 16 \

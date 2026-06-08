@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.landmarks import run_cdvit_manifest_training_pipeline as pipeline
 from lib.landmarks.pipeline.config import _extract_config_path, _merge_config_argv
+from tools.landmarks import run_cdvit_manifest_training_pipeline as pipeline
 
 
 def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(tmp_path: Path) -> None:
@@ -47,9 +47,9 @@ def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(tmp_path
         "--run-name",
         "cli_run",
         "--dataset",
-        "cofw",
+        "cofw68",
         "--dataset-source",
-        "cofw=cli/cofw",
+        "cofw68=cli/cofw68",
         "--batch-size",
         "16",
         "--train-arg",
@@ -67,11 +67,11 @@ def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(tmp_path
     # Scalar values are overridden by explicit CLI args because config-derived
     # tokens are prepended before user CLI tokens.
     assert args.run_name == "cli_run"
-    assert args.dataset == "cofw"
+    assert args.dataset == "cofw68"
     assert args.batch_size == 16
 
     # Append actions intentionally merge config entries with CLI entries.
-    assert args.dataset_source == ["wflw=config/wflw", "cofw=cli/cofw"]
+    assert args.dataset_source == ["wflw=config/wflw", "cofw68=cli/cofw68"]
     assert args.train_arg == ["--config-flag 1", "--cli-flag 2"]
     assert args.hard_negative_arg == ["--write-audit", "--total-samples 12"]
 
@@ -83,9 +83,12 @@ def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(tmp_path
 
     assert resolved["args"]["dry_run"] is True
     assert resolved["args"]["run_name"] == "cli_run"
-    assert resolved["args"]["dataset"] == "cofw"
+    assert resolved["args"]["dataset"] == "cofw68"
     assert resolved["args"]["batch_size"] == 16
-    assert resolved["args"]["dataset_source"] == ["wflw=config/wflw", "cofw=cli/cofw"]
+    assert resolved["args"]["dataset_source"] == [
+        "wflw=config/wflw",
+        "cofw68=cli/cofw68",
+    ]
     assert resolved["args"]["train_arg"] == ["--config-flag 1", "--cli-flag 2"]
     assert resolved["args"]["hard_negative_arg"] == ["--write-audit", "--total-samples 12"]
     assert resolved["selected_stages"] == ["build_dataset_manifests"]

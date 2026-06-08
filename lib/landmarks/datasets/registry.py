@@ -3,13 +3,12 @@ from lib.landmarks.core.manifest_aliases import (
     MANIFEST_DATA_NAME_ALIASES,
     IsSchemaAwareManifestDataset,
 )
-from lib.landmarks.datasets.cofw import LandmarkDataset as DCOFW
+from lib.landmarks.datasets.cofw import LandmarkDataset as Dcofw68
 from lib.landmarks.datasets.multischema_manifest import (
     LandmarkDataset as DMultiSchemaLandmarkManifest,
 )
 from lib.landmarks.datasets.w300 import LandmarkDataset as D300W
 from lib.landmarks.datasets.wflw import LandmarkDataset as DWFLW
-
 
 FS68_DATASET_NAME = LEGACY_MANIFEST_DATA_NAME
 SCHEMA_AWARE_MANIFEST_ALIASES = MANIFEST_DATA_NAME_ALIASES
@@ -39,8 +38,8 @@ def GetDataset(
             perturbation=perturbation,
             heatmap_size=heatmap_size,
         )
-    if name == "COFW":
-        return DCOFW(
+    if name == "cofw68":
+        return Dcofw68(
             data_root=data_root,
             split=split,
             preload=preload,

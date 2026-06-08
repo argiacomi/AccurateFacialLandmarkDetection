@@ -69,9 +69,9 @@ def test_issue8_dataset_choices_and_projection_statuses_are_registered():
         "helen",
         "lapa",
         "jd-landmark",
-        "ffl2",
+        "fll2",
         "fll3",
-        "cofw-original",
+        "cofw29",
         "xm2vts",
         "frgc",
         "300vw",
@@ -322,7 +322,12 @@ def test_jd_landmark_rejects_ambiguous_300w_cache_matches(tmp_path):
 @pytest.mark.parametrize(
     ("dataset", "landmark_rel", "image_rel", "bbox_rel"),
     [
-        ("ffl2", "train/landmark/sample.txt", "train/picture/sample.jpg", "train/bbox/sample.txt"),
+        (
+            "fll2",
+            "train/landmark/sample.txt",
+            "train/picture/sample.jpg",
+            "train/bbox/sample.txt",
+        ),
         (
             "fll3",
             "FLL3_dataset/train/landmark/sample.txt",
@@ -384,20 +389,20 @@ def test_lapa_parser_rejects_non_106_point_landmarks(tmp_path):
         )
 
 
-def test_cofw_original_json_path_preserves_29_point_visibility_and_head(tmp_path):
+def test_cofw68_original_json_path_preserves_29_point_visibility_and_head(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "out"
-    image_path = _write_image(source / "images" / "cofw.png")
+    image_path = _write_image(source / "images" / "cofw68.png")
     payload = {
         "samples": [
             {
-                "sample_id": "cofw/original/0001",
-                "dataset": "cofw-original",
+                "sample_id": "cofw68/original/0001",
+                "dataset": "cofw29",
                 "image": str(image_path.relative_to(source)),
                 "points": _points(29).tolist(),
                 "source_schema": "2d_29",
                 "visibility": ([1, 0] * 15)[:29],
-                "metadata": {"subject_id": "cofw-subject"},
+                "metadata": {"subject_id": "cofw68-subject"},
             }
         ]
     }
@@ -406,7 +411,7 @@ def test_cofw_original_json_path_preserves_29_point_visibility_and_head(tmp_path
     manifest_path = builder.build(
         _builder_args(
             "--dataset",
-            "cofw-original",
+            "cofw29",
             "--source-dir",
             str(source),
             "--output-dir",
@@ -420,12 +425,14 @@ def test_cofw_original_json_path_preserves_29_point_visibility_and_head(tmp_path
     assert sample["source_schema"] == "2d_29"
     assert sample["head_name"] == "landmarks_29"
     assert sample["visibility"][:2] == [1, 0]
-    assert sample["subject_id"] == "cofw-subject"
+    assert sample["subject_id"] == "cofw68-subject"
     assert manifest["heads"] == {"landmarks_29": 1}
     assert manifest["projection_status"] == {"not_projectable": 1}
 
 
-def test_cofw_original_mat_parser_preserves_29_point_visibility_and_occlusion(tmp_path):
+def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
+    tmp_path,
+):
     scipy = pytest.importorskip("scipy.io")
     source = tmp_path / "source"
     source.mkdir()
@@ -435,7 +442,7 @@ def test_cofw_original_mat_parser_preserves_29_point_visibility_and_occlusion(tm
     occlusions = np.zeros((1, 29), dtype=np.uint8)
     occlusions[0, 3] = 1
     scipy.savemat(
-        source / "COFW_train_color.mat",
+        source / "cofw68_train_color.mat",
         {
             "phisTr": points,
             "IsTr": images,
@@ -446,7 +453,7 @@ def test_cofw_original_mat_parser_preserves_29_point_visibility_and_occlusion(tm
     manifest_path = builder.build(
         _builder_args(
             "--dataset",
-            "cofw-original",
+            "cofw29",
             "--source-dir",
             str(source),
             "--output-dir",
@@ -462,11 +469,11 @@ def test_cofw_original_mat_parser_preserves_29_point_visibility_and_occlusion(tm
     assert sample["split"] == "train"
     assert sample["visibility"][3] is False
     assert sample["metadata"]["occlusion_mask"][3] is True
-    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
     assert manifest["projection_status"] == {"not_projectable": 1}
 
 
-def test_cofw_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_path):
+def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_path):
     h5py = pytest.importorskip("h5py")
     source = tmp_path / "source"
     source.mkdir()
@@ -478,7 +485,7 @@ def test_cofw_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_pa
     phis[58 + 3, 0] = 1.0
     image = np.full((3, 64, 64), 127, dtype=np.uint8)
 
-    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
         image_ds = handle.create_dataset("image_0000", data=image)
         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
         refs[0, 0] = image_ds.ref
@@ -488,7 +495,7 @@ def test_cofw_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_pa
     manifest_path = builder.build(
         _builder_args(
             "--dataset",
-            "cofw-original",
+            "cofw29",
             "--source-dir",
             str(source),
             "--output-dir",
@@ -502,10 +509,10 @@ def test_cofw_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_pa
     assert sample["visibility"][3] is False
     assert sample["metadata"]["bbox_xyxy"] == [1.0, 2.0, 30.0, 40.0]
     assert Path(sample["image"]).is_file()
-    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
 
 
-def test_cofw_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
+def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
     h5py = pytest.importorskip("h5py")
     source = tmp_path / "source"
     source.mkdir()
@@ -521,7 +528,7 @@ def test_cofw_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
     image = np.zeros((3, 60, 40), dtype=np.uint8)
     image[:, 5, 10] = 255  # white marker at annotation (x=5, y=10)
 
-    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
         image_ds = handle.create_dataset("image_0000", data=image)
         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
         refs[0, 0] = image_ds.ref
@@ -529,7 +536,12 @@ def test_cofw_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
 
     manifest_path = builder.build(
         _builder_args(
-            "--dataset", "cofw-original", "--source-dir", str(source), "--output-dir", str(output)
+            "--dataset",
+            "cofw29",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
         )
     )
     sample = _load_manifest(manifest_path)["samples"][0]

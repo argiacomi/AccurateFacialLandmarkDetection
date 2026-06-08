@@ -1,7 +1,6 @@
-import numpy as np
-from PIL import Image
-import cv2
 import random
+
+import cv2
 
 
 def flip_points(data_type="WFLW"):
@@ -181,7 +180,7 @@ def flip_points(data_type="WFLW"):
             96,
         ]
         assert len(points_flip) == 98
-    elif data_type == "COFW":
+    elif data_type == "cofw68":
         points_flip = [
             1,
             0,

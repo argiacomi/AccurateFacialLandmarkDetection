@@ -97,7 +97,7 @@ class LandmarkDataset(Dataset):
             transformed_keypoints = np.array(transformed_keypoints)
             img = transformed_image
             lmk = transformed_keypoints
-            img, lmk = random_flip(img, lmk, flip_points("COFW"), p=0.5)
+            img, lmk = random_flip(img, lmk, flip_points("cofw68"), p=0.5)
         img, lmk = self.MakeLMKInsideImage(img, lmk)
 
         if self.heatmap_size > 0:
@@ -117,7 +117,9 @@ class LandmarkDataset(Dataset):
 if __name__ == "__main__":
 
     heatmap_size = 32
-    dataset = LandmarkDataset("COFW", "train", True, aug=False, heatmap_size=heatmap_size)
+    dataset = LandmarkDataset(
+        "cofw68", "train", True, aug=False, heatmap_size=heatmap_size
+    )
     d = dataset[1]
 
     img, lmk0, heatmap = d

@@ -28,12 +28,12 @@ CHUNK_SIZE = 1024 * 1024
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
 ALL_DATASETS = (
     "wflw",
-    "cofw",
-    "cofw-original",
+    "cofw68",
+    "cofw29",
     "helen",
     "lapa",
     "jd-landmark",
-    "ffl2",
+    "fll2",
     "fll3",
     "xm2vts",
     "frgc",
@@ -114,56 +114,41 @@ SOURCES: tuple[SourceAsset, ...] = (
     SourceAsset(
         dataset="wflw",
         name="WFLW images",
-        filename="WFLW_images.zip",
+        filename="WFLW_images.tar.gz",
         google_drive_file_id="1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC",
         note="Official WFLW images.",
     ),
     SourceAsset(
-        dataset="cofw",
-        name="COFW color images",
-        filename="COFW_color.zip",
+        dataset="cofw68",
+        name="cofw68 color images",
+        filename="cofw68_color.zip",
         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
         required_for_builder=False,
-        note="COFW color image archive. Pair with COFW68 annotations/JSON for manifest building.",
+        note="cofw68 color image archive. Pair with cofw6868 annotations/JSON for manifest building.",
     ),
     SourceAsset(
-        dataset="cofw",
-        name="COFW68 benchmark annotations",
+        dataset="cofw68",
+        name="cofw6868 benchmark annotations",
         filename="cofw68-benchmark-master.zip",
         url="https://github.com/golnazghiasi/cofw68-benchmark/archive/master.zip",
-        note="COFW68 benchmark annotation repository. Convert/organize with COFW images before building.",
+        note="cofw6868 benchmark annotation repository. Convert/organize with cofw68 images before building.",
     ),
     SourceAsset(
-        dataset="cofw-original",
-        name="COFW original color images",
-        filename="COFW_color.zip",
+        dataset="cofw29",
+        name="cofw68 original color images",
+        filename="cofw68_color.zip",
         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
-        note="Original COFW 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
+        note="Original cofw68 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
     ),
     SourceAsset(
         dataset="helen",
         name="HELEN dense 194-point annotations",
-        filename="README_HELEN.md",
-        required_for_builder=False,
+        filename="annotations.json",
+        url="https://s3.amazonaws.com/helen-images/annotations.json",
         extract=False,
-        note="Use the dense annotations as an annotation layer over the existing 300W image cache.",
-        manual_steps=(
-            "Download annotations.json from https://s3.amazonaws.com/helen-images/annotations.json.",
-            "Keep Helen images in the existing 300W cache at data/300w/300w/helen/{trainset,testset}; do not duplicate them.",
-            "Build with: python tools/landmarks/build_quality_dataset.py --dataset helen --source-dir <annotations-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_helen",
-        ),
-    ),
-    SourceAsset(
-        dataset="lapa",
-        name="LaPa 106-point source notes",
-        filename="README_LAPA.md",
-        required_for_builder=False,
-        extract=False,
-        note="Manual staging is required; existing adapter reference is linked in issue #8.",
-        manual_steps=(
-            "Review https://github.com/argiacomi/faceswap-test-dev/blob/master/tools/automask/lapa_adapter.py for expected LaPa parsing details.",
-            "Stage images and 106-point annotations as images plus same-stem .pts/.txt/.npy/.mat files or a samples JSON.",
-            "Build with: python tools/landmarks/build_quality_dataset.py --dataset lapa --source-dir <staged-root> --output-dir runs/landmarks/build_lapa",
+        note=(
+            "Dense HELEN 194-point annotations. These are an annotation layer over "
+            "the existing 300W Helen image cache."
         ),
     ),
     SourceAsset(
@@ -192,26 +177,12 @@ SOURCES: tuple[SourceAsset, ...] = (
         note="Training face-detection bounding boxes attached as bbox metadata when available.",
     ),
     SourceAsset(
-        dataset="jd-landmark",
-        name="JD-landmark staging notes",
-        filename="README_JD_LANDMARK.md",
-        required_for_builder=False,
-        extract=False,
-        note="JD annotations are an annotation layer over the existing 300W image cache; only annotation/bbox artifacts are downloaded.",
-        manual_steps=(
-            "Download the base 300W images first: python tools/landmarks/download_landmark_datasets.py --datasets 300w --extract.",
-            "The builder maps names like AFW_134212_1_0.jpg.txt back to afw/134212_1.jpg in the 300W cache.",
-            "prepare_landmark_dataset.py stages Test_data1, Corrected_landmark, and training bbox into one source root automatically.",
-            "Manual build: python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <jd-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_jd_landmark",
-        ),
-    ),
-    SourceAsset(
-        dataset="ffl2",
-        name="FFL2 106-point source",
-        filename="FFL2.zip",
+        dataset="fll2",
+        name="fll2 106-point source",
+        filename="fll2.zip",
         google_drive_file_id="16fiVoBaTtOevQa4mH34rWggfkNKNEL2A",
         google_drive_view_url="https://drive.google.com/file/d/16fiVoBaTtOevQa4mH34rWggfkNKNEL2A/view",
-        note="FFL2 106-point source.",
+        note="fll2 106-point source.",
     ),
     SourceAsset(
         dataset="fll3",
@@ -358,15 +329,15 @@ def _dataset_key(value: str) -> str:
         "w300": "300w",
         "300w": "300w",
         "wflw": "wflw",
-        "cofw": "cofw",
-        "cofw-original": "cofw-original",
-        "cofw29": "cofw-original",
+        "cofw68": "cofw68",
+        "cofw29": "cofw29",
+        "cofw29": "cofw29",
         "helen": "helen",
         "lapa": "lapa",
         "jd": "jd-landmark",
         "jdlandmark": "jd-landmark",
         "jd-landmark": "jd-landmark",
-        "ffl2": "ffl2",
+        "fll2": "fll2",
         "fll3": "fll3",
         "xm2vts": "xm2vts",
         "frgc": "frgc",
@@ -382,7 +353,7 @@ def _dataset_key(value: str) -> str:
 def normalize_datasets(values: T.Iterable[str]) -> list[str]:
     """Normalize a mix of space- and comma-separated dataset tokens to canonical ids.
 
-    Accepts iterables like ``["wflw-v", "300vw,cofw-original"]`` and preserves the
+    Accepts iterables like ``["wflw-v", "300vw,cofw29"]`` and preserves the
     first-seen order while de-duplicating. ``all`` expands to every dataset id.
     """
     out: list[str] = []
@@ -761,8 +732,8 @@ def _print_build_hints(output_root: Path) -> None:
         f"python tools/landmarks/build_quality_dataset.py --dataset wflw --source-dir {output_root / 'wflw' / 'extracted'} --output-dir runs/landmarks/build_wflw"
     )
     print(
-        "  COFW: "
-        f"python tools/landmarks/build_quality_dataset.py --dataset cofw --source-dir {output_root / 'cofw' / 'extracted'} --output-dir runs/landmarks/build_cofw"
+        "  cofw68: "
+        f"python tools/landmarks/build_quality_dataset.py --dataset cofw68 --source-dir {output_root / 'cofw68' / 'extracted'} --output-dir runs/landmarks/build_cofw68"
     )
     print(
         "  300W: "
@@ -786,7 +757,7 @@ def _print_build_hints(output_root: Path) -> None:
     )
     print(
         "  Issue #8 still-image datasets: "
-        "use --dataset helen|lapa|jd-landmark|ffl2|fll3|cofw-original|xm2vts|frgc; each routes through a dataset-specific parser with native schema validation."
+        "use --dataset helen|lapa|jd-landmark|fll2|fll3|cofw29|xm2vts|frgc; each routes through a dataset-specific parser with native schema validation."
     )
     print(
         "  Issue #8 video datasets: "
@@ -861,7 +832,7 @@ def _parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         metavar="DATASET",
-        help="One or more datasets, space- and/or comma-separated (e.g. --datasets wflw-v 300vw,cofw-original). Use 'all' for everything.",
+        help="One or more datasets, space- and/or comma-separated (e.g. --datasets wflw-v 300vw,cofw29). Use 'all' for everything.",
     )
     parser.add_argument("--extract", action="store_true", help="Extract downloaded archives after download.")
     parser.add_argument(

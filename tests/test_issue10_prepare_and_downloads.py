@@ -149,10 +149,10 @@ def test_prepare_main_returns_130_on_interrupt(tmp_path, monkeypatch, capsys):
 # --datasets parsing
 # ---------------------------------------------------------------------------
 def test_normalize_datasets_space_and_comma():
-    assert downloader.normalize_datasets(["wflw-v", "300vw,cofw-original"]) == [
+    assert downloader.normalize_datasets(["wflw-v", "300vw,cofw29"]) == [
         "wflw-v",
         "300vw",
-        "cofw-original",
+        "cofw29",
     ]
 
 
@@ -229,9 +229,9 @@ def test_registry_reuse_merges_new_datasets(tmp_path):
 
 def test_resolve_source_dir_falls_back_without_registry(tmp_path):
     data_root = tmp_path / "data"
-    extracted = data_root / "cofw-original" / "extracted"
+    extracted = data_root / "cofw29" / "extracted"
     extracted.mkdir(parents=True)
-    assert downloader.resolve_source_dir({}, "cofw-original", data_root) == extracted
+    assert downloader.resolve_source_dir({}, "cofw29", data_root) == extracted
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +252,18 @@ def test_jd_landmark_source_artifacts_configured():
     )
 
 
-def test_jd_landmark_registry_entries_without_network(tmp_path):
+def test_jd_landmark_registry_entries_without_network(tmp_path, monkeypatch):
     data_root = tmp_path / "data"
+
+    def fake_download_google_drive(file_id, destination, *, force=False):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"fake jd landmark zip")
+        return destination
+
+    monkeypatch.setattr(
+        downloader, "_download_google_drive", fake_download_google_drive
+    )
+
     jd_assets = [s for s in downloader.SOURCES if s.dataset == "jd-landmark"]
     args = argparse.Namespace(
         output_root=data_root,
@@ -262,19 +272,27 @@ def test_jd_landmark_registry_entries_without_network(tmp_path):
         skip_checksum=True,
         keep_going=True,
     )
-    # Only process assets that do not require network (gdrive-without-flag and manual readme).
+
     results = [
         downloader._process_asset(asset, args)
         for asset in jd_assets
-        if asset.google_drive_file_id or asset.is_manual
+        if asset.google_drive_file_id
     ]
+
     downloader.write_registry(results, data_root)
     registry = downloader.load_registry(data_root)
 
     assert "jd-landmark" in registry["datasets"]
-    asset_names = {a["name"] for a in registry["datasets"]["jd-landmark"]["assets"]}
-    assert "JD-landmark Test_data1" in asset_names
-    assert all(a["manual"] for a in registry["datasets"]["jd-landmark"]["assets"])
+
+    assets = registry["datasets"]["jd-landmark"]["assets"]
+    by_name = {a["name"]: a for a in assets}
+
+    assert "JD-landmark Test_data1" in by_name
+    assert by_name["JD-landmark Test_data1"]["manual"] is False
+    assert by_name["JD-landmark Test_data1"]["status"] in {"downloaded", "reused"}
+
+    assert all(not a["manual"] for a in assets)
+    assert all(a["status"] != "manual_google_drive" for a in assets)
 
 
 def test_stage_jd_landmark_links_artifacts(tmp_path):
@@ -322,7 +340,7 @@ def test_list_table_marks_manual_and_gdrive():
     sources = downloader._selected_sources(["jd-landmark"], include_alternates=False)
     table = downloader.format_list_table(sources)
     assert "gdrive:12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm" in table
-    assert "manual (README_JD_LANDMARK.md)" in table
+
 
 
 # ---------------------------------------------------------------------------

@@ -110,9 +110,9 @@ class Vit(nn.Module):
         return self.body(x)
 
 
-class Vit_COFW_1(nn.Module):
+class Vit_cofw68_1(nn.Module):
     def __init__(self, max_depth=256):
-        super(Vit_COFW_1, self).__init__()
+        super(Vit_cofw68_1, self).__init__()
         self.body = nn.Sequential(
             PatchEmbed(256, 3, 16),
             SelfAttention_block3(16, win_size=4),
@@ -129,9 +129,9 @@ class Vit_COFW_1(nn.Module):
         return self.body(x)
 
 
-class Vit_COFW_2(nn.Module):
+class Vit_cofw68_2(nn.Module):
     def __init__(self, max_depth=256):
-        super(Vit_COFW_2, self).__init__()
+        super(Vit_cofw68_2, self).__init__()
         self.body = nn.Sequential(
             PatchEmbed(256, 3, 32),
             SelfAttention_block3(32, win_size=4),

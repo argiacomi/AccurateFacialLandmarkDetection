@@ -293,7 +293,7 @@ def _parser() -> argparse.ArgumentParser:
         nargs="+",
         required=True,
         metavar="DATASET",
-        help="One or more datasets, space- and/or comma-separated (e.g. --datasets wflw-v 300vw,cofw-original).",
+        help="One or more datasets, space- and/or comma-separated (e.g. --datasets wflw-v 300vw,cofw29).",
     )
     parser.add_argument(
         "--data-root",

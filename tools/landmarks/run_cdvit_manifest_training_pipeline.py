@@ -50,7 +50,7 @@ from lib.landmarks.training.checkpoint_compat import (
 from lib.landmarks.training.config import PipelineConfig, config_dict
 
 TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
-DEFAULT_DATASETS = "wflw,cofw,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
+DEFAULT_DATASETS = "wflw,cofw68,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
 MINED_MANIFEST_NAME = "manifest.json"
 PROGRESS_LOG_NAME = "pipeline_progress.jsonl"
 TRAIN_COMMAND_NAME = "train_command.json"
@@ -69,7 +69,7 @@ HARD_NEGATIVE_MANIFEST_FLAGS: dict[str, str] = {
     "wflw": "--wflw-manifest",
     "aflw2000-3d": "--aflw2000-manifest",
     "merl-rav": "--merl-rav-manifest",
-    "cofw": "--cofw-manifest",
+    "cofw68": "--cofw68-manifest",
     "menpo2d": "--menpo2d-manifest",
     "multipie": "--multipie-manifest",
     "300w": "--w300-manifest",
@@ -91,7 +91,7 @@ DATASET_ALIASES = {
     "300w": "300w",
     "300-w": "300w",
     "wflw": "wflw",
-    "cofw": "cofw",
+    "cofw68": "cofw68",
     "production": PRODUCTION_DATASET,
     "prod": PRODUCTION_DATASET,
     "prod-dir": PRODUCTION_DATASET,

@@ -1,69 +1,58 @@
 {
-  "description": "Example CD-ViT schema-aware facial landmark run using a hard-negative profile and occlusion mix.",
-  "output_root": "runs/landmarks",
-  "run_name": "cdvit_fs68_profile_mix_example",
-  "datasets": [
-    "wflw",
-    "cofw",
-    "merl-rav",
-    "aflw2000-3d",
-    "300w",
-    "menpo2d",
-    "multipie"
-  ],
-  "dataset_sources": {
-    "wflw": "data/landmarks/wflw/extracted",
-    "cofw": "data/landmarks/cofw/extracted",
-    "merl-rav": "data/landmarks/merl-rav/extracted",
-    "aflw2000-3d": "data/landmarks/aflw2000-3d/extracted",
-    "300w": "data/landmarks/300w/extracted",
-    "menpo2d": "data/landmarks/menpo2d/extracted",
-    "multipie": "data/landmarks/multipie/extracted"
-  },
-  "hard_negative": {
-    "write_audit": true,
-    "total_samples": 0,
-    "bucket_percentages": {
-      "profile_occlusion": 37.5,
-      "profile": 25.0,
-      "occlusion": 25.0,
-      "anchor": 12.5
+    "description": "Example CD-ViT schema-aware facial landmark run using a hard-negative profile and occlusion mix.",
+    "output_root": "runs/landmarks",
+    "run_name": "cdvit_fs68_profile_mix_example",
+    "datasets": ["wflw", "cofw68", "merl-rav", "aflw2000-3d", "300w", "menpo2d", "multipie"],
+    "dataset_sources": {
+        "wflw": "data/landmarks/wflw/extracted",
+        "cofw68": "data/landmarks/cofw68/extracted",
+        "merl-rav": "data/landmarks/merl-rav/extracted",
+        "aflw2000-3d": "data/landmarks/aflw2000-3d/extracted",
+        "300w": "data/landmarks/300w/extracted",
+        "menpo2d": "data/landmarks/menpo2d/extracted",
+        "multipie": "data/landmarks/multipie/extracted"
+    },
+    "hard_negative": {
+        "write_audit": true,
+        "total_samples": 0,
+        "bucket_percentages": {
+            "profile_occlusion": 37.5,
+            "profile": 25.0,
+            "occlusion": 25.0,
+            "anchor": 12.5
+        }
+    },
+    "training": {
+        "train_data_name": "FS68Manifest",
+        "nproc_per_node": 2,
+        "batch_size": 16,
+        "epoch": 500,
+        "heatmap_size": 32,
+        "lmk_num": 68,
+        "lr": 0.0001,
+        "train_arg": ["--schema-aware-training", "--auxiliary-heads"]
+    },
+    "runtime": {
+        "num_workers": 12,
+        "preload": 0,
+        "pin_memory": true,
+        "persistent_workers": true,
+        "prefetch_factor": 2,
+        "log_every": 20
+    },
+    "eval": {
+        "eval_batch_size": 8,
+        "eval_num_workers": 0,
+        "eval_every": 5,
+        "full_eval_every": 25,
+        "eval_ema_every": 5,
+        "eval_max_samples": 2048
+    },
+    "checkpoint": {
+        "auto_resume": true,
+        "save_last_checkpoint": true,
+        "save_legacy_epoch_state_dict": false,
+        "restore_rng": false,
+        "allow_incompatible_resume": false
     }
-  },
-  "training": {
-    "train_data_name": "FS68Manifest",
-    "nproc_per_node": 2,
-    "batch_size": 16,
-    "epoch": 500,
-    "heatmap_size": 32,
-    "lmk_num": 68,
-    "lr": 0.0001,
-    "train_arg": [
-      "--schema-aware-training",
-      "--auxiliary-heads"
-    ]
-  },
-  "runtime": {
-    "num_workers": 12,
-    "preload": 0,
-    "pin_memory": true,
-    "persistent_workers": true,
-    "prefetch_factor": 2,
-    "log_every": 20
-  },
-  "eval": {
-    "eval_batch_size": 8,
-    "eval_num_workers": 0,
-    "eval_every": 5,
-    "full_eval_every": 25,
-    "eval_ema_every": 5,
-    "eval_max_samples": 2048
-  },
-  "checkpoint": {
-    "auto_resume": true,
-    "save_last_checkpoint": true,
-    "save_legacy_epoch_state_dict": false,
-    "restore_rng": false,
-    "allow_incompatible_resume": false
-  }
 }

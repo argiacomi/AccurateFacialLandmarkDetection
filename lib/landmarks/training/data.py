@@ -5,12 +5,17 @@ import torch
 from torch.utils.data._utils.collate import default_collate
 
 from lib.landmarks.core.manifest_aliases import is_schema_aware_manifest_dataset
-from lib.landmarks.training.domain_balanced_sampler import sample_bucket, sample_dataset, sample_schema
 from lib.landmarks.training.auxiliary import (
     AUXILIARY_CLASS_INDEX,
     AUXILIARY_CLASS_NAMES,
     resolve_auxiliary_label,
 )
+from lib.landmarks.training.domain_balanced_sampler import (
+    sample_bucket,
+    sample_dataset,
+    sample_schema,
+)
+
 
 class LegacyBatchWithMix(tuple):
     """Tuple-compatible legacy batch with domain-mix diagnostics attached."""
@@ -27,7 +32,7 @@ def is_schema_aware_manifest_dataset_name(data_name):
 def landmark_count_for_dataset(args):
     if args.data_name == "WFLW":
         return 98
-    if args.data_name == "COFW":
+    if args.data_name == "cofw68":
         return 29
     if args.data_name == "300W":
         return 68

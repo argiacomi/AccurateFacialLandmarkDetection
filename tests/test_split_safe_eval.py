@@ -16,7 +16,12 @@ from lib.landmarks.evaluation.split_safe import (
 
 def test_leave_one_dataset_out_splits_heldout_dataset():
     wflw = {"sample_id": "a", "dataset": "wflw", "image": "a.jpg", "landmarks": "a.npy"}
-    cofw = {"sample_id": "b", "dataset": "cofw", "image": "b.jpg", "landmarks": "b.npy"}
+    cofw68 = {
+        "sample_id": "b",
+        "dataset": "cofw68",
+        "image": "b.jpg",
+        "landmarks": "b.npy",
+    }
 
     assert entry_in_eval_split(
         wflw,
@@ -26,7 +31,7 @@ def test_leave_one_dataset_out_splits_heldout_dataset():
         heldout_datasets=("wflw",),
     )
     assert not entry_in_eval_split(
-        cofw,
+        cofw68,
         1,
         split="test",
         eval_mode="leave_one_dataset_out",
@@ -40,7 +45,7 @@ def test_leave_one_dataset_out_splits_heldout_dataset():
         heldout_datasets=("wflw",),
     )
     assert entry_in_eval_split(
-        cofw,
+        cofw68,
         1,
         split="train",
         eval_mode="leave_one_dataset_out",
@@ -63,14 +68,14 @@ def test_dataset_modes_require_heldout_dataset():
             0,
             split="test",
             eval_mode="leave_one_dataset_out",
-            heldout_datasets=("wflw", "cofw"),
+            heldout_datasets=("wflw", "cofw68"),
         )
     assert entry_in_eval_split(
         {"sample_id": "a", "dataset": "wflw"},
         0,
         split="test",
         eval_mode="by_dataset",
-        heldout_datasets=("wflw", "cofw"),
+        heldout_datasets=("wflw", "cofw68"),
     )
 
 
@@ -222,7 +227,7 @@ def test_slice_report_includes_visible_occluded_and_visibility_metrics():
                 "visible_landmark_count": 1,
                 "occluded_landmark_count": 0,
                 "visibility_label_skipped_count": 2,
-                "by_dataset": "cofw",
+                "by_dataset": "cofw68",
                 "by_schema": "2d_68",
                 "by_hard_negative_bucket": "occlusion",
                 "by_pose_bucket": "frontal",

@@ -34,8 +34,8 @@ from lib.landmarks.manifest.contract import (
 logger = logging.getLogger(__name__)
 
 DATASET_DEFAULT_BUCKET: dict[str, str] = {
-    "cofw": "occlusion",
     "cofw68": "occlusion",
+    "cofw6868": "occlusion",
     "300w": "anchor",
     "w300": "anchor",
     "production_validated": "anchor",
@@ -107,7 +107,7 @@ MANIFEST_ARGS: tuple[tuple[str, str], ...] = (
     ("wflw_manifest", "wflw"),
     ("aflw2000_manifest", "aflw2000-3d"),
     ("merl_rav_manifest", "merl-rav"),
-    ("cofw_manifest", "cofw"),
+    ("cofw68_manifest", "cofw68"),
     ("menpo2d_manifest", "menpo2d"),
     ("multipie_manifest", "multipie"),
     ("w300_manifest", "300w"),
@@ -508,7 +508,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wflw-manifest", type=Path)
     parser.add_argument("--aflw2000-manifest", type=Path)
     parser.add_argument("--merl-rav-manifest", type=Path)
-    parser.add_argument("--cofw-manifest", type=Path)
+    parser.add_argument("--cofw68-manifest", type=Path)
     parser.add_argument("--menpo2d-manifest", type=Path)
     parser.add_argument("--multipie-manifest", type=Path)
     parser.add_argument("--w300-manifest", type=Path)

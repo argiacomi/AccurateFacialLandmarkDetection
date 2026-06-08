@@ -53,11 +53,15 @@ def test_aggregate_sampler_diagnostics_sums_across_ddp_ranks(monkeypatch):
         "requested_targets": rank0["requested_targets"],
         "actual_mix": {
             "bucket": {"profile": 1, "occlusion": 2},
-            "dataset": {"wflw": 1, "cofw": 2},
+            "dataset": {"wflw": 1, "cofw68": 2},
             "schema": {"2d_98": 1, "2d_68": 2},
         },
         "fallback_counts": {"exact": 1, "exact_to_bucket": 0, "bucket_to_any": 2},
-        "missing_targets": {"bucket": ["profile_occlusion"], "dataset": ["missing_b"], "schema": ["2d_39"]},
+        "missing_targets": {
+            "bucket": ["profile_occlusion"],
+            "dataset": ["missing_b"],
+            "schema": ["2d_39"],
+        },
         "rank": 1,
         "world_size": 2,
         "batches_per_rank": 3,
@@ -79,7 +83,7 @@ def test_aggregate_sampler_diagnostics_sums_across_ddp_ranks(monkeypatch):
     assert diagnostics["batches_per_rank"] == 3
     assert diagnostics["actual_mix"] == {
         "bucket": {"profile": 3, "occlusion": 2},
-        "dataset": {"wflw": 3, "cofw": 2},
+        "dataset": {"wflw": 3, "cofw68": 2},
         "schema": {"2d_98": 3, "2d_68": 2},
     }
     assert diagnostics["fallback_counts"] == {

@@ -153,14 +153,14 @@ build_dataset() {
 }
 
 WFLW_SOURCE="${WFLW_SOURCE:-${DATA_ROOT}/wflw/extracted}"
-COFW_SOURCE="${COFW_SOURCE:-${DATA_ROOT}/cofw/extracted}"
+cofw68_SOURCE="${cofw68_SOURCE:-${DATA_ROOT}/cofw68/extracted}"
 W300_SOURCE="${W300_SOURCE:-${DATA_ROOT}/300w/extracted}"
 AFLW2000_SOURCE="${AFLW2000_SOURCE:-${DATA_ROOT}/aflw2000-3d/extracted}"
 MENPO2D_SOURCE="${MENPO2D_SOURCE:-${DATA_ROOT}/menpo2d/extracted}"
 MULTIPIE_SOURCE="${MULTIPIE_SOURCE:-${DATA_ROOT}/multipie/extracted}"
 
 build_dataset wflw "${WFLW_SOURCE}" "${QUALITY_ROOT}/wflw"
-build_dataset cofw "${COFW_SOURCE}" "${QUALITY_ROOT}/cofw"
+build_dataset cofw68 "${cofw68_SOURCE}" "${QUALITY_ROOT}/cofw68"
 build_dataset 300w "${W300_SOURCE}" "${QUALITY_ROOT}/300w"
 build_dataset aflw2000-3d "${AFLW2000_SOURCE}" "${QUALITY_ROOT}/aflw2000-3d"
 build_dataset merl-rav "${MERL_RAV_ORGANIZED}" "${QUALITY_ROOT}/merl-rav"
@@ -173,7 +173,7 @@ build_dataset multipie "${MULTIPIE_SOURCE}" "${QUALITY_ROOT}/multipie"
 DATASET_SOURCE_ARGS="${QUALITY_ROOT}/dataset_source_args.txt"
 cat > "${DATASET_SOURCE_ARGS}" <<EOF
 --dataset-source wflw=${WFLW_SOURCE}
---dataset-source cofw=${COFW_SOURCE}
+--dataset-source cofw68=${cofw68_SOURCE}
 --dataset-source 300w=${W300_SOURCE}
 --dataset-source aflw2000-3d=${AFLW2000_SOURCE}
 --dataset-source merl-rav=${MERL_RAV_ORGANIZED}
@@ -186,4 +186,4 @@ printf 'Data root: %s\n' "${DATA_ROOT}"
 printf 'Quality manifests root: %s\n' "${QUALITY_ROOT}"
 printf 'Dataset-source args: %s\n' "${DATASET_SOURCE_ARGS}"
 printf '\nNext step example:\n'
-printf '  %s tools/landmarks/run_cdvit_manifest_training_pipeline.py --dataset wflw,cofw,300w,aflw2000-3d,merl-rav,menpo2d,multipie $(tr "\\n" " " < %s)\n' "${PYTHON}" "${DATASET_SOURCE_ARGS}"
+printf '  %s tools/landmarks/run_cdvit_manifest_training_pipeline.py --dataset wflw,cofw68,300w,aflw2000-3d,merl-rav,menpo2d,multipie $(tr "\\n" " " < %s)\n' "${PYTHON}" "${DATASET_SOURCE_ARGS}"
