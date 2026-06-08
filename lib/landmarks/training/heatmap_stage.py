@@ -30,7 +30,6 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.optim.lr_scheduler import StepLR
 
-from EMA import EMA
 from lib.landmarks.core.manifest_aliases import (
     CANONICAL_MANIFEST_DATA_NAME,
     LEGACY_MANIFEST_DATA_NAME,
@@ -73,6 +72,7 @@ from lib.landmarks.training.ddp import (
     is_rank_zero,
     setup_distributed_from_env,
 )
+from lib.landmarks.training.ema import EMA
 from lib.landmarks.training.eval_schedule import build_eval_schedule
 from lib.landmarks.training.evaluator import (
     eval_collate,

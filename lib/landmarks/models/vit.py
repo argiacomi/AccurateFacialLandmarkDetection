@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from coord_conv import CoordConvTh
-from Attention import *
+
+from lib.landmarks.models.attention import *
+from lib.landmarks.models.coord_conv import CoordConvTh
 
 
 class PatchEmbed(nn.Module):
@@ -19,20 +20,29 @@ class PatchEmbed(nn.Module):
 
         # self.project = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.project = CoordConvTh(
-            img_size[0], img_size[0], True, False, in_chans, embed_dim, kernel_size=3, stride=2, padding=1
+            img_size[0],
+            img_size[0],
+            True,
+            False,
+            in_chans,
+            embed_dim,
+            kernel_size=3,
+            stride=2,
+            padding=1,
         )
 
     def forward(self, x):
         B, C, H, W = x.shape
         # FIXME look at relaxing size constraints
-        assert (
-            H == self.img_size[0] and W == self.img_size[1]
-        ), f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        assert H == self.img_size[0] and W == self.img_size[1], (
+            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        )
 
         x = self.project(x)  # 第2步：通过2d卷积进行线性变换
         # x = x.flatten(2)  # 第3步：拉平生成线性变量
         # x = x.transpose(1, 2)  # 第4步：块的个数 与 每块的向量维度交换位置
         return x
+
 
 class PatchEmbed2(nn.Module):
     """Image to Patch Embedding"""
@@ -48,22 +58,39 @@ class PatchEmbed2(nn.Module):
         self.num_patches = num_patches
 
         self.project = nn.Sequential(
-            CoordConvTh(img_size[0], img_size[0], True, False, in_chans, embed_dim, kernel_size=3, stride=1, padding=1),
-            nn.Conv2d(embed_dim, embed_dim, kernel_size=patch_size, stride=stride, padding=(patch_size[0] - 1) // 2),
+            CoordConvTh(
+                img_size[0],
+                img_size[0],
+                True,
+                False,
+                in_chans,
+                embed_dim,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            ),
+            nn.Conv2d(
+                embed_dim,
+                embed_dim,
+                kernel_size=patch_size,
+                stride=stride,
+                padding=(patch_size[0] - 1) // 2,
+            ),
         )
 
     def forward(self, x):
         B, C, H, W = x.shape
         # FIXME look at relaxing size constraints
-        assert (
-            H == self.img_size[0] and W == self.img_size[1]
-        ), f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        assert H == self.img_size[0] and W == self.img_size[1], (
+            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        )
 
         x = self.project(x)  # 第2步：通过2d卷积进行线性变换
         # x = x.flatten(2)  # 第3步：拉平生成线性变量
         # x = x.transpose(1, 2)  # 第4步：块的个数 与 每块的向量维度交换位置
         return x
-    
+
+
 class Vit(nn.Module):
     def __init__(self, max_depth=256):
         super(Vit, self).__init__()
@@ -82,6 +109,7 @@ class Vit(nn.Module):
     def forward(self, x):
         return self.body(x)
 
+
 class Vit_COFW_1(nn.Module):
     def __init__(self, max_depth=256):
         super(Vit_COFW_1, self).__init__()
@@ -99,6 +127,8 @@ class Vit_COFW_1(nn.Module):
 
     def forward(self, x):
         return self.body(x)
+
+
 class Vit_COFW_2(nn.Module):
     def __init__(self, max_depth=256):
         super(Vit_COFW_2, self).__init__()
@@ -116,6 +146,8 @@ class Vit_COFW_2(nn.Module):
 
     def forward(self, x):
         return self.body(x)
+
+
 class Vit_2(nn.Module):
     def __init__(self, max_depth=256):
         super(Vit_2, self).__init__()
@@ -138,7 +170,8 @@ class Vit_2(nn.Module):
 
     def forward(self, x):
         return self.body(x)
-    
+
+
 class Vit_3(nn.Module):
     def __init__(self, max_depth=256):
         super(Vit_3, self).__init__()
@@ -156,8 +189,8 @@ class Vit_3(nn.Module):
 
     def forward(self, x):
         return self.body(x)
-    
-    
+
+
 class MixBlk(nn.Module):
     def __init__(self, in_channel, win_size=4):
         super(MixBlk, self).__init__()

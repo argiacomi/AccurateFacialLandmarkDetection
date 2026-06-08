@@ -11,8 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from loss_function import compute_fr_and_auc
-
+from lib.landmarks.training.loss_function import compute_fr_and_auc
 
 EVAL_MODES = ("random_hash", "by_dataset", "leave_one_dataset_out")
 SPLIT_POLICIES = ("declared_or_random_hash", "random_hash", "declared")

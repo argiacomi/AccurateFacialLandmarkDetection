@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from helpers import WSConv2d
+
+from lib.landmarks.models.blocks import WSConv2d
 
 
 class DoubleConvRes(nn.Module):
@@ -144,7 +145,6 @@ class UNet(nn.Module):
 
 
 if __name__ == "__main__":
-    import torchsummary
 
     net = UNet(
         [

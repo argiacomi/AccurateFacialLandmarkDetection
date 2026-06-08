@@ -1,66 +1,60 @@
 import os.path
+from glob import glob
+
+import cv2
+import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
-import numpy as np
-import cv2
-from glob import glob
-from PIL import Image
-from ImageAugmentation import GetAugTransform
-from DrawHeatmap import encoder_default, GenerateHeatmap
-from RandomFlip import *
+
+from lib.landmarks.training.augmentation import GetAugTransform
+from lib.landmarks.training.heatmap_targets import GenerateHeatmap
+from lib.landmarks.transforms.flip import *
+
 
 class LandmarkDataset(Dataset):
-    def __init__(self, data_root, split, preload=True, aug=True, perturbation=False, heatmap_size=0):
+    def __init__(self, data_root, split, preload=True, aug=True, heatmap_size=0, perturbation=0):
         super(LandmarkDataset, self).__init__()
         self.split = split
 
-        self.annotation = self.loadannotation(os.path.join(data_root, split + ".txt"))
-        self.image_files = glob(os.path.join(os.path.join(data_root, split, "*.jpg")))
+        img_files, lmk_files = self.loaddata(os.path.join(data_root, split + "_data"))
+        self.annotation_files = lmk_files
+        self.image_files = img_files
 
         self.data_list = None
         if preload:
-            self.data_list = self.loaditem_list(self.image_files, self.annotation)
+            self.data_list = self.loaditem_list(self.image_files, self.annotation_files)
         self.transform = transforms.Compose(
             [transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
         )
         self.aug_transform = None
         if aug:
             self.aug_transform = GetAugTransform()
-
-        self.perturbation = perturbation
-
         self.encoder = None
+        self.heatmap_size = heatmap_size
         if heatmap_size > 0:
-            assert not perturbation
-            self.heatmap_size = heatmap_size
-            self.encoder = encoder_default(256, 256, heatmap_size / 256)
             self.generateHM = GenerateHeatmap(heatmap_size)
 
-    def loadannotation(self, filename):
-        annotation = {}
-        with open(filename, "r") as fh:
-            for line in fh.readlines():
-                a = line.strip()
-                if a != "":
-                    items = a.split(" ")
-                    key = items[0]
-                    lmk = np.array([float(x) for x in items[1:]]).reshape((-1, 2)).astype(np.float32)
-                    annotation[key] = lmk * 255
-        return annotation
+    def loaddata(self, root_dir):
+        npy_files = glob(os.path.join(root_dir, "*.npy"))
+        img_files = []
+        for npy_file in npy_files:
+            img_file = npy_file[:-4] + ".png"
+            img_files.append(img_file)
+        return img_files, npy_files
 
-    def loaditem(self, image_file, annotation):
+    def loaditem(self, image_file, annotation_file):
         img = cv2.imread(image_file)[:, :, [2, 1, 0]]
         assert img.shape[0] == 256 and img.shape[1] == 256
-        image_name = image_file.split("/")[-1]
-        if self.split == "train":
-            image_name = image_name.replace("wflw_train_with_box", "wflw_train")
-        return img, annotation[image_name]
+        lmk = np.load(annotation_file).astype(np.float32)
+        return img, lmk
 
-    def loaditem_list(self, image_files, annotation):
+    def loaditem_list(self, image_files, annotation_files):
         data_list = []
-        for image_file in image_files:
-            (img, lmk) = self.loaditem(image_file, annotation)
+        for i in range(len(image_files)):
+            image_file = image_files[i]
+            (img, lmk) = self.loaditem(image_file, annotation_files[i])
             data_list.append((img, lmk))
         return data_list
 
@@ -92,7 +86,7 @@ class LandmarkDataset(Dataset):
 
     def __getitem__(self, item):
         if self.data_list is None:
-            img, lmk = self.loaditem(self.image_files[item], self.annotation)
+            img, lmk = self.loaditem(self.image_files[item], self.annotation_files[item])
         else:
             img, lmk = self.data_list[item]
 
@@ -103,29 +97,12 @@ class LandmarkDataset(Dataset):
             transformed_keypoints = np.array(transformed_keypoints)
             img = transformed_image
             lmk = transformed_keypoints
-            img, lmk = random_flip(img, lmk, flip_points("WFLW"), p=0.5)
+            img, lmk = random_flip(img, lmk, flip_points("COFW"), p=0.5)
         img, lmk = self.MakeLMKInsideImage(img, lmk)
-        if self.perturbation:
-            sampled_num = 8
-            perturbed_imgs = []
-            perturbed_lmks = []
-            img = torch.permute(img, (1, 2, 0)).numpy()
-            ldmks = (lmk * 255).numpy()
-            for i in range(sampled_num):
-                angle = 20 * i / (sampled_num - 1) - 10
-                rot = cv2.getRotationMatrix2D((128, 128), angle, 1)
-                warped_img = cv2.warpAffine(img, rot, (256, 256))
-                warped_lmks = np.transpose(rot[:2, :2] @ np.transpose(ldmks) + rot[:2, [2]])
-                perturbed_imgs.append(torch.from_numpy(warped_img).permute((2, 0, 1)))
-                perturbed_lmks.append((torch.from_numpy(warped_lmks) / 255))
-            perturbed_imgs = torch.stack(perturbed_imgs, dim=0)
-            perturbed_lmks = torch.stack(perturbed_lmks, dim=0)
-            return (perturbed_imgs, perturbed_lmks)
 
-        if self.encoder is not None:
+        if self.heatmap_size > 0:
             img = self.transform(img)
             lmk = torch.from_numpy(lmk / 255)
-            # heatmap = self.encoder.generate_heatmap(lmk * 255)
 
             heatmap = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
             heatmap = torch.from_numpy(heatmap)
@@ -140,10 +117,15 @@ class LandmarkDataset(Dataset):
 if __name__ == "__main__":
 
     heatmap_size = 32
-    dataset = LandmarkDataset("WFLW", "test", False, aug=False, heatmap_size=heatmap_size)
+    dataset = LandmarkDataset("COFW", "train", True, aug=False, heatmap_size=heatmap_size)
     d = dataset[1]
 
     img, lmk0, heatmap = d
+    # from loss import STARLoss
+    #
+    # loss_func = STARLoss()
+    # loss = loss_func(heatmap[None], lmk0[None])
+
     img = torch.permute((img + 1) / 2.0, (1, 2, 0))
     img = (img * 255).numpy().astype(np.uint8)
 
@@ -157,22 +139,24 @@ if __name__ == "__main__":
         cv2.circle(img, (x, y), 2, (0, 225, 255), 2)
     img = Image.fromarray(img)
     img.show()
+    # print(lmk)
 
     row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij")
     c = heatmap_size - 1
     row = row / c
     col = col / c
     yy_loc, xx_loc = row.reshape((1, heatmap_size, heatmap_size)), col.reshape((1, heatmap_size, heatmap_size))
-    heatmap = heatmap / torch.sum(heatmap, dim=[1, 2], keepdim=True)
+
     xx = (xx_loc * heatmap).sum(dim=[1, 2])
     yy = (yy_loc * heatmap).sum(dim=[1, 2])
     loc = torch.stack([xx, yy], dim=1)
     error = torch.nn.functional.l1_loss(loc, lmk / 255)
     print("#error", error)
     # heatmap = encoder.generate_heatmap(lmk)
+    print(torch.min((heatmap)), torch.max((heatmap)))
 
-    print(torch.sum(heatmap, dim=[1, 2]))
-    heatmap = torch.sum(heatmap, dim=0).unsqueeze(-1).repeat((1, 1, 3))
-    heatmap = (torch.clip(heatmap, 0, 1) * 255).numpy().astype(np.uint8)
-    heatmap = Image.fromarray(heatmap)
-    heatmap.show()
+    # print(torch.sum(heatmap, dim=[1, 2]))
+    # heatmap = torch.sum(heatmap[33:42], dim=0).unsqueeze(-1).repeat((1, 1, 3))
+    # heatmap = (torch.clip(heatmap, 0, 1) * 500).numpy().astype(np.uint8)
+    # heatmap = Image.fromarray(heatmap)
+    # heatmap.show()

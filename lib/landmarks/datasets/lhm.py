@@ -1,16 +1,19 @@
 import os.path
+from glob import glob
+
+import cv2
+import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
-import numpy as np
-import cv2
-from glob import glob
-from PIL import Image
-from ImageAugmentation import GetAugTransform
+
+from lib.landmarks.training.augmentation import GetAugTransform
+from lib.landmarks.training.heatmap_targets import GenerateLineHeatmap
 
 
 class LandmarkDataset(Dataset):
-    def __init__(self, data_root, split, preload=True, aug=True, perturbation=False):
+    def __init__(self, data_root, split, preload=True, aug=True, heatmap_size=0):
         super(LandmarkDataset, self).__init__()
         self.split = split
 
@@ -27,7 +30,9 @@ class LandmarkDataset(Dataset):
         if aug:
             self.aug_transform = GetAugTransform()
 
-        self.perturbation = perturbation
+        self.heatmap_size = heatmap_size
+        if self.heatmap_size > 0:
+            self.generateHM = GenerateLineHeatmap(heatmap_size)
 
     def loadannotation(self, filename):
         annotation = {}
@@ -43,6 +48,7 @@ class LandmarkDataset(Dataset):
 
     def loaditem(self, image_file, annotation):
         img = cv2.imread(image_file)[:, :, [2, 1, 0]]
+        assert img.shape[0] == 256 and img.shape[1] == 256
         image_name = image_file.split("/")[-1]
         if self.split == "train":
             image_name = image_name.replace("wflw_train_with_box", "wflw_train")
@@ -58,6 +64,29 @@ class LandmarkDataset(Dataset):
     def __len__(self):
         return len(self.image_files)
 
+    def MakeLMKInsideImage(self, img, lmk):
+        lt = np.min(lmk, axis=0)
+        rb = np.max(lmk, axis=0)
+        padding = 0
+        margin = 5
+        if lt[0] < margin:
+            padding = margin - lt[0]
+        if lt[1] < margin:
+            padding = max(margin - lt[1], padding)
+        if rb[0] > img.shape[1] - margin:
+            padding = max(padding, rb[0] - img.shape[1] + margin)
+        if rb[1] > img.shape[0] - margin:
+            padding = max(padding, rb[1] - img.shape[0] + margin)
+        if padding > 0:
+            padding = int(round(padding))
+            new_img = cv2.copyMakeBorder(img, padding, padding, padding, padding, cv2.BORDER_CONSTANT)
+            lmk = lmk + padding
+            lmk = lmk * img.shape[0] / new_img.shape[0]
+            new_img = cv2.resize(new_img, (img.shape[0], img.shape[1]))
+
+            return new_img, lmk
+        return img, lmk
+
     def __getitem__(self, item):
         if self.data_list is None:
             img, lmk = self.loaditem(self.image_files[item], self.annotation)
@@ -71,55 +100,48 @@ class LandmarkDataset(Dataset):
             transformed_keypoints = np.array(transformed_keypoints)
             img = transformed_image
             lmk = transformed_keypoints
+        img, lmk = self.MakeLMKInsideImage(img, lmk)
 
-        edges = cv2.Canny(img, 50, 50)
-        edges = torch.from_numpy(edges / 255).float()
         img = self.transform(img)
         lmk = torch.from_numpy(lmk / 255)
+        # heatmap = self.encoder.generate_heatmap(lmk * 255)
 
-        if self.perturbation:
-            sampled_num = 8
-            perturbed_imgs = []
-            perturbed_lmks = []
-            img = torch.permute(img, (1, 2, 0)).numpy()
-            ldmks = (lmk * 255).numpy()
-            for i in range(sampled_num):
-                angle = 20 * i / (sampled_num - 1) - 10
-                rot = cv2.getRotationMatrix2D((128, 128), angle, 1)
-                warped_img = cv2.warpAffine(img, rot, (256, 256))
-                warped_lmks = np.transpose(rot[:2, :2] @ np.transpose(ldmks) + rot[:2, [2]])
-                perturbed_imgs.append(torch.from_numpy(warped_img).permute((2, 0, 1)))
-                perturbed_lmks.append((torch.from_numpy(warped_lmks) / 255))
-            perturbed_imgs = torch.stack(perturbed_imgs, dim=0)
-            perturbed_lmks = torch.stack(perturbed_lmks, dim=0)
-            return (perturbed_imgs, perturbed_lmks)
-        return torch.cat([img, edges.unsqueeze(0)], dim=0), lmk
+        if self.heatmap_size > 0:
+            heatmap = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
+            heatmap = torch.from_numpy(heatmap)
+            return img, lmk, heatmap / torch.sum(heatmap, dim=-1, keepdim=True)
+        else:
+            return img, lmk
 
 
 if __name__ == "__main__":
 
-    dataset = LandmarkDataset("WFLW", "test", False, True, False)
+    heatmap_size = 32
+    dataset = LandmarkDataset("WFLW", "test", False, aug=False, heatmap_size=heatmap_size)
     d = dataset[1]
 
-    img_edge, lmk = d
-    img = img_edge[:3]
-    edges = img_edge[3]
+    img, lmk0, heatmap = d
+
     img = torch.permute((img + 1) / 2.0, (1, 2, 0))
     img = (img * 255).numpy().astype(np.uint8)
 
     img = np.ascontiguousarray(img)
-    lmk = lmk * 255
+    lmk = lmk0 * 255
 
     for i in range(lmk.shape[0]):
         p = lmk[i]
         x, y = round(float(p[0])), round(float(p[1]))
 
         cv2.circle(img, (x, y), 2, (0, 225, 255), 2)
-
-    edges = (edges * 255).unsqueeze(-1)
-
-    edges = np.ascontiguousarray(edges.repeat((1, 1, 3)).numpy().astype(np.uint8))
-
-    img = np.concatenate([img, edges], axis=1)
     img = Image.fromarray(img)
     img.show()
+
+    row = torch.arange(heatmap_size)
+    c = heatmap_size - 1
+    row = row / c
+    row = row.reshape((1, 1, heatmap_size))
+
+    loc = (row * heatmap).sum(dim=-1)
+
+    error = torch.nn.functional.l1_loss(loc, lmk / 255)
+    print("#error", error)

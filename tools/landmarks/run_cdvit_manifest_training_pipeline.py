@@ -32,8 +32,11 @@ from lib.landmarks.core.manifest_aliases import (
     LEGACY_MANIFEST_DATA_NAME,
     MANIFEST_DATA_NAME_ALIASES,
 )
+from lib.landmarks.datasets.manifest import (
+    build_manifest_index,
+    manifest_index_path,
+)
 from lib.landmarks.manifest.validator import validate_training_manifest
-from DatasetFS68Manifest import build_manifest_index, manifest_index_path
 from lib.landmarks.pipeline.config import (
     _extract_config_path,
     _json_safe_pipeline_value,

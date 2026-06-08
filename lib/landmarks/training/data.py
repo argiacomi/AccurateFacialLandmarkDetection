@@ -4,9 +4,8 @@ from __future__ import annotations
 import torch
 from torch.utils.data._utils.collate import default_collate
 
-from DatasetAll import GetDataset
 from lib.landmarks.core.manifest_aliases import is_schema_aware_manifest_dataset
-
+from lib.landmarks.datasets.registry import GetDataset
 
 AUXILIARY_CLASS_NAMES = {
     "pose_bucket": ("frontal", "profile", "profile_left", "profile_right"),

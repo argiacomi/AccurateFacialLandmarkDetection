@@ -14,9 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from Attention import SA2SA1_2
-from DatasetAll import GetDataset
 from lib.landmarks.core.schema import DEFAULT_SCHEMA_HEADS
+from lib.landmarks.datasets.registry import GetDataset
 from lib.landmarks.evaluation.split_safe import (
     EVAL_MODES,
     SPLIT_POLICIES,
@@ -26,13 +25,14 @@ from lib.landmarks.evaluation.split_safe import (
     write_eval_records_csv,
     write_eval_records_jsonl,
 )
+from lib.landmarks.models.attention import SA2SA1_2
+from lib.landmarks.models.cdvit import HeadingNet, VitAttnStage
 from lib.landmarks.training.evaluator import (
     _eval_collate,
     _evaluate_landmark_model,
     _print_eval_summary,
 )
 from lib.landmarks.training.heatmap_stage import FS68_DATASET_NAME
-from Net import HeadingNet, VitAttnStage
 
 
 def _backbone_for_heatmap_size(heatmap_size: int, max_depth: int):

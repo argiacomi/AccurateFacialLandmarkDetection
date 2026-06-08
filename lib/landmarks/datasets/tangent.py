@@ -1,12 +1,14 @@
 import os.path
+from glob import glob
+
+import cv2
+import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
-import numpy as np
-import cv2
-from glob import glob
-from PIL import Image
-from ImageAugmentation import GetAugTransform
+
+from lib.landmarks.training.augmentation import GetAugTransform
 
 
 class LandmarkDataset(Dataset):

@@ -5,6 +5,6 @@ compatibility. The implementation still lives in `DatasetFS68Manifest.py` during
 PR 1 to keep this rename low-risk.
 """
 
-from DatasetFS68Manifest import LandmarkDataset
+from lib.landmarks.datasets.manifest import LandmarkDataset
 
 __all__ = ["LandmarkDataset"]

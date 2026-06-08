@@ -1,7 +1,7 @@
-import math
 import torch
 import torch.nn as nn
-from UNet2 import DoubleConv
+
+from lib.landmarks.models.unet import DoubleConv
 
 
 class PositionalEncoding(nn.Module):  # @save
@@ -328,7 +328,7 @@ class MixBlk(nn.Module):
         f = torch.concat([f1, f2], dim=1)
         f = self.merge(f)
         return f
-    
+
 class SA2SA1(nn.Module):
     def __init__(self, img_size=32, channel_size=256, concat=True):
         super(SA2SA1, self).__init__()
@@ -442,7 +442,7 @@ class SA2SA1_3(nn.Module):
             return self.conv(c)
 
 
-        
+
 class SA2SA1_4(nn.Module):
     def __init__(self, img_size=32, channel_size=256, win_size=2, concat=True):
         super(SA2SA1_4, self).__init__()
@@ -469,7 +469,7 @@ class SA2SA1_4(nn.Module):
         else:
             c = torch.cat([self.sa3(x), self.sa2(x), self.sa1(x)], dim=1)
             return self.conv(c)
-        
+
 if __name__ == "__main__":
     x = torch.rand((2, 256, 32, 32))
     sa = SA2SA1_2(32, 256)

@@ -1,14 +1,11 @@
 import torch
-
-from helpers import bottleneck_IR_SE, get_block
-from UNet2 import UNet
-from coord_conv import CoordConvTh
-from Heatmap import Heatmap
 import torch.nn.functional as F
-from Vit import Vit
-from Attention import *
-import torchvision
-from Hourglass import Hourglass
+
+from lib.landmarks.models.attention import *
+from lib.landmarks.models.blocks import bottleneck_IR_SE, get_block
+from lib.landmarks.models.coord_conv import CoordConvTh
+from lib.landmarks.models.unet import UNet
+from lib.landmarks.training.Hourglass import Hourglass
 
 
 class HeadingNet(torch.nn.Module):
@@ -21,7 +18,9 @@ class HeadingNet(torch.nn.Module):
             # get_block(in_channel=channels[0], depth=channels[1], num_units=3),
         ]
         for i in range(len(channels) - 1):
-            blocks.append(get_block(in_channel=channels[i], depth=channels[i + 1], num_units=3))
+            blocks.append(
+                get_block(in_channel=channels[i], depth=channels[i + 1], num_units=3)
+            )
         units = []
         for bottlenecks in blocks:
             for b in bottlenecks:
@@ -46,7 +45,9 @@ class UNetStage(nn.Module):
     ):
         super(UNetStage, self).__init__()
         # assert heatmap_size == 32
-        assert max_depth == 256 or max_depth == 192 or max_depth == 128 or max_depth == 64
+        assert (
+            max_depth == 256 or max_depth == 192 or max_depth == 128 or max_depth == 64
+        )
 
         self.pre = backbone_net(max_depth)
 
@@ -57,7 +58,16 @@ class UNetStage(nn.Module):
             vit_list = []
             for num in range(num_dvit_per_pred_blk):
                 vit_list.append(
-                    CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1)
+                    CoordConvTh(
+                        heatmap_size,
+                        heatmap_size,
+                        True,
+                        False,
+                        max_depth,
+                        max_depth,
+                        kernel_size=3,
+                        padding=1,
+                    )
                 )
                 vit_list.append(Attn())
             block = nn.Sequential(*vit_list)
@@ -75,7 +85,11 @@ class UNetStage(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -191,7 +205,16 @@ class StackedHG(nn.Module):
             vit_list = []
             for num in range(num_dvit_per_pred_blk):
                 vit_list.append(
-                    CoordConvTh(heatmap_size, heatmap_size, True, False, max_depth, max_depth, kernel_size=3, padding=1)
+                    CoordConvTh(
+                        heatmap_size,
+                        heatmap_size,
+                        True,
+                        False,
+                        max_depth,
+                        max_depth,
+                        kernel_size=3,
+                        padding=1,
+                    )
                 )
                 vit_list.append(Attn())
             block = nn.Sequential(*vit_list)
@@ -212,7 +235,11 @@ class StackedHG(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -251,7 +278,9 @@ class StackedHG(nn.Module):
                 merged_feat = low_feat
             else:
                 if self.merge_oper == "cat":
-                    merged_feat = self.merge[i](torch.cat([low_feat, pre_output], dim=1))
+                    merged_feat = self.merge[i](
+                        torch.cat([low_feat, pre_output], dim=1)
+                    )
                 else:
                     merged_feat = low_feat + pre_output
             hm_basis = self.stages[i](merged_feat)
@@ -272,7 +301,9 @@ class StackedHG(nn.Module):
                 merged_feat = low_feat
             else:
                 if self.merge_oper == "cat":
-                    merged_feat = self.merge[i](torch.cat([pre_input, pre_output], dim=1))
+                    merged_feat = self.merge[i](
+                        torch.cat([pre_input, pre_output], dim=1)
+                    )
                 else:
                     merged_feat = pre_input + pre_output
             hm_basis = self.stages[i](merged_feat)
@@ -292,7 +323,8 @@ class StackedHG(nn.Module):
             return self.forward_long_skip(img)
         else:
             assert 0
-            
+
+
 class StackedHGCoraseAndFine(nn.Module):
     def __init__(
         self,

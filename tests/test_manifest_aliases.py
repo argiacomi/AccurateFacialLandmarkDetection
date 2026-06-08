@@ -17,9 +17,13 @@ augmentation_stub = types.ModuleType("ImageAugmentation")
 augmentation_stub.GetAugTransform = lambda: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
-from DatasetAll import GetDataset, IsSchemaAwareManifestDataset
-from DatasetFS68Manifest import LandmarkDataset as LegacyFS68Dataset
-from DatasetMultiSchemaLandmarkManifest import LandmarkDataset as MultiSchemaDataset
+from lib.landmarks.datasets.manifest import (
+    LandmarkDataset as LegacyFS68Dataset,
+)
+from lib.landmarks.datasets.multischema_manifest import (
+    LandmarkDataset as MultiSchemaDataset,
+)
+from lib.landmarks.datasets.registry import GetDataset, IsSchemaAwareManifestDataset
 
 MANIFEST_ALIASES = list(MANIFEST_DATA_NAME_ALIASES)
 

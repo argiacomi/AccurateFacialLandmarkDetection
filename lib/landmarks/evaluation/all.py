@@ -1,13 +1,14 @@
 import argparse
 import os
-import torch
-from DatasetAll import GetDataset
-from Net import VitAttnStage
-from Attention import SA2SA1_2, SelfAttention_block2, SelfAttention2_block
-from tqdm import tqdm
-from loss_function import calc_nme, compute_fr_and_auc
+
 import numpy as np
-from Net import HeadingNet
+import torch
+from tqdm import tqdm
+
+from lib.landmarks.datasets.registry import GetDataset
+from lib.landmarks.models.attention import SA2SA1_2
+from lib.landmarks.models.cdvit import HeadingNet, VitAttnStage
+from lib.landmarks.training.loss_function import calc_nme, compute_fr_and_auc
 
 
 def main():

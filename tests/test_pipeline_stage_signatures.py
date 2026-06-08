@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from lib.landmarks.datasets.manifest import manifest_index_path
 from tools.landmarks import run_cdvit_manifest_training_pipeline as pipeline
-from DatasetFS68Manifest import manifest_index_path
 
 
 def _args(tmp_path: Path):

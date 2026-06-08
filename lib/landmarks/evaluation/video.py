@@ -1,16 +1,15 @@
 import argparse
 import os.path
-import argparse
 
 import cv2
 import numpy as np
 from ledq_helpers import *
-from Net import VitAttnStageDenseConn, HeadingNet
-from Attention import SA2SA1_2,SelfAttention_block2, SelfAttention2_block
 from torchvision.transforms import transforms
-from glob import glob
-from loss_function import video_NME_NMJ
 from tqdm import tqdm
+
+from lib.landmarks.models.attention import SA2SA1_2
+from lib.landmarks.models.cdvit import HeadingNet, VitAttnStageDenseConn
+from lib.landmarks.training.loss_function import video_NME_NMJ
 
 
 def GetNet(ckpt="saved_ckpt/heading_net/bk_heading_sa2sa1_2_nstack8"):
@@ -112,4 +111,5 @@ def main():
     print(np.mean(nmes), np.mean(nmjs))
 
 
-main()
+if __name__ == "__main__":
+    main()

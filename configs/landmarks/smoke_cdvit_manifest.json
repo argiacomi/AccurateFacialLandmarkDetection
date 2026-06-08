@@ -1,0 +1,28 @@
+{
+  "description": "Small schema-aware CD-ViT manifest smoke run.",
+  "manifest": "runs/landmarks/cdvit_fs68_hard/hard_negative_mix/manifest.json",
+  "run_name": "smoke_cdvit_manifest",
+  "training": {
+    "epoch": 1,
+    "batch_size": 4,
+    "heatmap_size": 32,
+    "nproc_per_node": 1,
+    "train_data_name": "FS68Manifest"
+  },
+  "runtime": {
+    "num_workers": 0,
+    "preload": 0,
+    "persistent_workers": false,
+    "pin_memory": true
+  },
+  "eval": {
+    "eval_batch_size": 4,
+    "eval_every": 1,
+    "eval_max_samples": 32,
+    "eval_progress": false,
+    "eval_slice_reports_every": 1
+  },
+  "checkpoint": {
+    "save_last_checkpoint": true
+  }
+}

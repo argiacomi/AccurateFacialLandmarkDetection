@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os.path
 import time
 from pathlib import Path
 
@@ -10,8 +9,6 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
 
-from DrawHeatmap import GenerateHeatmap
-from RandomFlip import flip_points, random_flip
 from lib.landmarks.core.schema import (
     canonicalize_schema,
     flip_map_for_schema,
@@ -25,9 +22,11 @@ from lib.landmarks.evaluation.split_safe import (
     manifest_entry_split,
     normalize_heldout_datasets,
 )
+from lib.landmarks.training.heatmap_targets import GenerateHeatmap
+from lib.landmarks.transforms.flip import flip_points
 
 try:
-    from ImageAugmentation import GetAugTransform
+    from lib.landmarks.training.augmentation import GetAugTransform
 except ModuleNotFoundError:
     def GetAugTransform():
         raise ModuleNotFoundError("albumentations is required when schema-aware manifest aug=True")

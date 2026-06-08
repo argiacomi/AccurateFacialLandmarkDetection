@@ -1,13 +1,12 @@
 import torch
-from helpers import bottleneck_IR_SE, get_block, WSConv2d
 import torch.nn as nn
-from UNet3 import UNet
-import torchvision
 import torch.nn.functional as F
-from coord_conv import CoordConvTh
+import torchvision
 from scipy.io import loadmat
 from vit_pytorch import SimpleViT
 
+from lib.landmarks.models.blocks import WSConv2d, bottleneck_IR_SE
+from lib.landmarks.models.coord_conv import CoordConvTh
 
 
 class Res50(nn.Module):
@@ -17,15 +16,24 @@ class Res50(nn.Module):
         self.res50 = torchvision.models.resnet50(pretrained=True)
         self.lmk_num = lmk_num
 
-        self.linear = nn.Linear(2048, self.lmk_num*2)
+        self.linear = nn.Linear(2048, self.lmk_num * 2)
         self.res50.fc = self.linear
+
     def forward(self, img):
 
         r = self.res50(img)
-        return torch.sigmoid( r.reshape((-1, self.lmk_num,2)))
+        return torch.sigmoid(r.reshape((-1, self.lmk_num, 2)))
+
 
 class SimpleRegressor(nn.Module):
-    def __init__(self, basis_mat, lmk_num=98, regressing_transformation=False, basis_num=80, res_backone=True):
+    def __init__(
+        self,
+        basis_mat,
+        lmk_num=98,
+        regressing_transformation=False,
+        basis_num=80,
+        res_backone=True,
+    ):
         super(SimpleRegressor, self).__init__()
         if basis_num is None:
             basis_num = lmk_num * 2
@@ -34,7 +42,9 @@ class SimpleRegressor(nn.Module):
         self.basis_num = basis_num
 
         if res_backone:
-            self.backbone = torchvision.models.resnet50(torchvision.models.ResNet50_Weights.IMAGENET1K_V1)
+            self.backbone = torchvision.models.resnet50(
+                torchvision.models.ResNet50_Weights.IMAGENET1K_V1
+            )
             if not regressing_transformation:
                 self.head = nn.Linear(2048, basis_num)
             else:
@@ -83,7 +93,9 @@ class SimpleRegressor(nn.Module):
         B, _, _, _ = img.shape
         feat = self.backbone(img)
 
-        loc = torch.einsum("bi, ij->bj", feat[:, : self.basis_num], self.basis) + self.mu
+        loc = (
+            torch.einsum("bi, ij->bj", feat[:, : self.basis_num], self.basis) + self.mu
+        )
         loc = loc.reshape((-1, self.lmk_num, 2))
         if self.regress_transformation:
             angle = feat[:, [self.basis_num]]
@@ -113,17 +125,23 @@ class DoubleConv(nn.Module):
         if not mid_channel:
             mid_channel = out_channel
         self.double_conv = nn.Sequential(
-            WSConv2d(in_channel, mid_channel, kernel_size=3, stride=1, padding=1, bias=False),
+            WSConv2d(
+                in_channel, mid_channel, kernel_size=3, stride=1, padding=1, bias=False
+            ),
             nn.BatchNorm2d(mid_channel),
             nn.ReLU(inplace=True),
-            WSConv2d(mid_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False),
+            WSConv2d(
+                mid_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False
+            ),
             nn.BatchNorm2d(out_channel),
         )
 
         self.short_cut = (
             nn.Identity()
             if in_channel == out_channel
-            else WSConv2d(in_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False)
+            else WSConv2d(
+                in_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False
+            )
         )
 
         self.relu = nn.ReLU(inplace=True)
@@ -133,13 +151,19 @@ class DoubleConv(nn.Module):
         x = self.relu(x + self.short_cut(input))
         return x
 
+
 class LBottleNeck(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=17):
         super().__init__()
         self.conv1 = WSConv2d(in_channels, out_channels, 1)
         self.bn1 = nn.BatchNorm2d(out_channels)
 
-        self.conv2 = WSConv2d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.conv2 = WSConv2d(
+            out_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+        )
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.conv3 = WSConv2d(out_channels, out_channels, 1)
@@ -166,7 +190,7 @@ class LKernelBlock(nn.Module):
         super(LKernelBlock, self).__init__()
         self.lk = nn.Sequential(
             LBottleNeck(in_channels, out_channels, kernel_size=kernel_size),
-            MLP(out_channels, out_channels, num)
+            MLP(out_channels, out_channels, num),
         )
 
     def forward(self, x):
@@ -187,13 +211,18 @@ class LKernelNet(nn.Module):
             self.Conv(64, 64, 15),
             self.Conv(64, 64, 13),
             nn.MaxPool2d(2),
-            LKernelBlock(64, 64, 3, kernel_size=17), LKernelBlock(64, 64, 3, kernel_size=17), nn.MaxPool2d(2),
-            LKernelBlock(64, 128, 3, kernel_size=7), nn.MaxPool2d(2),
-            LKernelBlock(128, 256, 3, kernel_size=5), nn.MaxPool2d(2),
-            LKernelBlock(256, 512, 3, kernel_size=5), nn.MaxPool2d(2),
+            LKernelBlock(64, 64, 3, kernel_size=17),
+            LKernelBlock(64, 64, 3, kernel_size=17),
+            nn.MaxPool2d(2),
+            LKernelBlock(64, 128, 3, kernel_size=7),
+            nn.MaxPool2d(2),
+            LKernelBlock(128, 256, 3, kernel_size=5),
+            nn.MaxPool2d(2),
+            LKernelBlock(256, 512, 3, kernel_size=5),
+            nn.MaxPool2d(2),
             LKernelBlock(512, 1024, 8, kernel_size=5),
             nn.AvgPool2d(4),
-            nn.Flatten()
+            nn.Flatten(),
         )
         self.head = nn.Linear(1024, self.lmk_num * 2)
 
@@ -207,7 +236,6 @@ class LKernelNet(nn.Module):
         return lmk.reshape((B, self.lmk_num, 2))
 
 
-    
 class Res50PredictBasisCoefficients(nn.Module):
     def __init__(self, lmk_num=98):
         super(Res50PredictBasisCoefficients, self).__init__()
@@ -224,7 +252,11 @@ class Res50PredictBasisCoefficients(nn.Module):
         self.register_buffer("hm_basis", hm_basis, False)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -247,8 +279,16 @@ class Res50PredictBasisCoefficients(nn.Module):
     def GenerateBasis(self):
         # hm = np.zeros((len(lmk), self.img_size, self.img_size), dtype=np.float32)
         heatmap_size = 32
-        row = torch.arange(heatmap_size).reshape((heatmap_size, 1)).repeat((1, heatmap_size))
-        col = torch.arange(heatmap_size).reshape((1, heatmap_size)).repeat((heatmap_size, 1))
+        row = (
+            torch.arange(heatmap_size)
+            .reshape((heatmap_size, 1))
+            .repeat((1, heatmap_size))
+        )
+        col = (
+            torch.arange(heatmap_size)
+            .reshape((1, heatmap_size))
+            .repeat((heatmap_size, 1))
+        )
 
         self.grid_index = torch.stack([row, col], dim=2)
 
@@ -261,7 +301,7 @@ class Res50PredictBasisCoefficients(nn.Module):
             dist = torch.sqrt(torch.sum(dist * dist, dim=2))
             # hm_i = np.exp(-dist / 0.6)  # 64-0.6
             # hm_i = np.exp(-dist  / 0.75)  # 32-0.75
-            hm_i = torch.exp(-dist *dist / 1.0)  # 32-0.75
+            hm_i = torch.exp(-dist * dist / 1.0)  # 32-0.75
 
             # hm_i = hm_i / torch.sum(hm_i, dim=[0, 1], keepdim=True)
             hm[i] = hm_i
@@ -290,7 +330,6 @@ class Res50PredictBasisCoefficients(nn.Module):
         return coord, hm
 
 
-
 class Res50PredictBasisCoefficients2(nn.Module):
     def __init__(self, lmk_num=98):
         super(Res50PredictBasisCoefficients2, self).__init__()
@@ -305,12 +344,22 @@ class Res50PredictBasisCoefficients2(nn.Module):
         self.register_buffer("yy_loc", row_loc, False)
 
         self.head = nn.Conv2d(2048, self.lmk_num * 16, 1)
-        self.coord_conv1 = CoordConvTh(64, 64, True, False, 256, 256, kernel_size=3, padding=1)
-        self.coord_conv2 = CoordConvTh(32, 32, True, False, 512, 512, kernel_size=3, padding=1)
-        self.coord_conv3 = CoordConvTh(16, 16, True, False, 1024, 1024, kernel_size=3, padding=1)
+        self.coord_conv1 = CoordConvTh(
+            64, 64, True, False, 256, 256, kernel_size=3, padding=1
+        )
+        self.coord_conv2 = CoordConvTh(
+            32, 32, True, False, 512, 512, kernel_size=3, padding=1
+        )
+        self.coord_conv3 = CoordConvTh(
+            16, 16, True, False, 1024, 1024, kernel_size=3, padding=1
+        )
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -333,8 +382,16 @@ class Res50PredictBasisCoefficients2(nn.Module):
     def GenerateBasis(self):
         # hm = np.zeros((len(lmk), self.img_size, self.img_size), dtype=np.float32)
         heatmap_size = 32
-        row = torch.arange(heatmap_size).reshape((heatmap_size, 1)).repeat((1, heatmap_size))
-        col = torch.arange(heatmap_size).reshape((1, heatmap_size)).repeat((heatmap_size, 1))
+        row = (
+            torch.arange(heatmap_size)
+            .reshape((heatmap_size, 1))
+            .repeat((1, heatmap_size))
+        )
+        col = (
+            torch.arange(heatmap_size)
+            .reshape((1, heatmap_size))
+            .repeat((heatmap_size, 1))
+        )
 
         self.grid_index = torch.stack([row, col], dim=2)
 
@@ -371,19 +428,24 @@ class Res50PredictBasisCoefficients2(nn.Module):
         x = self.head(x)
 
         hm = x.reshape((B, self.lmk_num, 4, 4, 8, 8))
-        hm = torch.cat([hm[:, :, :, 0], hm[:, :, :, 1], hm[:, :, :, 2], hm[:, :, :, 3]], dim=-1)
+        hm = torch.cat(
+            [hm[:, :, :, 0], hm[:, :, :, 1], hm[:, :, :, 2], hm[:, :, :, 3]], dim=-1
+        )
         hm = torch.cat([hm[:, :, 0], hm[:, :, 1], hm[:, :, 2], hm[:, :, 3]], dim=-2)
 
         coord = self.GetCoord(hm)
         return coord, hm
-    
-    
+
+
 class Res50MultiResHM(nn.Module):
     def __init__(self, lmk_num=98):
         super(Res50MultiResHM, self).__init__()
         # self.res50 = torchvision.models.resnet101(pretrained=True)
         self.res50 = torchvision.models.resnet._resnet(
-            torchvision.models.resnet.Bottleneck, [8, 8, 8, 8], weights=None, progress=False
+            torchvision.models.resnet.Bottleneck,
+            [8, 8, 8, 8],
+            weights=None,
+            progress=False,
         )
         ckpt = torch.load("resnet101_8_8_8_8.pt")
         self.res50.load_state_dict(ckpt)
@@ -410,7 +472,11 @@ class Res50MultiResHM(nn.Module):
         self.short_cut2 = nn.Conv2d(512, 1024, 3, stride=2, padding=1)
 
     def make_grid(self, device="cpu", size=14):
-        row, col = torch.meshgrid(torch.arange(size, device=device), torch.arange(size, device=device), indexing="ij")
+        row, col = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
         c = size - 1.0
         row = row / c
         col = col / c
@@ -458,7 +524,8 @@ class Res50MultiResHM(nn.Module):
         coord8 = self.GetCoord8(hm8)
 
         return [(coord32, hm32), (coord16, hm16), (coord8, hm8)]
-    
+
+
 class Res50MultiTuckedUpHM(nn.Module):
     def __init__(self, lmk_num=98):
         super(Res50MultiTuckedUpHM, self).__init__()

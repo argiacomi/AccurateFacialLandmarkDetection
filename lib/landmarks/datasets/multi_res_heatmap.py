@@ -1,17 +1,20 @@
 import os.path
+from glob import glob
+
+import cv2
+import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
-import numpy as np
-import cv2
-from glob import glob
-from PIL import Image
-from ImageAugmentation import GetAugTransform
-from DrawHeatmap import GenerateLineHeatmap
+
+from lib.landmarks.training.augmentation import GetAugTransform
+from lib.landmarks.training.heatmap_targets import GenerateHeatmap, encoder_default
+from lib.landmarks.transforms.flip import *
 
 
 class LandmarkDataset(Dataset):
-    def __init__(self, data_root, split, preload=True, aug=True, heatmap_size=0):
+    def __init__(self, data_root, split, preload=True, aug=True, perturbation=False, heatmap_size=0):
         super(LandmarkDataset, self).__init__()
         self.split = split
 
@@ -27,10 +30,18 @@ class LandmarkDataset(Dataset):
         self.aug_transform = None
         if aug:
             self.aug_transform = GetAugTransform()
+            # self.aug_transform = AUGHIH
 
-        self.heatmap_size = heatmap_size
-        if self.heatmap_size > 0:
-            self.generateHM = GenerateLineHeatmap(heatmap_size)
+        self.perturbation = perturbation
+
+        self.encoder = None
+        if heatmap_size > 0:
+            assert not perturbation
+            self.heatmap_size = heatmap_size
+            self.encoder = encoder_default(256, 256, heatmap_size / 256)
+            self.generateHM = GenerateHeatmap(heatmap_size)
+            self.generateHM16 = GenerateHeatmap(16)
+            self.generateHM8 = GenerateHeatmap(8)
 
     def loadannotation(self, filename):
         annotation = {}
@@ -98,25 +109,54 @@ class LandmarkDataset(Dataset):
             transformed_keypoints = np.array(transformed_keypoints)
             img = transformed_image
             lmk = transformed_keypoints
+            img, lmk = random_flip(img, lmk, flip_points("WFLW"), p=0.5)
         img, lmk = self.MakeLMKInsideImage(img, lmk)
+        if self.perturbation:
+            sampled_num = 8
+            perturbed_imgs = []
+            perturbed_lmks = []
+            img = torch.permute(img, (1, 2, 0)).numpy()
+            ldmks = (lmk * 255).numpy()
+            for i in range(sampled_num):
+                angle = 20 * i / (sampled_num - 1) - 10
+                rot = cv2.getRotationMatrix2D((128, 128), angle, 1)
+                warped_img = cv2.warpAffine(img, rot, (256, 256))
+                warped_lmks = np.transpose(rot[:2, :2] @ np.transpose(ldmks) + rot[:2, [2]])
+                perturbed_imgs.append(torch.from_numpy(warped_img).permute((2, 0, 1)))
+                perturbed_lmks.append((torch.from_numpy(warped_lmks) / 255))
+            perturbed_imgs = torch.stack(perturbed_imgs, dim=0)
+            perturbed_lmks = torch.stack(perturbed_lmks, dim=0)
+            return (perturbed_imgs, perturbed_lmks)
+
+        if self.encoder is not None:
+            img = self.transform(img)
+            lmk = torch.from_numpy(lmk / 255)
+            # heatmap = self.encoder.generate_heatmap(lmk * 255)
+
+            hm32 = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
+            hm32 = torch.from_numpy(hm32)
+            hm32 = hm32 / torch.sum(hm32, dim=(1, 2), keepdim=True)
+
+            hm16 = self.generateHM16.Generate(lmk * (16 - 1))
+            hm16 = torch.from_numpy(hm16)
+            hm16 = hm16 / torch.sum(hm16, dim=(1, 2), keepdim=True)
+
+            hm8 = self.generateHM8.Generate(lmk * (8 - 1))
+            hm8 = torch.from_numpy(hm8)
+            hm8 = hm8 / torch.sum(hm8, dim=(1, 2), keepdim=True)
+
+            return img, lmk, hm32, hm16, hm8
 
         img = self.transform(img)
         lmk = torch.from_numpy(lmk / 255)
-        # heatmap = self.encoder.generate_heatmap(lmk * 255)
-
-        if self.heatmap_size > 0:
-            heatmap = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
-            heatmap = torch.from_numpy(heatmap)
-            return img, lmk, heatmap / torch.sum(heatmap, dim=-1, keepdim=True)
-        else:
-            return img, lmk
+        return img, lmk
 
 
 if __name__ == "__main__":
 
     heatmap_size = 32
-    dataset = LandmarkDataset("WFLW", "test", False, aug=False, heatmap_size=heatmap_size)
-    d = dataset[1]
+    dataset = LandmarkDataset("WFLW", "train", False, aug=True, heatmap_size=heatmap_size)
+    d = dataset[261]
 
     img, lmk0, heatmap = d
 
@@ -126,20 +166,43 @@ if __name__ == "__main__":
     img = np.ascontiguousarray(img)
     lmk = lmk0 * 255
 
+    ### bbox
+    lt = np.min(lmk.numpy(), axis=0).astype(np.int32)
+    br = np.max(lmk.numpy(), axis=0).astype(np.int32)
+    cv2.circle(img, (lt[0], lt[1]), 2, (0, 0, 255), 2)
+    cv2.circle(img, (br[0], br[1]), 2, (0, 0, 255), 2)
+
+    # print(255 - br, lt)
+    print(br - lt)
+
+    # exit(0)
+    ###
     for i in range(lmk.shape[0]):
         p = lmk[i]
         x, y = round(float(p[0])), round(float(p[1]))
-
         cv2.circle(img, (x, y), 2, (0, 225, 255), 2)
+        cv2.putText(img, str(i), (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 1, cv2.LINE_AA)
+
     img = Image.fromarray(img)
     img.show()
-
-    row = torch.arange(heatmap_size)
+    # print(lmk)
+    # exit(0)
+    row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij")
     c = heatmap_size - 1
     row = row / c
-    row = row.reshape((1, 1, heatmap_size))
+    col = col / c
+    yy_loc, xx_loc = row.reshape((1, heatmap_size, heatmap_size)), col.reshape((1, heatmap_size, heatmap_size))
 
-    loc = (row * heatmap).sum(dim=-1)
-
+    xx = (xx_loc * heatmap).sum(dim=[1, 2])
+    yy = (yy_loc * heatmap).sum(dim=[1, 2])
+    loc = torch.stack([xx, yy], dim=1)
     error = torch.nn.functional.l1_loss(loc, lmk / 255)
     print("#error", error)
+    # heatmap = encoder.generate_heatmap(lmk)
+    print(torch.min((heatmap)), torch.max((heatmap)))
+
+    # print(torch.sum(heatmap, dim=[1, 2]))
+    heatmap = torch.sum(heatmap[33:42], dim=0).unsqueeze(-1).repeat((1, 1, 3))
+    heatmap = (torch.clip(heatmap, 0, 1) * 500).numpy().astype(np.uint8)
+    heatmap = Image.fromarray(heatmap)
+    heatmap.show()

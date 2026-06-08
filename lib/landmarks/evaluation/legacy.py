@@ -1,12 +1,13 @@
 import argparse
-import os
-import torch
-from Dataset import LandmarkDataset
-from Net import VitAttnStage, VitAttnStageResSkip
-from Attention import SA2SA1_2, SelfAttention_block2, SelfAttention2_block
-from tqdm import tqdm
-from loss_function import calc_nme, compute_fr_and_auc
+
 import numpy as np
+import torch
+from tqdm import tqdm
+
+from lib.landmarks.datasets.wflw import LandmarkDataset
+from lib.landmarks.models.attention import SA2SA1_2
+from lib.landmarks.models.cdvit import VitAttnStage
+from lib.landmarks.training.loss_function import calc_nme, compute_fr_and_auc
 
 
 def main():
@@ -22,7 +23,7 @@ def main():
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=8)
 
 
-    
+
     net = (
         VitAttnStage(
             lmk_num=args.lmk_num,
@@ -55,7 +56,7 @@ def main():
             IONs = np.concatenate((IONs, ion_list), 0) if IONs is not None else ion_list
 
         nme, fr, auc = compute_fr_and_auc(IONs, thres=0.10, step=0.0001)
-        print(f"\n------------ test ------------")
+        print("\n------------ test ------------")
         print("NME %: {}".format(nme * 100))
         print("FR_{}% : {}".format(0.10, fr * 100))
         print("AUC_{}: {}".format(0.10, auc))

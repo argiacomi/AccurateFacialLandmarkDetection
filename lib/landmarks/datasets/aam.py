@@ -1,15 +1,16 @@
 import os.path
+from glob import glob
+
+import cv2
+import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
-import numpy as np
-import cv2
-from glob import glob
-from PIL import Image
-from ImageAugmentation import GetAugTransform
-from DrawHeatmap import encoder_default, GenerateHeatmap
-from RandomFlip import *
-from AUGHIH import AUGHIH
+
+from lib.landmarks.core.Config import WFLW_edge_info
+from lib.landmarks.training.augmentation import GetAugTransform
+from lib.landmarks.training.heatmap_targets import GenerateHeatmap, encoder_default
 
 
 class LandmarkDataset(Dataset):
@@ -29,7 +30,6 @@ class LandmarkDataset(Dataset):
         self.aug_transform = None
         if aug:
             self.aug_transform = GetAugTransform()
-            # self.aug_transform = AUGHIH
 
         self.perturbation = perturbation
 
@@ -39,8 +39,6 @@ class LandmarkDataset(Dataset):
             self.heatmap_size = heatmap_size
             self.encoder = encoder_default(256, 256, heatmap_size / 256)
             self.generateHM = GenerateHeatmap(heatmap_size)
-            self.generateHM16 = GenerateHeatmap(16)
-            self.generateHM8 = GenerateHeatmap(8)
 
     def loadannotation(self, filename):
         annotation = {}
@@ -108,7 +106,6 @@ class LandmarkDataset(Dataset):
             transformed_keypoints = np.array(transformed_keypoints)
             img = transformed_image
             lmk = transformed_keypoints
-            img, lmk = random_flip(img, lmk, flip_points("WFLW"), p=0.5)
         img, lmk = self.MakeLMKInsideImage(img, lmk)
         if self.perturbation:
             sampled_num = 8
@@ -132,19 +129,15 @@ class LandmarkDataset(Dataset):
             lmk = torch.from_numpy(lmk / 255)
             # heatmap = self.encoder.generate_heatmap(lmk * 255)
 
-            hm32 = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
-            hm32 = torch.from_numpy(hm32)
-            hm32 = hm32 / torch.sum(hm32, dim=(1, 2), keepdim=True)
+            point_heatmap = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
+            point_heatmap = torch.from_numpy(point_heatmap)
+            point_heatmap = point_heatmap / torch.sum(point_heatmap, dim=(1, 2), keepdim=True)
 
-            hm16 = self.generateHM16.Generate(lmk * (16 - 1))
-            hm16 = torch.from_numpy(hm16)
-            hm16 = hm16 / torch.sum(hm16, dim=(1, 2), keepdim=True)
+            edge_heatmap = self.generateHM.GenerateEdgeHeatmap((lmk * (self.heatmap_size - 1)).numpy(), WFLW_edge_info)
+            edge_heatmap = torch.from_numpy(edge_heatmap)
+            edge_heatmap = edge_heatmap / torch.sum(edge_heatmap, dim=(1, 2), keepdim=True)
 
-            hm8 = self.generateHM8.Generate(lmk * (8 - 1))
-            hm8 = torch.from_numpy(hm8)
-            hm8 = hm8 / torch.sum(hm8, dim=(1, 2), keepdim=True)
-
-            return img, lmk, hm32, hm16, hm8
+            return (img, lmk, point_heatmap, edge_heatmap)
 
         img = self.transform(img)
         lmk = torch.from_numpy(lmk / 255)
@@ -154,10 +147,14 @@ class LandmarkDataset(Dataset):
 if __name__ == "__main__":
 
     heatmap_size = 32
-    dataset = LandmarkDataset("WFLW", "train", False, aug=True, heatmap_size=heatmap_size)
-    d = dataset[261]
+    dataset = LandmarkDataset("WFLW", "test", False, aug=False, heatmap_size=heatmap_size)
+    d = dataset[1]
 
-    img, lmk0, heatmap = d
+    img, lmk0, heatmap, edge_hm = d
+    from loss import STARLoss
+
+    loss_func = STARLoss()
+    loss = loss_func(heatmap[None], lmk0[None])
 
     img = torch.permute((img + 1) / 2.0, (1, 2, 0))
     img = (img * 255).numpy().astype(np.uint8)
@@ -165,27 +162,15 @@ if __name__ == "__main__":
     img = np.ascontiguousarray(img)
     lmk = lmk0 * 255
 
-    ### bbox
-    lt = np.min(lmk.numpy(), axis=0).astype(np.int32)
-    br = np.max(lmk.numpy(), axis=0).astype(np.int32)
-    cv2.circle(img, (lt[0], lt[1]), 2, (0, 0, 255), 2)
-    cv2.circle(img, (br[0], br[1]), 2, (0, 0, 255), 2)
-
-    # print(255 - br, lt)
-    print(br - lt)
-
-    # exit(0)
-    ###
     for i in range(lmk.shape[0]):
         p = lmk[i]
         x, y = round(float(p[0])), round(float(p[1]))
-        cv2.circle(img, (x, y), 2, (0, 225, 255), 2)
-        cv2.putText(img, str(i), (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 1, cv2.LINE_AA)
 
+        cv2.circle(img, (x, y), 2, (0, 225, 255), 2)
     img = Image.fromarray(img)
     img.show()
     # print(lmk)
-    # exit(0)
+
     row, col = torch.meshgrid(torch.arange(heatmap_size), torch.arange(heatmap_size), indexing="ij")
     c = heatmap_size - 1
     row = row / c
@@ -201,7 +186,8 @@ if __name__ == "__main__":
     print(torch.min((heatmap)), torch.max((heatmap)))
 
     # print(torch.sum(heatmap, dim=[1, 2]))
-    heatmap = torch.sum(heatmap[33:42], dim=0).unsqueeze(-1).repeat((1, 1, 3))
-    heatmap = (torch.clip(heatmap, 0, 1) * 500).numpy().astype(np.uint8)
+    print(edge_hm[0].min(), edge_hm[0].max())
+    heatmap = edge_hm[0].unsqueeze(-1).repeat((1, 1, 3))
+    heatmap = (torch.clip(heatmap, 0, 1) * 10000).numpy().astype(np.uint8)
     heatmap = Image.fromarray(heatmap)
     heatmap.show()

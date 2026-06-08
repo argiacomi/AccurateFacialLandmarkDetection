@@ -3,18 +3,17 @@
                     optional: scale noise brightness sharpen contrast
 """
 
-import os
-from PIL import Image, ImageFilter
-import numpy as np
 import random
-from math import floor, ceil
-from RandomFlip import flip_points
+from math import ceil
+
+import numpy as np
+from PIL import Image, ImageFilter
 
 # !! Must do deep copy before data augmentation
 
 """
     args:
-        image: type is PIL.image 
+        image: type is PIL.image
         target: numpy array type, (landmark_num,2)
 """
 

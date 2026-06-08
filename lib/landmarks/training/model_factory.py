@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import typing as T
 
-from Attention import SA2SA1_2
-from Net import HeadingNet, VitAttnStage
 from lib.landmarks.core.schema import DEFAULT_SCHEMA_HEADS
+from lib.landmarks.models.attention import SA2SA1_2
+from lib.landmarks.models.cdvit import HeadingNet, VitAttnStage
 
 
 def build_backbone_net(heatmap_size: int) -> tuple[T.Callable[[int], HeadingNet], int]:

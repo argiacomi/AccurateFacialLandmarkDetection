@@ -12,10 +12,14 @@ augmentation_stub = types.ModuleType("ImageAugmentation")
 augmentation_stub.GetAugTransform = lambda: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
-from DatasetFS68Manifest import LandmarkDataset
+from lib.landmarks.core.schema import (
+    DEFAULT_SCHEMA_HEADS,
+    flip_map_for_schema,
+    head_name_for_schema,
+)
+from lib.landmarks.datasets.manifest import LandmarkDataset
 from lib.landmarks.training.data import _schema_aware_collate
 from lib.landmarks.training.evaluator import _eval_collate, _evaluate_landmark_model
-from lib.landmarks.core.schema import DEFAULT_SCHEMA_HEADS, flip_map_for_schema, head_name_for_schema
 from tools.landmarks.evaluate_cdvit_manifest import _dataset as standalone_eval_dataset
 
 
