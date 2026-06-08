@@ -18,6 +18,9 @@ scipy>=1.10
 gdown>=5.0
 tqdm>=4.65
 
+# Hyperparameter tuning
+optuna>=3.6
+
 # Logging/visualization helpers commonly used during training
 matplotlib>=3.7
 tensorboard>=2.12
