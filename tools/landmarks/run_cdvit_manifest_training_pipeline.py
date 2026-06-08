@@ -28,11 +28,9 @@ if str(CDVIT_ROOT) not in sys.path:
     sys.path.insert(0, str(CDVIT_ROOT))
 
 from lib.landmarks.core.manifest_aliases import (
-    CANONICAL_MANIFEST_DATA_NAME,
     LEGACY_MANIFEST_DATA_NAME,
     MANIFEST_DATA_NAME_ALIASES,
 )
-
 from lib.landmarks.manifest.validator import validate_training_manifest
 from lib.landmarks.pipeline.config import (
     _extract_config_path,
@@ -44,7 +42,6 @@ from lib.landmarks.training.checkpoint_compat import (
     checkpoint_compat_errors_for_config,
     training_compat_digest_from_config,
 )
-
 
 TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
 DEFAULT_DATASETS = "wflw,cofw,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
@@ -130,11 +127,6 @@ class PipelinePaths:
         object.__setattr__(self, "progress_log", self.run_root / PROGRESS_LOG_NAME)
         object.__setattr__(
             self, "train_command_json", self.run_root / TRAIN_COMMAND_NAME
-        )
-        object.__setattr__(
-            self,
-            "stage_signature_dir",
-            self.run_root / STAGE_SIGNATURE_DIR_NAME,
         )
         object.__setattr__(
             self,
@@ -255,8 +247,6 @@ def _write_json(path: Path, payload: T.Mapping[str, T.Any]) -> None:
     )
 
 
-
-
 def _resolved_pipeline_config(
     args: argparse.Namespace,
     paths: PipelinePaths,
@@ -281,7 +271,6 @@ def _resolved_pipeline_config(
         "training_signature_digest": _pipeline_training_signature_digest(args, paths),
     }
     return _json_safe_pipeline_value(payload)
-
 
 
 def _checkpoint_dir(args: argparse.Namespace, paths: PipelinePaths) -> Path:
@@ -317,7 +306,74 @@ def _json_digest(payload: T.Mapping[str, T.Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _path_fingerprint(path: Path | str | None) -> dict[str, T.Any]:
+def _directory_tree_fingerprint(path: Path) -> dict[str, T.Any]:
+    """Return a deterministic metadata fingerprint for a source directory.
+
+    This intentionally hashes relative path, file size, and mtime_ns rather than
+    reading every image byte. It is strong enough to invalidate stale manifest
+    stages when files are added/removed/replaced, while avoiding the worst-case
+    cost of hashing full image datasets just to decide whether a build stage can
+    be skipped.
+    """
+    digest = hashlib.sha256()
+    file_count = 0
+    dir_count = 0
+    total_size = 0
+    newest_mtime_ns = 0
+
+    try:
+        children = sorted(path.rglob("*"))
+    except OSError:
+        return {
+            "tree_digest": None,
+            "file_count": None,
+            "dir_count": None,
+            "total_size": None,
+            "newest_mtime_ns": None,
+            "error": "could not scan directory",
+        }
+
+    for child in children:
+        try:
+            stat = child.stat()
+            relative = child.relative_to(path).as_posix()
+        except OSError:
+            digest.update(f"E\\0{child}\\n".encode("utf-8", errors="surrogateescape"))
+            continue
+
+        newest_mtime_ns = max(newest_mtime_ns, int(stat.st_mtime_ns))
+        if child.is_file():
+            file_count += 1
+            total_size += int(stat.st_size)
+            digest.update(
+                f"F\\0{relative}\\0{int(stat.st_size)}\\0{int(stat.st_mtime_ns)}\\n".encode(
+                    "utf-8",
+                    errors="surrogateescape",
+                )
+            )
+        elif child.is_dir():
+            dir_count += 1
+            digest.update(
+                f"D\\0{relative}\\0{int(stat.st_mtime_ns)}\\n".encode(
+                    "utf-8",
+                    errors="surrogateescape",
+                )
+            )
+
+    return {
+        "tree_digest": digest.hexdigest(),
+        "file_count": file_count,
+        "dir_count": dir_count,
+        "total_size": total_size,
+        "newest_mtime_ns": newest_mtime_ns,
+    }
+
+
+def _path_fingerprint(
+    path: Path | str | None,
+    *,
+    recursive_dirs: bool = False,
+) -> dict[str, T.Any]:
     if path in (None, ""):
         return {
             "path": "",
@@ -333,27 +389,44 @@ def _path_fingerprint(path: Path | str | None) -> dict[str, T.Any]:
         "exists": path.exists(),
         "is_file": path.is_file(),
         "is_dir": path.is_dir(),
-        "sha256": _safe_sha256_file(path),
+        "sha256": _safe_sha256_file(path) if path.is_file() else None,
     }
+
     try:
         stat = path.stat()
     except OSError:
         return fingerprint
+
     fingerprint["size"] = int(stat.st_size)
     fingerprint["mtime_ns"] = int(stat.st_mtime_ns)
+
+    if path.is_dir() and recursive_dirs:
+        fingerprint.update(_directory_tree_fingerprint(path))
+
     return fingerprint
 
 
-def _path_fingerprints(paths: T.Iterable[Path | str]) -> dict[str, dict[str, T.Any]]:
+def _path_fingerprints(
+    paths: T.Iterable[Path | str],
+    *,
+    recursive_dirs: bool = False,
+) -> dict[str, dict[str, T.Any]]:
     fingerprints: dict[str, dict[str, T.Any]] = {}
     for raw_path in paths:
         path = Path(raw_path)
-        fingerprints[_normalize_path_for_signature(path)] = _path_fingerprint(path)
+        fingerprints[_normalize_path_for_signature(path)] = _path_fingerprint(
+            path,
+            recursive_dirs=recursive_dirs,
+        )
     return fingerprints
 
 
 def _tool_fingerprint(relative_path: str) -> dict[str, T.Any]:
     return _path_fingerprint(TOOLS_ROOT / relative_path)
+
+
+def _repo_file_fingerprint(relative_path: str) -> dict[str, T.Any]:
+    return _path_fingerprint(CDVIT_ROOT / relative_path)
 
 
 def _dataset_source_fingerprints(args: argparse.Namespace) -> dict[str, dict[str, T.Any]]:
@@ -366,7 +439,7 @@ def _dataset_source_fingerprints(args: argparse.Namespace) -> dict[str, dict[str
         paths.append(Path(args.source_zip))
     if _has_prod_dir(args):
         paths.append(Path(args.prod_dir))
-    return _path_fingerprints(paths)
+    return _path_fingerprints(paths, recursive_dirs=True)
 
 
 def _manifest_stage_common_args(args: argparse.Namespace) -> dict[str, T.Any]:
@@ -387,7 +460,7 @@ def _build_dataset_manifest_stage_request(
     paths: PipelinePaths,
 ) -> dict[str, T.Any]:
     return {
-        "version": 1,
+        "version": 2,
         "stage": "build_dataset_manifests",
         "args": {
             **_manifest_stage_common_args(args),
@@ -396,7 +469,7 @@ def _build_dataset_manifest_stage_request(
         },
         "commands": _dataset_build_commands(args, paths),
         "source_fingerprints": _dataset_source_fingerprints(args),
-        "outputs": _build_manifest_outputs(args, paths),
+        "output_paths": _build_manifest_outputs(args, paths),
         "tools": {
             "build_quality_dataset.py": _tool_fingerprint("build_quality_dataset.py"),
             "build_production_validated_manifest.py": (
@@ -416,7 +489,7 @@ def _hard_negative_manifest_stage_request(
     if args.exclude_image_ids_file is not None:
         inputs.append(Path(args.exclude_image_ids_file))
     return {
-        "version": 1,
+        "version": 2,
         "stage": "build_hard_negative_manifest",
         "args": {
             **_manifest_stage_common_args(args),
@@ -429,7 +502,7 @@ def _hard_negative_manifest_stage_request(
         },
         "command": _hard_negative_command(args, paths),
         "inputs": _path_fingerprints(inputs),
-        "outputs": [str(paths.hard_negative_manifest)],
+        "output_paths": [str(paths.hard_negative_manifest)],
         "tools": {
             "build_hard_negative_manifest.py": _tool_fingerprint(
                 "build_hard_negative_manifest.py"
@@ -443,7 +516,7 @@ def _validate_manifest_stage_request(
     paths: PipelinePaths,
 ) -> dict[str, T.Any]:
     return {
-        "version": 1,
+        "version": 2,
         "stage": "validate_cdvit_manifest",
         "args": {
             "skip_image_exists_check": bool(args.skip_image_exists_check),
@@ -455,9 +528,11 @@ def _validate_manifest_stage_request(
             "max_validation_examples": int(args.max_validation_examples),
         },
         "inputs": _path_fingerprints([Path(_pipeline_effective_manifest(args, paths))]),
-        "outputs": [str(paths.validation_report)],
+        "output_paths": [str(paths.validation_report)],
         "tools": {
-            "validator_module": "lib.landmarks.manifest.validator.validate_training_manifest",
+            "validator.py": _repo_file_fingerprint(
+                "lib/landmarks/manifest/validator.py"
+            ),
         },
     }
 
@@ -493,7 +568,7 @@ def _stage_signature_matches(
     paths: PipelinePaths,
     outputs: T.Sequence[str],
 ) -> bool:
-    if not all(Path(output).is_file() for output in outputs):
+    if not outputs or not all(Path(output).is_file() for output in outputs):
         return False
 
     stored = _read_stage_signature(paths, stage)
@@ -532,218 +607,12 @@ def _write_stage_signature(
 ) -> None:
     request = _manifest_stage_request(stage, args, paths)
     payload = {
-        "version": 1,
+        "version": 2,
         "stage": stage,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "request": request,
         "request_digest": _json_digest(request),
         "output_fingerprints": _path_fingerprints(outputs),
-        "command": list(command or []),
-        "notes": list(notes or []),
-    }
-    _write_json(_stage_signature_path(paths, stage), payload)
-
-
-def _stage_signature_path(paths: PipelinePaths, stage: str) -> Path:
-    return paths.stage_signature_dir / f"{stage}.json"
-
-
-def _json_digest(payload: T.Mapping[str, T.Any]) -> str:
-    encoded = json.dumps(
-        _json_safe_pipeline_value(payload),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _file_fingerprint(path: Path) -> dict[str, T.Any]:
-    normalized = _normalize_path_for_signature(path)
-    return {
-        "path": normalized,
-        "exists": path.is_file(),
-        "sha256": _safe_sha256_file(path),
-    }
-
-
-def _file_fingerprints(paths: T.Iterable[Path | str]) -> dict[str, dict[str, T.Any]]:
-    fingerprints: dict[str, dict[str, T.Any]] = {}
-    for raw_path in paths:
-        path = Path(raw_path)
-        fingerprints[_normalize_path_for_signature(path)] = _file_fingerprint(path)
-    return fingerprints
-
-
-def _tool_fingerprint(relative_path: str) -> dict[str, T.Any]:
-    return _file_fingerprint(TOOLS_ROOT / relative_path)
-
-
-def _manifest_stage_common_args(args: argparse.Namespace) -> dict[str, T.Any]:
-    return {
-        "dataset": args.dataset,
-        "dataset_source": list(args.dataset_source or []),
-        "dataset_source_zip": list(args.dataset_source_zip or []),
-        "source_dir": args.source_dir,
-        "source_zip": args.source_zip,
-        "prod_dir": args.prod_dir,
-        "include_39pt_profile": bool(args.include_39pt_profile),
-        "python_executable": args.python_executable,
-    }
-
-
-def _build_dataset_manifest_stage_request(
-    args: argparse.Namespace,
-    paths: PipelinePaths,
-) -> dict[str, T.Any]:
-    return {
-        "version": 1,
-        "stage": "build_dataset_manifests",
-        "args": {
-            **_manifest_stage_common_args(args),
-            "dataset_build_arg": list(args.dataset_build_arg or []),
-            "production_build_arg": list(args.production_build_arg or []),
-        },
-        "commands": _dataset_build_commands(args, paths),
-        "outputs": _build_manifest_outputs(args, paths),
-        "tools": {
-            "build_quality_dataset.py": _tool_fingerprint("build_quality_dataset.py"),
-            "build_production_validated_manifest.py": (
-                _tool_fingerprint("build_production_validated_manifest.py")
-                if _has_prod_dir(args)
-                else None
-            ),
-        },
-    }
-
-
-def _hard_negative_manifest_stage_request(
-    args: argparse.Namespace,
-    paths: PipelinePaths,
-) -> dict[str, T.Any]:
-    inputs = [Path(path) for path in _build_manifest_outputs(args, paths)]
-    return {
-        "version": 1,
-        "stage": "build_hard_negative_manifest",
-        "args": {
-            **_manifest_stage_common_args(args),
-            "hard_negative_arg": list(args.hard_negative_arg or []),
-            "exclude_image_ids_file": args.exclude_image_ids_file,
-            "max_profile_occlusion": args.max_profile_occlusion,
-            "max_profile": args.max_profile,
-            "max_occlusion": args.max_occlusion,
-            "max_anchors": args.max_anchors,
-        },
-        "command": _hard_negative_command(args, paths),
-        "inputs": _file_fingerprints(inputs),
-        "outputs": [str(paths.hard_negative_manifest)],
-        "tools": {
-            "build_hard_negative_manifest.py": _tool_fingerprint(
-                "build_hard_negative_manifest.py"
-            ),
-        },
-    }
-
-
-def _validate_manifest_stage_request(
-    args: argparse.Namespace,
-    paths: PipelinePaths,
-) -> dict[str, T.Any]:
-    return {
-        "version": 1,
-        "stage": "validate_cdvit_manifest",
-        "args": {
-            "skip_image_exists_check": bool(args.skip_image_exists_check),
-            "allow_legacy_68_projection": bool(args.allow_legacy_68_projection),
-            "allow_missing_projection_audit": bool(args.allow_missing_projection_audit),
-            "allow_legacy_missing_contract_fields": bool(
-                args.allow_legacy_missing_contract_fields
-            ),
-            "max_validation_examples": int(args.max_validation_examples),
-        },
-        "inputs": _file_fingerprints([Path(_pipeline_effective_manifest(args, paths))]),
-        "outputs": [str(paths.validation_report)],
-        "tools": {
-            "validator_module": "lib.landmarks.manifest.validator.validate_training_manifest",
-        },
-    }
-
-
-def _manifest_stage_request(
-    stage: str,
-    args: argparse.Namespace,
-    paths: PipelinePaths,
-) -> dict[str, T.Any]:
-    if stage == "build_dataset_manifests":
-        return _build_dataset_manifest_stage_request(args, paths)
-    if stage == "build_hard_negative_manifest":
-        return _hard_negative_manifest_stage_request(args, paths)
-    if stage == "validate_cdvit_manifest":
-        return _validate_manifest_stage_request(args, paths)
-    raise ValueError(f"stage does not use manifest-stage signatures: {stage}")
-
-
-def _read_stage_signature(paths: PipelinePaths, stage: str) -> dict[str, T.Any] | None:
-    signature_path = _stage_signature_path(paths, stage)
-    if not signature_path.is_file():
-        return None
-    try:
-        payload = json.loads(signature_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _stage_signature_matches(
-    stage: str,
-    args: argparse.Namespace,
-    paths: PipelinePaths,
-    outputs: T.Sequence[str],
-) -> bool:
-    if not all(Path(output).is_file() for output in outputs):
-        return False
-
-    stored = _read_stage_signature(paths, stage)
-    if not stored:
-        return False
-
-    current_request = _manifest_stage_request(stage, args, paths)
-    if stored.get("request_digest") != _json_digest(current_request):
-        return False
-
-    stored_outputs = stored.get("output_fingerprints")
-    if not isinstance(stored_outputs, dict):
-        return False
-
-    current_outputs = _file_fingerprints(outputs)
-    for normalized_path, fingerprint in current_outputs.items():
-        stored_fingerprint = stored_outputs.get(normalized_path)
-        if not isinstance(stored_fingerprint, dict):
-            return False
-        if stored_fingerprint.get("sha256") != fingerprint.get("sha256"):
-            return False
-        if not fingerprint.get("exists"):
-            return False
-
-    return True
-
-
-def _write_stage_signature(
-    stage: str,
-    args: argparse.Namespace,
-    paths: PipelinePaths,
-    outputs: T.Sequence[str],
-    *,
-    command: T.Sequence[str] | None = None,
-    notes: T.Sequence[str] | None = None,
-) -> None:
-    request = _manifest_stage_request(stage, args, paths)
-    payload = {
-        "version": 1,
-        "stage": stage,
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "request": request,
-        "request_digest": _json_digest(request),
-        "output_fingerprints": _file_fingerprints(outputs),
         "command": list(command or []),
         "notes": list(notes or []),
     }
