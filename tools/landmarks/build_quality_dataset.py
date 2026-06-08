@@ -11,8 +11,10 @@ Supported raw inputs by dataset:
 * COFW: faceswap-style 68-point JSON export, or generic 68/98 landmark files.
 * 300W: iBUG ``.pts`` files plus same-stem images, JSON, ``.npy``, or ``.mat``.
 * AFLW2000-3D: same-stem ``.mat`` files with 68 2D/3D landmarks plus images.
-* HELEN, LaPa, JD-landmark, FFL2, FLL3, COFW original, XM2VTS, FRGC,
-  MERL-RAV, Menpo2D, MultiPIE: JSON, ``.npy``, ``.pts``, ``.mat`` sources.
+* HELEN, LaPa, JD-landmark, FFL2, FLL3, COFW original, XM2VTS, FRGC:
+  native release layouts, with generic JSON/``.npy``/``.pts``/``.mat`` staging
+  retained as a fallback.
+* MERL-RAV, Menpo2D, MultiPIE: JSON, ``.npy``, ``.pts``, ``.mat`` sources.
 * 300VW and WFLW-V: video/frame JSON, pre-extracted frame directories, or
   video extraction plus same-frame annotations.
 
@@ -72,6 +74,7 @@ SUPPORTED_DATASETS = (
     "frgc",
     "300vw",
     "wflw-v",
+    "wflwv",
     "merl-rav",
     "aflw2000-3d",
     "300w",
@@ -374,6 +377,8 @@ def _normalizer(points68: np.ndarray, sample_id: str) -> float:
     span = np.ptp(points68[:, :2], axis=0)
     fallback = float(max(span[0], span[1]))
     if np.isfinite(fallback) and fallback > 0.0:
+        if points68.shape[0] <= 45:
+            return fallback
         logger.warning(
             "invalid interocular normalizer for %s: %s; using landmark span fallback %s",
             sample_id,
@@ -1185,6 +1190,89 @@ def _image_for_dataset_landmarks(
     return None
 
 
+def _find_image_by_stem(directory: Path, stem: str) -> Path | None:
+    for ext in IMAGE_EXTS:
+        candidate = directory / f"{stem}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _find_named_image(
+    roots: T.Iterable[Path],
+    image_name: str,
+    *,
+    image_index: dict[str, list[Path]] | None = None,
+) -> Path | None:
+    raw = Path(str(image_name))
+    if raw.is_absolute() and raw.is_file():
+        return raw
+
+    for root in roots:
+        candidate = root / raw
+        if candidate.is_file():
+            return candidate
+        if raw.suffix.lower() in IMAGE_EXTS:
+            candidate = root / raw.name
+            if candidate.is_file():
+                return candidate
+        else:
+            image = _find_image_by_stem(root, raw.name)
+            if image is not None:
+                return image
+
+    if image_index is not None:
+        key = raw.stem.lower() if raw.suffix.lower() in IMAGE_EXTS else raw.name.lower()
+        matches = image_index.get(key, [])
+        if matches:
+            return sorted(matches, key=lambda item: len(item.parts))[0]
+    return None
+
+
+def _image_name_from_landmark_name(path: Path) -> str:
+    name = path.name
+    if name.lower().endswith(".txt"):
+        name = name[:-4]
+    return name
+
+
+def _read_bbox_file(path: Path | None) -> list[float] | None:
+    if path is None or not path.is_file():
+        return None
+    values = [float(item) for item in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", path.read_text(encoding="utf-8", errors="ignore"))]
+    if len(values) < 4:
+        return None
+    return [float(value) for value in values[:4]]
+
+
+def _bbox_file_for_landmark(
+    bbox_dir: Path | None,
+    landmark_path: Path,
+    *,
+    image_name: str | None = None,
+) -> Path | None:
+    if bbox_dir is None or not bbox_dir.is_dir():
+        return None
+    stem = landmark_path.stem
+    names = [f"{stem}.txt", f"{stem}.rect"]
+    if image_name:
+        names.extend((f"{image_name}.txt", f"{image_name}.rect"))
+    for name in dict.fromkeys(names):
+        candidate = bbox_dir / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _manifest_split_for_source_split(source_split: str) -> str:
+    return "train" if _label(source_split) == "train" else "test"
+
+
+def _native_conditions_for_split(scenario: str, split: str) -> tuple[str, tuple[str, ...]]:
+    conds = tuple(dict.fromkeys((_label(scenario), f"{split}set")))
+    return conds[0], conds
+
+
 def _build_expected_schema_dataset(
     root: Path,
     output_dir: Path,
@@ -1368,49 +1456,398 @@ def _build_expected_schema_json(
     )
 
 
+def _helen_annotations_path(root: Path) -> Path | None:
+    if root.is_file() and root.suffix.lower() == ".json":
+        return root
+    exact = sorted(root.rglob("annotations.json"), key=lambda item: len(item.parts))
+    return exact[0] if exact else None
+
+
 def _build_helen(
     root: Path,
     output_dir: Path,
-    **kwargs: T.Any,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
 ) -> Path:
-    return _build_expected_schema_dataset(
-        root,
+    annotations = _helen_annotations_path(root)
+    if annotations is None:
+        return _build_expected_schema_dataset(
+            root,
+            output_dir,
+            dataset="helen",
+            expected_schema="2d_194",
+            parser_name="helen_194",
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    payload = _read_json(annotations)
+    if not isinstance(payload, list):
+        raise ValueError(f"HELEN annotations.json must contain a list: {annotations}")
+
+    image_base = Path(image_root) if image_root else annotations.parent
+    image_index = _build_image_index(image_base) if image_base.is_dir() else {}
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for index, entry in enumerate(payload):
+        sample_id = f"annotations/{index:05d}"
+        try:
+            if isinstance(entry, dict):
+                image_name = str(entry.get("image") or entry.get("image_path") or entry.get("filename") or "")
+                raw_points = entry.get("landmarks") or entry.get("points")
+                width = entry.get("width") or entry.get("image_width")
+                height = entry.get("height") or entry.get("image_height")
+            elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                image_info = entry[0]
+                raw_points = entry[1]
+                if not isinstance(image_info, (list, tuple)) or not image_info:
+                    raise ValueError("missing HELEN image info")
+                image_name = str(image_info[0])
+                width = image_info[1] if len(image_info) > 1 else None
+                height = image_info[2] if len(image_info) > 2 else None
+            else:
+                raise ValueError("unsupported HELEN annotation row")
+            if not image_name or raw_points is None:
+                raise ValueError("missing image name or landmarks")
+            points, detected_schema = _canonical_points(raw_points, source_schema="2d_194")
+            if detected_schema != "2d_194":
+                raise ValueError(f"HELEN expected 2d_194, got {detected_schema}")
+            image = _find_named_image((image_base, annotations.parent, root), image_name, image_index=image_index)
+            if image is None:
+                raise FileNotFoundError(f"HELEN image not found: {image_name}")
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": sample_id, "reason": str(err)})
+            continue
+
+        sample_id = f"helen/{Path(image_name).stem}"
+        split = _deterministic_split("helen", sample_id)
+        condition, conds = _native_conditions_for_split(scenario, split)
+        metadata = {
+            "dataset": "helen",
+            "dataset_parser": "helen_annotations_json",
+            "parser_type": "dataset_specific",
+            "annotation_file": str(annotations.resolve()),
+            "source_image_name": image_name,
+            "source_schema": "2d_194",
+        }
+        if width is not None:
+            metadata["image_width"] = int(width)
+        if height is not None:
+            metadata["image_height"] = int(height)
+        samples.append(
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset="helen",
+                    sample_id=sample_id,
+                    image=image,
+                    points68=points,
+                    condition=condition,
+                    conditions=conds,
+                    source_schema="2d_194",
+                    source_id=sample_id,
+                    metadata=metadata,
+                ),
+                split,
+            )
+        )
+
+    if not samples:
+        raise ValueError(f"no HELEN annotation samples built; skipped={skipped[:10]}")
+    return _write_manifest(
         output_dir,
-        dataset="helen",
-        expected_schema="2d_194",
-        parser_name="helen_194",
-        **kwargs,
+        "helen",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
     )
+
+
+def _lapa_release_roots(root: Path) -> list[Path]:
+    candidates = [root, root / "LaPa"]
+    candidates.extend(sorted(path for path in root.rglob("LaPa") if path.is_dir()))
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        if any((candidate / split / "landmarks").is_dir() for split in ("train", "val", "test")):
+            seen.add(resolved)
+            out.append(candidate)
+    return out
 
 
 def _build_lapa(
     root: Path,
     output_dir: Path,
-    **kwargs: T.Any,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
 ) -> Path:
-    return _build_expected_schema_dataset(
-        root,
+    release_roots = _lapa_release_roots(root)
+    if not release_roots:
+        return _build_expected_schema_dataset(
+            root,
+            output_dir,
+            dataset="lapa",
+            expected_schema="2d_106",
+            parser_name="lapa_106",
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for release_root in release_roots:
+        for source_split in ("train", "val", "test"):
+            split_dir = release_root / source_split
+            landmark_dir = split_dir / "landmarks"
+            image_dir = split_dir / "images"
+            label_dir = split_dir / "labels"
+            if not landmark_dir.is_dir():
+                continue
+            for landmark_path in sorted(landmark_dir.glob("*.txt")):
+                try:
+                    points, detected_schema = _load_landmark_file(landmark_path)
+                    if detected_schema != "2d_106":
+                        raise ValueError(f"LaPa expected 2d_106, got {detected_schema}")
+                    roots = [image_dir]
+                    if image_root:
+                        roots.insert(0, Path(image_root))
+                    image = _find_named_image(roots, landmark_path.stem)
+                    if image is None:
+                        raise FileNotFoundError(f"LaPa image not found for {landmark_path.name}")
+                except Exception as err:  # noqa: BLE001
+                    skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+                    continue
+
+                split = _manifest_split_for_source_split(source_split)
+                condition, conds = _native_conditions_for_split(scenario, split)
+                label_path = label_dir / f"{landmark_path.stem}.png"
+                sample_id = f"{source_split}/{landmark_path.stem}"
+                metadata = _path_identity_metadata(landmark_path, root=root, dataset="lapa")
+                metadata.update(
+                    {
+                        "dataset_parser": "lapa_release_106",
+                        "parser_type": "dataset_specific",
+                        "source_split": source_split,
+                        "source_schema": "2d_106",
+                        "source_image": str(image.resolve()),
+                    }
+                )
+                if label_path.is_file():
+                    metadata["semantic_label"] = str(label_path.resolve())
+                samples.append(
+                    _with_split(
+                        _sample(
+                            output_dir=output_dir,
+                            dataset="lapa",
+                            sample_id=sample_id,
+                            image=image,
+                            points68=points,
+                            condition=condition,
+                            conditions=conds,
+                            source_schema="2d_106",
+                            source_id=sample_id,
+                            metadata=metadata,
+                        ),
+                        split,
+                    )
+                )
+
+    if not samples:
+        raise ValueError(f"no LaPa native release samples built; skipped={skipped[:10]}")
+    return _write_manifest(
         output_dir,
-        dataset="lapa",
-        expected_schema="2d_106",
-        parser_name="lapa_106",
-        **kwargs,
+        "lapa",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
     )
+
+
+def _jd_landmark_sources(root: Path) -> list[tuple[Path, Path | None, Path | None, str, str]]:
+    out: list[tuple[Path, Path | None, Path | None, str, str]] = []
+    test_roots = [root / "Test_data1"]
+    if root.name == "Test_data1":
+        test_roots.insert(0, root)
+    for test_root in test_roots:
+        landmark_dir = test_root / "landmark"
+        if landmark_dir.is_dir():
+            out.append((landmark_dir, test_root / "picture", test_root / "rect", "test", "test_data1"))
+
+    corrected_roots = [root / "Corrected_landmark"]
+    if root.name == "Corrected_landmark":
+        corrected_roots.insert(0, root)
+    for corrected_root in corrected_roots:
+        if corrected_root.is_dir():
+            out.append((corrected_root, None, None, "corrected", "corrected_landmark"))
+    return out
+
+
+def _split_hint_from_jd_name(name: str) -> str | None:
+    lowered = name.lower()
+    if "image_train" in lowered or "_train_" in lowered:
+        return "train"
+    if "image_test" in lowered or "_test_" in lowered:
+        return "test"
+    return None
 
 
 def _build_jd_landmark(
     root: Path,
     output_dir: Path,
-    **kwargs: T.Any,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
 ) -> Path:
-    return _build_expected_schema_dataset(
-        root,
+    sources = _jd_landmark_sources(root)
+    if not sources:
+        return _build_expected_schema_dataset(
+            root,
+            output_dir,
+            dataset="jd-landmark",
+            expected_schema="2d_106",
+            parser_name="jd_landmark_106",
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    index_root = Path(image_root) if image_root else root
+    image_index = _build_image_index(index_root) if index_root.is_dir() else {}
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for landmark_dir, image_dir, bbox_dir, source_split, source_name in sources:
+        for landmark_path in sorted(landmark_dir.glob("*.txt")):
+            image_name = _image_name_from_landmark_name(landmark_path)
+            try:
+                points, detected_schema = _load_landmark_file(landmark_path)
+                if detected_schema != "2d_106":
+                    raise ValueError(f"JD-landmark expected 2d_106, got {detected_schema}")
+                roots = []
+                if image_root:
+                    roots.append(Path(image_root))
+                if image_dir is not None:
+                    roots.append(image_dir)
+                roots.append(root)
+                image = _find_named_image(roots, image_name, image_index=image_index)
+                if image is None:
+                    raise FileNotFoundError(f"JD-landmark image not found: {image_name}")
+            except Exception as err:  # noqa: BLE001
+                skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+                continue
+
+            bbox_path = _bbox_file_for_landmark(bbox_dir, landmark_path, image_name=image_name)
+            bbox = _read_bbox_file(bbox_path)
+            sample_id = f"{source_name}/{Path(image_name).stem}"
+            metadata = _path_identity_metadata(landmark_path, root=root, dataset="jd-landmark")
+            metadata.update(
+                {
+                    "dataset_parser": "jd_landmark_release_106",
+                    "parser_type": "dataset_specific",
+                    "source_release": source_name,
+                    "source_split": source_split,
+                    "source_schema": "2d_106",
+                    "source_image_name": image_name,
+                    "source_image": str(image.resolve()),
+                }
+            )
+            if bbox_path is not None and bbox is not None:
+                metadata["source_bbox"] = str(bbox_path.resolve())
+                metadata["bbox_xyxy"] = bbox
+
+            split_hint = "test" if source_split == "test" else _split_hint_from_jd_name(image_name)
+            split = _split_from_entry_or_identity(
+                {"split": split_hint} if split_hint else {},
+                metadata,
+                dataset="jd-landmark",
+                sample_id=sample_id,
+            )
+            condition, conds = _native_conditions_for_split(scenario, split)
+            samples.append(
+                _with_split(
+                    _sample(
+                        output_dir=output_dir,
+                        dataset="jd-landmark",
+                        sample_id=sample_id,
+                        image=image,
+                        points68=points,
+                        condition=condition,
+                        conditions=conds,
+                        source_schema="2d_106",
+                        source_id=sample_id,
+                        metadata=metadata,
+                    ),
+                    split,
+                )
+            )
+
+    if not samples:
+        raise ValueError(f"no JD-landmark native release samples built; skipped={skipped[:10]}")
+    return _write_manifest(
         output_dir,
-        dataset="jd-landmark",
-        expected_schema="2d_106",
-        parser_name="jd_landmark_106",
-        **kwargs,
+        "jd-landmark",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
     )
+
+
+def _ffl_split_dirs(root: Path, dataset: str) -> list[tuple[Path, str]]:
+    if dataset == "ffl2":
+        candidates = [(root / "train", "train"), (root, "train")]
+    else:
+        base_candidates = [root / "FLL3_dataset", root]
+        candidates = []
+        for base in base_candidates:
+            candidates.extend((base / split, split) for split in ("train", "val", "test"))
+    out: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for split_dir, split in candidates:
+        if not (split_dir / "landmark").is_dir():
+            continue
+        resolved = split_dir.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append((split_dir, split))
+    return out
 
 
 def _build_ffl_family(
@@ -1418,16 +1855,153 @@ def _build_ffl_family(
     output_dir: Path,
     *,
     dataset: str,
-    **kwargs: T.Any,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
 ) -> Path:
-    return _build_expected_schema_dataset(
-        root,
+    split_dirs = _ffl_split_dirs(root, dataset)
+    if not split_dirs:
+        return _build_expected_schema_dataset(
+            root,
+            output_dir,
+            dataset=dataset,
+            expected_schema="2d_106",
+            parser_name=f"{dataset}_106",
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for split_dir, source_split in split_dirs:
+        landmark_dir = split_dir / "landmark"
+        image_dir = split_dir / ("picture_mask" if (split_dir / "picture_mask").is_dir() else "picture")
+        bbox_dir = split_dir / "bbox"
+        for landmark_path in sorted(landmark_dir.glob("*.txt")):
+            try:
+                points, detected_schema = _load_landmark_file(landmark_path)
+                if detected_schema != "2d_106":
+                    raise ValueError(f"{dataset} expected 2d_106, got {detected_schema}")
+                roots = [image_dir]
+                if image_root:
+                    roots.insert(0, Path(image_root))
+                image = _find_named_image(roots, landmark_path.stem)
+                if image is None:
+                    raise FileNotFoundError(f"{dataset} image not found for {landmark_path.name}")
+            except Exception as err:  # noqa: BLE001
+                skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
+                continue
+
+            bbox_path = _bbox_file_for_landmark(bbox_dir, landmark_path)
+            bbox = _read_bbox_file(bbox_path)
+            split = _manifest_split_for_source_split(source_split)
+            condition, conds = _native_conditions_for_split(scenario, split)
+            sample_id = f"{source_split}/{landmark_path.stem}"
+            metadata = _path_identity_metadata(landmark_path, root=root, dataset=dataset)
+            metadata.update(
+                {
+                    "dataset_parser": f"{dataset}_release_106",
+                    "parser_type": "dataset_specific",
+                    "source_split": source_split,
+                    "source_schema": "2d_106",
+                    "source_image": str(image.resolve()),
+                }
+            )
+            if bbox_path is not None and bbox is not None:
+                metadata["source_bbox"] = str(bbox_path.resolve())
+                metadata["bbox_xyxy"] = bbox
+            samples.append(
+                _with_split(
+                    _sample(
+                        output_dir=output_dir,
+                        dataset=dataset,
+                        sample_id=sample_id,
+                        image=image,
+                        points68=points,
+                        condition=condition,
+                        conditions=conds,
+                        source_schema="2d_106",
+                        source_id=sample_id,
+                        metadata=metadata,
+                    ),
+                    split,
+                )
+            )
+
+    if not samples:
+        raise ValueError(f"no {dataset} native release samples built; skipped={skipped[:10]}")
+    return _write_manifest(
         output_dir,
-        dataset=dataset,
-        expected_schema="2d_106",
-        parser_name=f"{dataset}_106",
-        **kwargs,
+        dataset,
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
     )
+
+
+def _menpo_list_files(root: Path, dataset: str) -> list[Path]:
+    names = {f"{dataset}_train.txt", f"{dataset}_test.txt", f"{dataset}_val.txt"}
+    return sorted(path for path in root.rglob("*.txt") if path.name.lower() in names)
+
+
+def _list_split_from_path(path: Path) -> str:
+    lowered = path.stem.lower()
+    if "train" in lowered:
+        return "train"
+    if "val" in lowered or "test" in lowered:
+        return "test"
+    return "train"
+
+
+def _menpo_identity_from_image(dataset: str, image_name: str) -> dict[str, str]:
+    stem = Path(image_name).stem
+    metadata = {"image_id": stem}
+    if dataset == "xm2vts":
+        parts = stem.split("_")
+        if parts:
+            metadata["subject_id"] = parts[0]
+        if len(parts) > 1:
+            metadata["session_id"] = parts[1]
+        if len(parts) > 2:
+            metadata["capture_id"] = parts[2]
+        return metadata
+    match = re.match(r"^(?P<subject>\d+)(?P<session>[A-Za-z])(?P<capture>\d+)$", stem)
+    if match:
+        metadata["subject_id"] = match.group("subject")
+        metadata["session_id"] = match.group("session")
+        metadata["capture_id"] = match.group("capture")
+    else:
+        metadata["subject_id"] = stem
+    return metadata
+
+
+def _parse_menpo_list_line(line: str) -> tuple[str, list[float] | None, list[list[float]] | None, np.ndarray]:
+    parts = line.split()
+    if len(parts) < 2:
+        raise ValueError("empty Menpo-style list row")
+    image_name = parts[0]
+    values = [float(item) for item in parts[1:]]
+    bbox: list[float] | None = None
+    coarse: list[list[float]] | None = None
+    landmark_values = values
+    if len(values) == 150:
+        bbox = [float(item) for item in values[:4]]
+        coarse = np.asarray(values[4:14], dtype=np.float32).reshape(5, 2).astype(float).tolist()
+        landmark_values = values[14:]
+    points, detected_schema = _canonical_points(np.asarray(landmark_values, dtype=np.float32), source_schema="2d_68")
+    if detected_schema != "2d_68":
+        raise ValueError(f"Menpo-style list expected 2d_68, got {detected_schema}")
+    return image_name, bbox, coarse, points
 
 
 def _build_subject_session_dataset(
@@ -1442,6 +2016,77 @@ def _build_subject_session_dataset(
     allow_overlap: bool,
     image_root: str | None,
 ) -> Path:
+    list_files = _menpo_list_files(root, dataset)
+    if list_files:
+        samples: list[dict[str, T.Any]] = []
+        skipped: list[dict[str, str]] = []
+        for list_path in list_files:
+            source_split = _list_split_from_path(list_path)
+            split = _manifest_split_for_source_split(source_split)
+            for line_number, line in enumerate(list_path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                try:
+                    image_name, bbox, coarse, points = _parse_menpo_list_line(line)
+                    roots = [list_path.parent, root]
+                    if image_root:
+                        roots.insert(0, Path(image_root))
+                    image = _find_named_image(roots, image_name)
+                    if image is None:
+                        raise FileNotFoundError(f"{dataset} image not found: {image_name}")
+                except Exception as err:  # noqa: BLE001
+                    skipped.append({"sample_id": f"{list_path}:{line_number}", "reason": str(err)})
+                    continue
+
+                sample_id = f"{list_path.stem}/{Path(image_name).stem}"
+                condition, conds = _native_conditions_for_split(scenario, split)
+                metadata: dict[str, T.Any] = {
+                    "dataset": dataset,
+                    "dataset_parser": f"{dataset}_menpo_list_68",
+                    "parser_type": "dataset_specific",
+                    "source_annotation": str(list_path.resolve()),
+                    "source_line": line_number,
+                    "source_split": source_split,
+                    "source_schema": "2d_68",
+                    "source_image_name": image_name,
+                    "source_image": str(image.resolve()),
+                    **_menpo_identity_from_image(dataset, image_name),
+                }
+                if bbox is not None:
+                    metadata["bbox_xyxy"] = bbox
+                if coarse is not None:
+                    metadata["five_point_landmarks"] = coarse
+                samples.append(
+                    _with_split(
+                        _sample(
+                            output_dir=output_dir,
+                            dataset=dataset,
+                            sample_id=sample_id,
+                            image=image,
+                            points68=points,
+                            condition=condition,
+                            conditions=conds,
+                            source_schema="2d_68",
+                            source_id=sample_id,
+                            metadata=metadata,
+                        ),
+                        split,
+                    )
+                )
+
+        if not samples:
+            raise ValueError(f"no {dataset} Menpo-style list samples built; skipped={skipped[:10]}")
+        return _write_manifest(
+            output_dir,
+            dataset,
+            scenario,
+            _filter(samples, scenarios, limit),
+            mode=mode,
+            allow_overlap=allow_overlap,
+            scenarios=scenarios,
+            skipped=skipped,
+        )
+
     json_path = _json_source(root)
     if json_path is not None:
         manifest = _build_json(
@@ -1570,6 +2215,16 @@ def _cofw_original_points_array(value: T.Any) -> list[np.ndarray]:
     if arr.ndim == 3 and arr.shape[:2] == (29, 2):
         return [arr[:, :, index].astype(np.float32) for index in range(arr.shape[2])]
     if arr.ndim == 2:
+        if arr.shape[0] == 87:
+            return [
+                np.stack((arr[:29, index], arr[29:58, index]), axis=1).astype(np.float32)
+                for index in range(arr.shape[1])
+            ]
+        if arr.shape[1] == 87:
+            return [
+                np.stack((arr[index, :29], arr[index, 29:58]), axis=1).astype(np.float32)
+                for index in range(arr.shape[0])
+            ]
         if arr.shape[1] == 58:
             return [row.reshape(29, 2).astype(np.float32) for row in arr]
         if arr.shape[0] == 58:
@@ -1623,6 +2278,8 @@ def _write_cofw_original_image(output_dir: Path, sample_id: str, image: np.ndarr
     path = output_dir / "images" / "cofw-original" / f"{_safe_id(sample_id).replace('/', '_')}.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(image)
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+        arr = np.moveaxis(arr, 0, -1)
     if arr.ndim == 2:
         write_arr = arr
     else:
@@ -1636,6 +2293,66 @@ def _write_cofw_original_image(output_dir: Path, sample_id: str, image: np.ndarr
     if not ok:
         raise OSError(f"failed to write COFW original image: {path}")
     return path
+
+
+def _is_hdf5_mat(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(128)
+        return header.startswith(b"\x89HDF\r\n\x1a\n") or b"MATLAB 7.3 MAT-file" in header
+    except OSError:
+        return False
+
+
+def _cofw_original_hdf5_arrays(
+    path: Path,
+    declared_split: str,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[list[bool]], list[list[float] | None]]:
+    try:
+        import h5py
+    except ImportError as err:
+        raise RuntimeError("h5py is required to read COFW original MATLAB v7.3 files") from err
+
+    with h5py.File(path, "r") as handle:
+        trainish = declared_split == "train"
+        phis_key = "phisTr" if trainish and "phisTr" in handle else "phisT" if "phisT" in handle else "phisTr"
+        images_key = "IsTr" if trainish and "IsTr" in handle else "IsT" if "IsT" in handle else "IsTr"
+        bboxes_key = "bboxesTr" if trainish and "bboxesTr" in handle else "bboxesT" if "bboxesT" in handle else None
+        phis = np.asarray(handle[phis_key], dtype=np.float32)
+        if phis.ndim != 2:
+            raise ValueError(f"COFW original phis must be 2D, got {phis.shape}")
+        if phis.shape[0] == 87:
+            columns = [phis[:, index] for index in range(phis.shape[1])]
+        elif phis.shape[1] == 87:
+            columns = [phis[index, :] for index in range(phis.shape[0])]
+        else:
+            raise ValueError(f"COFW original phis must have 87 rows/columns, got {phis.shape}")
+
+        points_rows = [
+            np.stack((column[:29], column[29:58]), axis=1).astype(np.float32)
+            for column in columns
+        ]
+        visibility_rows = [
+            [not bool(item) for item in np.asarray(column[58:87]).reshape(-1)[:29]]
+            for column in columns
+        ]
+
+        images: list[np.ndarray] = []
+        image_refs = handle[images_key]
+        for index in range(len(points_rows)):
+            ref = image_refs[0, index] if image_refs.ndim == 2 and image_refs.shape[0] == 1 else image_refs[index]
+            images.append(np.asarray(handle[ref]))
+
+        bbox_rows: list[list[float] | None] = [None] * len(points_rows)
+        if bboxes_key and bboxes_key in handle:
+            bboxes = np.asarray(handle[bboxes_key], dtype=np.float32)
+            if bboxes.ndim == 2 and bboxes.shape[0] == 4:
+                bbox_rows = [[float(value) for value in bboxes[:, index]] for index in range(bboxes.shape[1])]
+            elif bboxes.ndim == 2 and bboxes.shape[1] == 4:
+                bbox_rows = [[float(value) for value in bboxes[index, :]] for index in range(bboxes.shape[0])]
+            bbox_rows = (bbox_rows + [None] * len(points_rows))[:len(points_rows)]
+
+    return points_rows, images, visibility_rows, bbox_rows
 
 
 def _build_cofw_original(
@@ -1665,26 +2382,32 @@ def _build_cofw_original(
             image_root=image_root,
         )
 
-    try:
-        import scipy.io as sio
-    except ImportError as err:
-        raise RuntimeError("scipy is required to read COFW original .mat files") from err
-
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
+    sio: T.Any | None = None
     for mat_path, declared_split in mat_files:
         try:
-            payload = sio.loadmat(mat_path)
-            points_rows = _cofw_original_points_array(
-                _mat_first_key(payload, ("phisTr", "phisT", "phis", "points", "landmarks"))
-            )
-            images = _cofw_original_image_array(
-                _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
-            )
-            visibility_rows = _cofw_original_visibility(
-                _mat_first_key(payload, ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded")),
-                len(points_rows),
-            )
+            if _is_hdf5_mat(mat_path):
+                points_rows, images, visibility_rows, bbox_rows = _cofw_original_hdf5_arrays(mat_path, declared_split)
+            else:
+                if sio is None:
+                    try:
+                        import scipy.io as sio_module
+                    except ImportError as err:
+                        raise RuntimeError("scipy is required to read COFW original .mat files") from err
+                    sio = sio_module
+                payload = sio.loadmat(mat_path)
+                points_rows = _cofw_original_points_array(
+                    _mat_first_key(payload, ("phisTr", "phisT", "phis", "points", "landmarks"))
+                )
+                images = _cofw_original_image_array(
+                    _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
+                )
+                visibility_rows = _cofw_original_visibility(
+                    _mat_first_key(payload, ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded")),
+                    len(points_rows),
+                )
+                bbox_rows = [None] * len(points_rows)
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
             continue
@@ -1714,6 +2437,8 @@ def _build_cofw_original(
                 "occlusion_mask": [not bool(item) for item in visibility],
                 "landmark_score_visibility_mask": visibility,
             }
+            if index < len(bbox_rows) and bbox_rows[index] is not None:
+                metadata["bbox_xyxy"] = bbox_rows[index]
             condition = "occlusion" if any(not bool(item) for item in visibility) else scenario
             samples.append(
                 _with_split(

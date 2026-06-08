@@ -46,6 +46,13 @@ def _write_pts(path: Path, points: np.ndarray) -> Path:
     return path
 
 
+def _menpo_list_row(image_rel: str, points: np.ndarray) -> str:
+    bbox = [10.0, 20.0, 230.0, 240.0]
+    coarse = points[:5].reshape(-1).tolist()
+    values = [*bbox, *coarse, *points.reshape(-1).tolist()]
+    return " ".join([image_rel, *(str(value) for value in values)])
+
+
 def _builder_args(*items: str):
     return builder._parser().parse_args(list(items))
 
@@ -69,6 +76,7 @@ def test_issue8_dataset_choices_and_projection_statuses_are_registered():
         "frgc",
         "300vw",
         "wflw-v",
+        "wflwv",
     }.issubset(choices)
 
     assert projection_audit_for_schema("2d_98")["status"] == "audited"
@@ -78,35 +86,124 @@ def test_issue8_dataset_choices_and_projection_statuses_are_registered():
         assert audit["target_schema"] == "2d_68"
 
 
+def test_helen_annotations_json_parser_uses_native_release_format(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+    points = _points(194)
+    _write_image(source / "images" / "sample.jpg")
+    (source / "annotations.json").write_text(
+        json.dumps([[["sample.jpg", 256, 256], points.tolist()]]),
+        encoding="utf-8",
+    )
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "helen",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    manifest = _load_manifest(manifest_path)
+    sample = manifest["samples"][0]
+    saved_points = np.load(output / sample["landmarks"])
+
+    assert saved_points.shape == (194, 2)
+    assert sample["source_schema"] == "2d_194"
+    assert sample["target_schema"] == "2d_194"
+    assert sample["head_name"] == "landmarks_194"
+    assert sample["metadata"]["dataset_parser"] == "helen_annotations_json"
+    assert sample["metadata"]["parser_type"] == "dataset_specific"
+    assert sample["metadata"]["image_width"] == 256
+    assert manifest["projection_status"] == {"not_projectable": 1}
+
+
+def test_lapa_release_parser_preserves_split_and_segmentation_label(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+    points = _points(106)
+    _write_image(source / "LaPa" / "train" / "images" / "sample.jpg")
+    _write_image(source / "LaPa" / "train" / "labels" / "sample.png")
+    _write_counted_txt(source / "LaPa" / "train" / "landmarks" / "sample.txt", points)
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "lapa",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    sample = _load_manifest(manifest_path)["samples"][0]
+
+    assert sample["split"] == "train"
+    assert sample["source_schema"] == "2d_106"
+    assert sample["head_name"] == "landmarks_106"
+    assert sample["metadata"]["dataset_parser"] == "lapa_release_106"
+    assert sample["metadata"]["source_split"] == "train"
+    assert sample["metadata"]["semantic_label"].endswith("sample.png")
+
+
+def test_jd_landmark_test_data_parser_pairs_jpg_txt_images_and_rects(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+    points = _points(106)
+    _write_image(source / "Test_data1" / "picture" / "sample.jpg")
+    _write_counted_txt(source / "Test_data1" / "landmark" / "sample.jpg.txt", points)
+    (source / "Test_data1" / "rect").mkdir(parents=True)
+    (source / "Test_data1" / "rect" / "sample.jpg.rect").write_text("10 20 210 220\n", encoding="utf-8")
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "jd-landmark",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    sample = _load_manifest(manifest_path)["samples"][0]
+
+    assert sample["split"] == "test"
+    assert sample["source_schema"] == "2d_106"
+    assert sample["metadata"]["dataset_parser"] == "jd_landmark_release_106"
+    assert sample["metadata"]["source_release"] == "test_data1"
+    assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
+
+
 @pytest.mark.parametrize(
-    ("dataset", "schema", "count", "head", "parser_name", "landmarks_rel", "image_rel"),
+    ("dataset", "landmark_rel", "image_rel", "bbox_rel"),
     [
-        ("helen", "2d_194", 194, "landmarks_194", "helen_194", "annotation/sample.txt", "images/sample.jpg"),
-        ("lapa", "2d_106", 106, "landmarks_106", "lapa_106", "train/landmarks/sample.txt", "train/images/sample.jpg"),
-        ("jd-landmark", "2d_106", 106, "landmarks_106", "jd_landmark_106", "labels/sample.pts", "images/sample.jpg"),
-        ("ffl2", "2d_106", 106, "landmarks_106", "ffl2_106", "landmarks/sample.pts", "images/sample.jpg"),
-        ("fll3", "2d_106", 106, "landmarks_106", "fll3_106", "landmarks/sample.pts", "images/sample.jpg"),
+        ("ffl2", "train/landmark/sample.txt", "train/picture/sample.jpg", "train/bbox/sample.txt"),
+        (
+            "fll3",
+            "FLL3_dataset/train/landmark/sample.txt",
+            "FLL3_dataset/train/picture_mask/sample.jpg",
+            "FLL3_dataset/train/bbox/sample.txt",
+        ),
     ],
 )
-def test_issue8_still_image_builders_use_dataset_specific_parsers(
+def test_ffl_release_parsers_pair_landmarks_pictures_and_bboxes(
     tmp_path,
     dataset,
-    schema,
-    count,
-    head,
-    parser_name,
-    landmarks_rel,
+    landmark_rel,
     image_rel,
+    bbox_rel,
 ):
     source = tmp_path / "source"
     output = tmp_path / "out"
     _write_image(source / image_rel)
-    points = _points(count)
-    landmark_path = source / landmarks_rel
-    if landmark_path.suffix == ".pts":
-        _write_pts(landmark_path, points)
-    else:
-        _write_counted_txt(landmark_path, points)
+    _write_counted_txt(source / landmark_rel, _points(106))
+    (source / bbox_rel).parent.mkdir(parents=True, exist_ok=True)
+    (source / bbox_rel).write_text("10 20 210 220\n", encoding="utf-8")
 
     manifest_path = builder.build(
         _builder_args(
@@ -119,27 +216,22 @@ def test_issue8_still_image_builders_use_dataset_specific_parsers(
         )
     )
 
-    manifest = _load_manifest(manifest_path)
-    sample = manifest["samples"][0]
-    saved_points = np.load(output / sample["landmarks"])
+    sample = _load_manifest(manifest_path)["samples"][0]
 
-    assert saved_points.shape == (count, 2)
-    assert sample["source_schema"] == schema
-    assert sample["target_schema"] == schema
-    assert sample["head_name"] == head
-    assert sample["split"] in {"train", "test"}
-    assert sample["metadata"]["dataset_parser"] == parser_name
-    assert sample["metadata"]["parser_type"] == "dataset_specific"
-    assert manifest["projection_status"] == {"not_projectable": 1}
+    assert sample["split"] == "train"
+    assert sample["source_schema"] == "2d_106"
+    assert sample["head_name"] == "landmarks_106"
+    assert sample["metadata"]["dataset_parser"] == f"{dataset}_release_106"
+    assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
 
 
 def test_lapa_parser_rejects_non_106_point_landmarks(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "out"
-    _write_image(source / "train" / "images" / "sample.jpg")
-    _write_counted_txt(source / "train" / "landmarks" / "sample.txt", _points(68))
+    _write_image(source / "LaPa" / "train" / "images" / "sample.jpg")
+    _write_counted_txt(source / "LaPa" / "train" / "landmarks" / "sample.txt", _points(68))
 
-    with pytest.raises(ValueError, match="no lapa samples built"):
+    with pytest.raises(ValueError, match="no LaPa native release samples built"):
         builder.build(
             _builder_args(
                 "--dataset",
@@ -234,13 +326,66 @@ def test_cofw_original_mat_parser_preserves_29_point_visibility_and_occlusion(tm
     assert manifest["projection_status"] == {"not_projectable": 1}
 
 
-@pytest.mark.parametrize("dataset", ["xm2vts", "frgc"])
-def test_xm2vts_and_frgc_use_menpo_style_subject_session_builder(tmp_path, dataset):
+def test_cofw_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "out"
+    points = _points(29)
+    phis = np.zeros((87, 1), dtype=np.float32)
+    phis[:29, 0] = points[:, 0]
+    phis[29:58, 0] = points[:, 1]
+    phis[58 + 3, 0] = 1.0
+    image = np.full((3, 64, 64), 127, dtype=np.uint8)
+
+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+        image_ds = handle.create_dataset("image_0000", data=image)
+        refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
+        refs[0, 0] = image_ds.ref
+        handle.create_dataset("phisTr", data=phis)
+        handle.create_dataset("bboxesTr", data=np.asarray([[1], [2], [30], [40]], dtype=np.float32))
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "cofw-original",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    sample = _load_manifest(manifest_path)["samples"][0]
+
+    assert sample["source_schema"] == "2d_29"
+    assert sample["visibility"][3] is False
+    assert sample["metadata"]["bbox_xyxy"] == [1.0, 2.0, 30.0, 40.0]
+    assert Path(sample["image"]).is_file()
+    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+
+
+@pytest.mark.parametrize(
+    ("dataset", "release_dir", "list_name", "image_rel", "expected_identity"),
+    [
+        ("xm2vts", "XM2VTS", "xm2vts_train.txt", "image/161_4_1.jpg", ("161", "4", "1")),
+        ("frgc", "FRGC", "frgc_train.txt", "image/02463d453.jpg", ("02463", "d", "453")),
+    ],
+)
+def test_xm2vts_and_frgc_use_native_menpo_train_list_builder(
+    tmp_path,
+    dataset,
+    release_dir,
+    list_name,
+    image_rel,
+    expected_identity,
+):
     source = tmp_path / "source"
     output = tmp_path / "out"
-    rel = Path("subject-01") / "session-02" / "capture-03"
-    _write_image(source / rel.with_suffix(".jpg"))
-    _write_pts(source / rel.with_suffix(".pts"), _points(68))
+    release = source / release_dir
+    points = _points(68)
+    _write_image(release / image_rel)
+    (release / list_name).write_text(_menpo_list_row(image_rel, points) + "\n", encoding="utf-8")
 
     manifest_path = builder.build(
         _builder_args(
@@ -254,13 +399,17 @@ def test_xm2vts_and_frgc_use_menpo_style_subject_session_builder(tmp_path, datas
     )
 
     sample = _load_manifest(manifest_path)["samples"][0]
+    subject_id, session_id, capture_id = expected_identity
 
     assert sample["source_schema"] == "2d_68"
-    assert sample["subject_id"] == "subject-01"
-    assert sample["session_id"] == "session-02"
-    assert sample["capture_id"] == "capture-03"
-    assert sample["metadata"]["dataset_parser"] == f"{dataset}_menpo_style"
+    assert sample["split"] == "train"
+    assert sample["subject_id"] == subject_id
+    assert sample["session_id"] == session_id
+    assert sample["capture_id"] == capture_id
+    assert sample["metadata"]["dataset_parser"] == f"{dataset}_menpo_list_68"
     assert sample["metadata"]["parser_type"] == "dataset_specific"
+    assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 230.0, 240.0]
+    assert len(sample["metadata"]["five_point_landmarks"]) == 5
 
 
 def test_wflw_builder_keeps_native_98_points(tmp_path):
@@ -301,8 +450,12 @@ def test_wflw_builder_keeps_native_98_points(tmp_path):
 def test_write_overlays_generates_visual_audit_for_native_schema(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "out"
+    points = _points(194)
     _write_image(source / "images" / "sample.jpg")
-    _write_counted_txt(source / "annotation" / "sample.txt", _points(194))
+    (source / "annotations.json").write_text(
+        json.dumps([[["sample.jpg", 256, 256], points.tolist()]]),
+        encoding="utf-8",
+    )
 
     builder.build(
         _builder_args(
