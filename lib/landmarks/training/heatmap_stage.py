@@ -509,6 +509,14 @@ def main():
                                     args,
                                     return_details=True,
                                     star_loss_func=vertex_loss_func,
+                                    include_auxiliary_loss=(
+                                        getattr(args, "auxiliary_loss_stage", "final") == "all"
+                                        or i == len(pred_info) - 1
+                                    ),
+                                    include_visibility_loss=(
+                                        getattr(args, "auxiliary_loss_stage", "final") == "all"
+                                        or i == len(pred_info) - 1
+                                    ),
                                 )
                             )
                             loss_loc = stage_loc
@@ -626,6 +634,7 @@ def main():
                         print(
                             f"schema head loss details counts={head_counts} contributions={head_losses} "
                             f"aux_valid={loss_details.get('auxiliary_valid_counts', {})} "
+                            f"aux_accuracy={loss_details.get('auxiliary_accuracy', {})} "
                             f"visibility_valid={loss_details.get('visibility_valid_counts', {})} "
                             f"visibility_weight={float(loss_details.get('visibility_loss_weight', torch.tensor(0.0)).item())}",
                             flush=True,

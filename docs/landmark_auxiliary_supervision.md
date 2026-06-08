@@ -51,7 +51,7 @@ Default --visibility-loss-weight 0.0 keeps visibility off until explicitly enabl
 
 Synthetic occlusion pseudo-labels
 
-synthetic_visibility_from_occluder_mask() can generate pseudo visibility labels from an occluder mask. Pseudo labels should be tagged by provenance separately from explicit labels and can be weighted separately in future augmentation integration.
+synthetic_visibility_from_occluder_mask() can generate pseudo visibility labels from an occluder mask. Manifest entries may provide `occluder_mask` or `synthetic_occluder_mask`; when explicit visibility labels are absent, the loader converts that mask into per-point pseudo visibility with provenance `synthetic_occluder_mask`. Pseudo labels are weighted separately through `--visibility-pseudo-loss-weight` and are disabled by default when that value is `0.0`.
 
 Optional point/edge maps
 

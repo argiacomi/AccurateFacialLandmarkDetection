@@ -100,6 +100,29 @@ def _weighted_star_loss_v2(star_loss_func, pred_heatmap, target, sample_weight, 
     return (per_point * point_weights).sum() / point_weights.sum().clamp_min(1.0)
 
 
+def _visibility_target_weight_for_payload(payload, args, *, device):
+    base_weight = payload.get("visibility_target_weight")
+    provenance = payload.get("visibility_target_provenance")
+
+    if provenance is None:
+        return base_weight
+
+    pseudo_weight = float(getattr(args, "visibility_pseudo_loss_weight", 0.0))
+    weights = []
+    for source in provenance:
+        source_text = str(source or "")
+        weights.append(pseudo_weight if source_text.startswith("synthetic") else 1.0)
+
+    provenance_weight = torch.as_tensor(weights, device=device, dtype=torch.float32).reshape(-1, 1)
+    if base_weight is None:
+        return provenance_weight
+
+    base_weight = base_weight.to(device).float()
+    if base_weight.ndim == 1:
+        base_weight = base_weight.reshape(-1, 1)
+    return provenance_weight * base_weight
+
+
 def schema_head_loss(
     stage_pred,
     heads,
@@ -109,6 +132,8 @@ def schema_head_loss(
     *,
     return_details=False,
     star_loss_func=None,
+    include_auxiliary_loss=True,
+    include_visibility_loss=True,
 ):
     loss = torch.tensor(0.0, device=next(iter(heads.values()))["target"].device)
     loss_loc = torch.tensor(0.0, device=loss.device)
@@ -123,6 +148,8 @@ def schema_head_loss(
         "visibility_valid_counts": {},
         "auxiliary_valid_counts": {},
         "auxiliary_loss_contributions": {},
+        "auxiliary_correct_counts": {},
+        "auxiliary_accuracy": {},
         "loss_consistency": loss_consistency,
         "loss_star": loss_star,
         "loss_visibility": loss_visibility,
@@ -183,13 +210,14 @@ def schema_head_loss(
 
         visibility_weight = visibility_loss_weight_for_epoch(args)
         visibility_key = visibility_key_for_head(head_name)
-        if visibility_weight > 0.0 and visibility_key in stage_pred and "visibility_target" in payload:
+        if include_visibility_loss and visibility_weight > 0.0 and visibility_key in stage_pred and "visibility_target" in payload:
             visibility_logits = stage_pred[visibility_key].index_select(0, indices)
             head_visibility_raw, visibility_valid = masked_visibility_bce_loss(
                 visibility_logits,
                 payload["visibility_target"],
                 sample_weight=sample_weight,
                 landmark_mask=landmark_mask,
+                target_weight=_visibility_target_weight_for_payload(payload, args, device=loss.device),
             )
             head_visibility = head_visibility_raw * visibility_weight
             loss_visibility = loss_visibility + head_visibility.detach()
@@ -224,7 +252,7 @@ def schema_head_loss(
         loss = loss + loss_consistency
 
     aux_outputs = stage_pred.get("_aux", {}) if isinstance(stage_pred, dict) else {}
-    if args.auxiliary_loss_weight > 0 and aux_outputs:
+    if include_auxiliary_loss and args.auxiliary_loss_weight > 0 and aux_outputs:
         task_weights = parse_auxiliary_loss_weights(getattr(args, "auxiliary_loss_weights", ""))
         valid_task_count = 0
         for task, logits in aux_outputs.items():
@@ -236,6 +264,11 @@ def schema_head_loss(
             details["auxiliary_valid_counts"][task] = valid_count
             if valid_count <= 0:
                 continue
+            with torch.no_grad():
+                predicted = logits[valid].argmax(dim=1)
+                correct = int((predicted == labels[valid]).sum().item())
+            details["auxiliary_correct_counts"][task] = correct
+            details["auxiliary_accuracy"][task] = float(correct) / float(valid_count)
             task_weight = float(task_weights.get(task, 1.0))
             if task_weight <= 0.0:
                 continue

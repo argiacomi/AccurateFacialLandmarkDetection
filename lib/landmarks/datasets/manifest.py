@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
 
+from lib.landmarks.training.auxiliary import synthetic_visibility_from_occluder_mask
 from lib.landmarks.core.schema import (
     canonicalize_schema,
     flip_map_for_schema,
@@ -257,7 +258,18 @@ def _as_visibility_target(value, landmark_count):
             else:
                 out.append(-1)
         else:
-            out.append(1 if bool(item) else 0)
+            try:
+                numeric = float(item)
+            except (TypeError, ValueError):
+                out.append(1 if bool(item) else 0)
+                known += 1
+                continue
+
+            if not np.isfinite(numeric) or numeric < 0:
+                out.append(-1)
+                continue
+
+            out.append(1 if numeric > 0 else 0)
             known += 1
     if known == 0:
         return None
@@ -744,6 +756,12 @@ class LandmarkDataset(Dataset):
             if isinstance(entry.get("auxiliary_labels"), dict):
                 metadata = dict(metadata)
                 metadata.setdefault("auxiliary_labels", entry["auxiliary_labels"])
+            occluder_mask_value = (
+                entry.get("occluder_mask")
+                or entry.get("synthetic_occluder_mask")
+                or metadata.get("occluder_mask")
+                or metadata.get("synthetic_occluder_mask")
+            )
             landmark_mask = _landmark_mask_from_entry(entry, metadata, landmark_count)
             visibility_target, visibility_target_source = _visibility_target_from_entry(entry, metadata, landmark_count)
             conditions = _coerce_conditions(entry, metadata)
@@ -767,6 +785,9 @@ class LandmarkDataset(Dataset):
                     "bbox_format": entry.get("bbox_format", metadata.get("bbox_format", "")),
                     "visibility_target": visibility_target,
                     "visibility_target_source": visibility_target_source,
+                    "synthetic_visibility_occluder_mask": _resolve_path(base_dir, occluder_mask_value)
+                    if occluder_mask_value
+                    else "",
                     "sample_weight": _weight_from_entry(entry, metadata, conditions),
                     "landmark_mask": landmark_mask,
                 }
@@ -842,6 +863,9 @@ class LandmarkDataset(Dataset):
 
     def __getitem__(self, item):
         sample = self.samples[item]
+        visibility_target = sample.get("visibility_target")
+        visibility_target_source = sample.get("visibility_target_source", "")
+        visibility_target_weight = None
         if self.data_list is None:
             img, lmk = self._load_image_and_landmarks(sample)
             landmark_mask = sample["landmark_mask"].copy()
@@ -850,6 +874,28 @@ class LandmarkDataset(Dataset):
             img = img.copy()
             lmk = lmk.copy()
             landmark_mask = landmark_mask.copy()
+        if visibility_target is None and sample.get("synthetic_visibility_occluder_mask"):
+            occluder_mask = cv2.imread(
+                sample["synthetic_visibility_occluder_mask"],
+                cv2.IMREAD_GRAYSCALE,
+            )
+            if occluder_mask is not None:
+                if occluder_mask.shape[:2] != img.shape[:2]:
+                    occluder_mask = cv2.resize(
+                        occluder_mask,
+                        (img.shape[1], img.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                visibility_target = synthetic_visibility_from_occluder_mask(
+                    lmk,
+                    occluder_mask,
+                    valid_mask=landmark_mask,
+                )
+                visibility_target_source = "synthetic_occluder_mask"
+                visibility_target_weight = np.ones(
+                    (int(visibility_target.shape[0]),),
+                    dtype=np.float32,
+                )
 
         if self.aug_transform is not None:
             transformed = self.aug_transform(image=img, keypoints=lmk)
@@ -868,6 +914,10 @@ class LandmarkDataset(Dataset):
                     img = cv2.flip(img, 1)
                     lmk = lmk[flip_index, :]
                     landmark_mask = landmark_mask[flip_index]
+                    if visibility_target is not None:
+                        visibility_target = np.asarray(visibility_target)[flip_index]
+                    if visibility_target_weight is not None:
+                        visibility_target_weight = np.asarray(visibility_target_weight)[flip_index]
                     lmk[:, 0] = 255 - lmk[:, 0]
 
         img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
@@ -897,14 +947,13 @@ class LandmarkDataset(Dataset):
                         "split_safe_id": sample.get("split_safe_id", ""),
                         "face_bbox": sample.get("face_bbox"),
                         "bbox_format": sample.get("bbox_format", ""),
-                        "visibility_target": sample.get("visibility_target").tolist()
-                        if sample.get("visibility_target") is not None
-                        else None,
-                        "visibility_target_source": sample.get("visibility_target_source", ""),
+                        "visibility_target": visibility_target.tolist()
+                        if hasattr(visibility_target, "tolist")
+                        else visibility_target,
+                        "visibility_target_source": visibility_target_source,
                         "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                     }
                 )
-                visibility_target = sample.get("visibility_target")
                 if visibility_target is None:
                     visibility_target_t = torch.full(
                         (int(sample.get("landmark_count", lmk.shape[0])),),
@@ -916,6 +965,13 @@ class LandmarkDataset(Dataset):
                         visibility_target,
                         dtype=torch.float32,
                     )
+                if visibility_target_weight is None:
+                    visibility_target_weight_t = torch.ones_like(visibility_target_t).float()
+                else:
+                    visibility_target_weight_t = torch.as_tensor(
+                        visibility_target_weight,
+                        dtype=torch.float32,
+                    )
                 return {
                     "image": img,
                     "target": lmk,
@@ -923,7 +979,8 @@ class LandmarkDataset(Dataset):
                     "sample_weight": torch.tensor(sample["sample_weight"], dtype=torch.float32),
                     "landmark_mask": landmark_mask_t,
                     "visibility_target": visibility_target_t,
-                    "visibility_target_provenance": sample.get("visibility_target_source", ""),
+                    "visibility_target_weight": visibility_target_weight_t,
+                    "visibility_target_provenance": visibility_target_source,
                     "schema": sample["source_schema"],
                     "head_name": sample["head_name"],
                     "metadata": metadata,
@@ -944,10 +1001,10 @@ class LandmarkDataset(Dataset):
                         "split_safe_id": sample.get("split_safe_id", ""),
                         "face_bbox": sample.get("face_bbox"),
                         "bbox_format": sample.get("bbox_format", ""),
-                        "visibility_target": sample.get("visibility_target").tolist()
-                        if sample.get("visibility_target") is not None
-                        else None,
-                        "visibility_target_source": sample.get("visibility_target_source", ""),
+                        "visibility_target": visibility_target.tolist()
+                        if hasattr(visibility_target, "tolist")
+                        else visibility_target,
+                        "visibility_target_source": visibility_target_source,
                         "hard_negative_bucket": metadata.get("hard_negative_bucket", ""),
                     }
                 )

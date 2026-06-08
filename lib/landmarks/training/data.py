@@ -95,6 +95,14 @@ def unpack_train_batch(batch, device, non_blocking=False):
                     device,
                     non_blocking=non_blocking,
                 ).float()
+            if "visibility_target_weight" in payload:
+                heads[head_name]["visibility_target_weight"] = payload[
+                    "visibility_target_weight"
+                ].to(device, non_blocking=non_blocking).float()
+            if "visibility_target_provenance" in payload:
+                heads[head_name]["visibility_target_provenance"] = list(
+                    payload["visibility_target_provenance"]
+                )
             heads[head_name]["sample_weight"] = heads[head_name][
                 "sample_weight"
             ] / heads[head_name]["sample_weight"].mean().clamp_min(1e-6)
@@ -175,6 +183,8 @@ def schema_aware_collate(batch):
                 "landmark_mask": [],
                 "sample_weight": [],
                 "visibility_target": [],
+                "visibility_target_weight": [],
+                "visibility_target_provenance": [],
                 "metadata": [],
             },
         )
@@ -183,11 +193,16 @@ def schema_aware_collate(batch):
         grouped[head_name]["heatmap"].append(item["heatmap"])
         grouped[head_name]["landmark_mask"].append(item["landmark_mask"])
         grouped[head_name]["sample_weight"].append(item["sample_weight"])
-        grouped[head_name]["visibility_target"].append(
-            item.get(
-                "visibility_target",
-                torch.full((item["target"].shape[0],), -1.0, dtype=torch.float32),
-            )
+        visibility_target = item.get(
+            "visibility_target",
+            torch.full((item["target"].shape[0],), -1.0, dtype=torch.float32),
+        )
+        grouped[head_name]["visibility_target"].append(visibility_target)
+        grouped[head_name]["visibility_target_weight"].append(
+            item.get("visibility_target_weight", torch.ones_like(visibility_target).float())
+        )
+        grouped[head_name]["visibility_target_provenance"].append(
+            item.get("visibility_target_provenance", "")
         )
         grouped[head_name]["metadata"].append(item.get("metadata", {}))
 
@@ -200,6 +215,8 @@ def schema_aware_collate(batch):
             "landmark_mask": default_collate(payload["landmark_mask"]),
             "sample_weight": default_collate(payload["sample_weight"]),
             "visibility_target": default_collate(payload["visibility_target"]),
+            "visibility_target_weight": default_collate(payload["visibility_target_weight"]),
+            "visibility_target_provenance": list(payload["visibility_target_provenance"]),
             "metadata": payload["metadata"],
         }
 

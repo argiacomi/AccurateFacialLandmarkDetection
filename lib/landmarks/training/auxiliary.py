@@ -249,6 +249,7 @@ def masked_visibility_bce_loss(
     *,
     sample_weight: torch.Tensor | None = None,
     landmark_mask: torch.Tensor | None = None,
+    target_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Masked BCE for per-point visibility.
 
@@ -276,6 +277,11 @@ def masked_visibility_bce_loss(
     weights = valid.to(loss.dtype)
     if sample_weight is not None:
         weights = weights * sample_weight.to(logits.device).to(loss.dtype).reshape(-1, 1)
+    if target_weight is not None:
+        target_weight = target_weight.to(logits.device).to(loss.dtype)
+        if target_weight.ndim == 1:
+            target_weight = target_weight.reshape(-1, 1)
+        weights = weights * target_weight
 
     return (loss * weights).sum() / weights.sum().clamp_min(1.0), valid_count
 
