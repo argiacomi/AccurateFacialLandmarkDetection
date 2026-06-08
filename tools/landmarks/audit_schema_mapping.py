@@ -16,6 +16,7 @@ from lib.landmarks.core.schema import (
     SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS,
     canonicalize_schema,
     has_verified_flip_map,
+    projection_audit_for_schema,
 )
 
 
@@ -71,7 +72,7 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
         "counts": {},
         "samples": [],
         "map_98_to_68_size": int(MAP_98_TO_68.size),
-        "profile39_overlap": "manual_overlay_required",
+        "projection_to_68": {},
         "flip_map_audit": {
             "schemas_without_verified_flip_maps": sorted(SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS),
             "unverified_identity_flip_maps": [],
@@ -89,6 +90,19 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
         schema = _schema(entry, points)
         report["counts"][schema] = report["counts"].get(schema, 0) + 1
         try:
+            projection_audit = projection_audit_for_schema(schema)
+        except ValueError:
+            projection_audit = {
+                "status": "unknown_schema",
+                "source_schema": schema,
+                "target_schema": "2d_68",
+            }
+        projection_status_counts = report["projection_to_68"].setdefault(
+            projection_audit["status"],
+            0,
+        )
+        report["projection_to_68"][projection_audit["status"]] = int(projection_status_counts) + 1
+        try:
             verified_flip_map = has_verified_flip_map(schema)
         except ValueError:
             verified_flip_map = False
@@ -96,13 +110,12 @@ def audit_schema_mapping(manifest: Path, output_dir: Path, *, limit: int = 25, w
             seen_without_verified = report["flip_map_audit"]["schemas_seen_without_verified_flip_maps"]
             if schema not in seen_without_verified:
                 seen_without_verified.append(schema)
-        if schema not in {"2d_98", "2d_39", "menpo2d_profile_39", "multipie_profile_39"}:
-            continue
         sample_id = str(entry.get("sample_id") or entry.get("id") or index)
         item: dict[str, T.Any] = {
             "sample_id": sample_id,
             "schema": schema,
             "point_count": int(points.shape[0]),
+            "projection_to_68": projection_audit,
         }
         projected = None
         if schema == "2d_98":

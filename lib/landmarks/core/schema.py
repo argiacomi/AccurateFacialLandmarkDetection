@@ -21,6 +21,22 @@ MAP_98_TO_68 = np.array([
     88, 89, 90, 91, 92, 93, 94, 95,
 ], dtype=np.int64)
 
+PROJECTION_MAPS_TO_68: dict[str, str] = {
+    "2d_68": "identity",
+    "2d_98": "MAP_98_TO_68",
+}
+
+SCHEMAS_WITHOUT_VERIFIED_68_PROJECTION = frozenset(
+    {
+        "2d_29",
+        "2d_39",
+        "2d_106",
+        "2d_194",
+        "menpo2d_profile_39",
+        "multipie_profile_39",
+    }
+)
+
 
 @dataclass(frozen=True)
 class LandmarkSchema:
@@ -293,6 +309,56 @@ def head_name_for_schema(schema: str | object) -> str:
 
 def point_count_for_schema(schema: str | object) -> int:
     return SUPPORTED_SCHEMAS[canonicalize_schema(schema)].points
+
+
+def projection_audit_for_schema(
+    source_schema: str | object,
+    *,
+    target_schema: str | object = CANONICAL_SCHEMA,
+) -> dict[str, T.Any]:
+    """Return the audited projection status for a source schema.
+
+    This intentionally separates native multi-head training support from
+    canonical 68-point projection support. New dense/native schemas can train
+    on their own heads before a reviewed overlap map exists.
+    """
+
+    source = canonicalize_schema(source_schema)
+    target = canonicalize_schema(target_schema)
+    if source == target:
+        return {
+            "status": "native",
+            "source_schema": source,
+            "target_schema": target,
+            "map": "identity",
+        }
+    if target != CANONICAL_SCHEMA:
+        return {
+            "status": "unsupported_target",
+            "source_schema": source,
+            "target_schema": target,
+            "reason": "projection audit is only defined for canonical 68-point targets",
+        }
+    if source in PROJECTION_MAPS_TO_68:
+        return {
+            "status": "audited",
+            "source_schema": source,
+            "target_schema": target,
+            "map": PROJECTION_MAPS_TO_68[source],
+        }
+    if source in SCHEMAS_WITHOUT_VERIFIED_68_PROJECTION:
+        return {
+            "status": "not_projectable",
+            "source_schema": source,
+            "target_schema": target,
+            "reason": "no audited 68-point overlap map is registered",
+        }
+    return {
+        "status": "unknown_schema",
+        "source_schema": source,
+        "target_schema": target,
+        "reason": "schema has no projection audit entry",
+    }
 
 
 def to_canonical_68(

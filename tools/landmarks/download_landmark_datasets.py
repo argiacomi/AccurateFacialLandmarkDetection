@@ -23,6 +23,16 @@ ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
 ALL_DATASETS = (
     "wflw",
     "cofw",
+    "cofw-original",
+    "helen",
+    "lapa",
+    "jd-landmark",
+    "ffl2",
+    "fll3",
+    "xm2vts",
+    "frgc",
+    "300vw",
+    "wflw-v",
     "300w",
     "aflw",
     "aflw2000-3d",
@@ -82,6 +92,99 @@ SOURCES: tuple[SourceAsset, ...] = (
         filename="cofw68-benchmark-master.zip",
         url="https://github.com/golnazghiasi/cofw68-benchmark/archive/master.zip",
         note="COFW68 benchmark annotation repository. Convert/organize with COFW images before building.",
+    ),
+    SourceAsset(
+        dataset="cofw-original",
+        name="COFW original color images",
+        filename="COFW_color.zip",
+        url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
+        note="Original COFW 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
+    ),
+    SourceAsset(
+        dataset="helen",
+        name="HELEN 194-point source notes",
+        filename="README_HELEN.md",
+        required_for_builder=False,
+        extract=False,
+        note="Manual staging is required; see the HELEN tracking/source issue.",
+        manual_steps=(
+            "Review https://github.com/argiacomi/faceswap/issues/99 for the current HELEN source and license notes.",
+            "Stage images and 194-point annotations as images plus same-stem .pts/.txt/.npy/.mat files.",
+            "Build with: python tools/landmarks/build_quality_dataset.py --dataset helen --source-dir <staged-root> --output-dir runs/landmarks/build_helen",
+        ),
+    ),
+    SourceAsset(
+        dataset="lapa",
+        name="LaPa 106-point source notes",
+        filename="README_LAPA.md",
+        required_for_builder=False,
+        extract=False,
+        note="Manual staging is required; existing adapter reference is linked in issue #8.",
+        manual_steps=(
+            "Review https://github.com/argiacomi/faceswap-test-dev/blob/master/tools/automask/lapa_adapter.py for expected LaPa parsing details.",
+            "Stage images and 106-point annotations as images plus same-stem .pts/.txt/.npy/.mat files or a samples JSON.",
+            "Build with: python tools/landmarks/build_quality_dataset.py --dataset lapa --source-dir <staged-root> --output-dir runs/landmarks/build_lapa",
+        ),
+    ),
+    SourceAsset(
+        dataset="jd-landmark",
+        name="JD-landmark 106-point source notes",
+        filename="README_JD_LANDMARK.md",
+        required_for_builder=False,
+        extract=False,
+        note="Manual staging is required; see the JD-landmark tracking/source issue.",
+        manual_steps=(
+            "Review https://github.com/argiacomi/faceswap/issues/98 for current source and layout details.",
+            "Stage images and 106-point annotations as images plus same-stem .pts/.txt/.npy/.mat files.",
+            "Build with: python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <staged-root> --output-dir runs/landmarks/build_jd_landmark",
+        ),
+    ),
+    SourceAsset(
+        dataset="ffl2",
+        name="FFL2 106-point source",
+        filename="FFL2.zip",
+        google_drive_file_id="16fiVoBaTtOevQa4mH34rWggfkNKNEL2A",
+        google_drive_view_url="https://drive.google.com/file/d/16fiVoBaTtOevQa4mH34rWggfkNKNEL2A/view",
+        note="FFL2 106-point source. Requires --include-google-drive and gdown or manual download.",
+    ),
+    SourceAsset(
+        dataset="fll3",
+        name="FLL3 106-point source",
+        filename="FLL3.zip",
+        google_drive_file_id="1F_UnmpRnUnNS3Wk3V6CkJiIUYmG5Wjdr",
+        google_drive_view_url="https://drive.google.com/file/d/1F_UnmpRnUnNS3Wk3V6CkJiIUYmG5Wjdr/view",
+        note="FLL3 106-point source. Requires --include-google-drive and gdown or manual download.",
+    ),
+    SourceAsset(
+        dataset="xm2vts",
+        name="XM2VTS source",
+        filename="XM2VTS.zip",
+        google_drive_file_id="1qdBlQhq9YEt5lzX1OGy5_AyjFL3vWxRs",
+        google_drive_view_url="https://drive.google.com/file/d/1qdBlQhq9YEt5lzX1OGy5_AyjFL3vWxRs/view",
+        note="Stage with subject/session/capture folders where available; builder preserves those identifiers.",
+    ),
+    SourceAsset(
+        dataset="frgc",
+        name="FRGC source",
+        filename="FRGC.zip",
+        google_drive_file_id="1T2Ux0tjd5CxI9PWZb5sXThuGvWH-oM5p",
+        google_drive_view_url="https://drive.google.com/file/d/1T2Ux0tjd5CxI9PWZb5sXThuGvWH-oM5p/view",
+        note="Stage with subject/session/capture folders where available; builder preserves those identifiers.",
+    ),
+    SourceAsset(
+        dataset="300vw",
+        name="300VW videos",
+        filename="300VW_Dataset_2015_12_14.zip",
+        url="https://ibug.doc.ic.ac.uk/download/300VW_Dataset_2015_12_14.zip/",
+        note="300VW video dataset. Build with frame extraction and video-level split safety.",
+    ),
+    SourceAsset(
+        dataset="wflw-v",
+        name="WFLW-V videos",
+        filename="WFLW-V.zip",
+        google_drive_file_id="1YSJdgIb-vToJIAV04PGh_U7nX6dxVSjt",
+        google_drive_view_url="https://drive.google.com/file/d/1YSJdgIb-vToJIAV04PGh_U7nX6dxVSjt/view",
+        note="WFLW-V video source. Build with frame extraction and video-level split safety.",
     ),
     SourceAsset(
         dataset="300w",
@@ -190,6 +293,21 @@ def _dataset_key(value: str) -> str:
         "300w": "300w",
         "wflw": "wflw",
         "cofw": "cofw",
+        "cofw-original": "cofw-original",
+        "cofw29": "cofw-original",
+        "helen": "helen",
+        "lapa": "lapa",
+        "jd": "jd-landmark",
+        "jdlandmark": "jd-landmark",
+        "jd-landmark": "jd-landmark",
+        "ffl2": "ffl2",
+        "fll3": "fll3",
+        "xm2vts": "xm2vts",
+        "frgc": "frgc",
+        "300vw": "300vw",
+        "300-vw": "300vw",
+        "wflw-v": "wflw-v",
+        "wflwv": "wflw-v",
         "all": "all",
     }
     return aliases.get(key, key)
@@ -472,6 +590,14 @@ def _print_build_hints(output_root: Path) -> None:
     print(
         "  MultiPIE: "
         f"python tools/landmarks/build_quality_dataset.py --dataset multipie --source-dir {output_root / 'multipie' / 'extracted'} --output-dir runs/landmarks/build_multipie"
+    )
+    print(
+        "  Issue #8 still-image datasets: "
+        "use --dataset helen|lapa|jd-landmark|ffl2|fll3|cofw-original|xm2vts|frgc with a staged root of images plus same-stem landmarks or samples JSON."
+    )
+    print(
+        "  Issue #8 video datasets: "
+        "use --dataset 300vw|wflw-v with --frame-stride/--max-frames-per-video; all frames from a video share split_safe_id=video_id."
     )
 
 

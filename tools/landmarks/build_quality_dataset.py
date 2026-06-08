@@ -11,7 +11,10 @@ Supported raw inputs by dataset:
 * COFW: faceswap-style 68-point JSON export, or generic 68/98 landmark files.
 * 300W: iBUG ``.pts`` files plus same-stem images, JSON, ``.npy``, or ``.mat``.
 * AFLW2000-3D: same-stem ``.mat`` files with 68 2D/3D landmarks plus images.
-* MERL-RAV, Menpo2D, MultiPIE: JSON, ``.npy``, ``.pts``, ``.mat`` sources.
+* HELEN, LaPa, JD-landmark, FFL2, FLL3, COFW original, XM2VTS, FRGC,
+  MERL-RAV, Menpo2D, MultiPIE: JSON, ``.npy``, ``.pts``, ``.mat`` sources.
+* 300VW and WFLW-V: video/frame JSON, pre-extracted frame directories, or
+  video extraction plus same-frame annotations.
 
 Registered non-68 schemas are preserved for schema-aware multi-head training.
 """
@@ -39,8 +42,11 @@ from lib.landmarks.core.schema import (
     canonicalize_schema,
     head_name_for_schema,
     normalize_landmark_array,
+    normalize_landmarks,
     point_count_for_schema,
+    projection_audit_for_schema,
 )
+from lib.landmarks.datasets.video_frames import extract_video_frames, video_files
 from lib.landmarks.manifest.contract import (
     TRAINING_MANIFEST_CONTRACT,
     TRAINING_MANIFEST_VERSION,
@@ -56,6 +62,16 @@ LANDMARK_EXTS = (".npy", ".pts", ".mat", ".txt")
 SUPPORTED_DATASETS = (
     "wflw",
     "cofw",
+    "cofw-original",
+    "helen",
+    "lapa",
+    "jd-landmark",
+    "ffl2",
+    "fll3",
+    "xm2vts",
+    "frgc",
+    "300vw",
+    "wflw-v",
     "merl-rav",
     "aflw2000-3d",
     "300w",
@@ -91,6 +107,26 @@ def _dataset(value: str) -> str:
         "300-w": "300w",
         "wflw": "wflw",
         "cofw": "cofw",
+        "cofw-original": "cofw-original",
+        "cofw-original-29": "cofw-original",
+        "cofw29": "cofw-original",
+        "cofw-original-color": "cofw-original",
+        "helen": "helen",
+        "lapa": "lapa",
+        "jd": "jd-landmark",
+        "jdlandmark": "jd-landmark",
+        "jd-landmark": "jd-landmark",
+        "jd-landmarks": "jd-landmark",
+        "ffl2": "ffl2",
+        "fll3": "fll3",
+        "xm2vts": "xm2vts",
+        "frgc": "frgc",
+        "300vw": "300vw",
+        "300-vw": "300vw",
+        "wflw-v": "wflw-v",
+        "wflwv": "wflw-v",
+        "wflwvideo": "wflw-v",
+        "wflw-video": "wflw-v",
         "directory": "directory",
     }
     return aliases.get(key, key)
@@ -232,14 +268,20 @@ def _parse_numeric_text(path: Path) -> np.ndarray:
     values = [float(item) for item in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", text)]
     for count, dims in ((29, 2), (39, 2), (68, 3), (68, 2), (98, 2), (106, 2), (194, 2)):
         total = count * dims
-        if len(values) == total:
-            return np.asarray(values, dtype=np.float32).reshape(count, dims)
+        for offset in (0, 1):
+            if len(values) - offset == total and (offset == 0 or int(values[0]) == count):
+                return np.asarray(values[offset:], dtype=np.float32).reshape(count, dims)
     rows: list[list[float]] = []
     for line in text.splitlines():
         parts = line.replace(",", " ").split()
         if len(parts) < 2:
             continue
         try:
+            if len(parts) >= 3 and re.fullmatch(r"[+-]?\d+", parts[0]):
+                row_index = int(parts[0])
+                if row_index in {len(rows), len(rows) + 1}:
+                    rows.append([float(parts[1]), float(parts[2])])
+                    continue
             rows.append([float(parts[0]), float(parts[1])])
         except ValueError:
             continue
@@ -523,6 +565,75 @@ def _conditions(entry: T.Mapping[str, T.Any], fallback: str) -> tuple[str, ...]:
     return tuple(labels or (_label(fallback),))
 
 
+IDENTITY_METADATA_FIELDS = (
+    "subject_id",
+    "person_id",
+    "identity_id",
+    "session_id",
+    "capture_id",
+    "video_id",
+    "clip_id",
+    "sequence_id",
+    "frame_id",
+    "frame_index",
+    "archive_id",
+    "image_id",
+    "quality",
+    "attributes",
+)
+
+
+def _entry_metadata(entry: T.Mapping[str, T.Any], *, dataset: str, source_file: Path | None = None) -> dict[str, T.Any]:
+    metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
+    for key in IDENTITY_METADATA_FIELDS:
+        if entry.get(key) not in (None, ""):
+            metadata.setdefault(key, entry[key])
+    metadata.setdefault("dataset", _dataset(dataset))
+    if source_file is not None:
+        metadata.setdefault("source_file", str(source_file.resolve()))
+    return metadata
+
+
+def _path_identity_metadata(path: Path, *, root: Path, dataset: str) -> dict[str, T.Any]:
+    rel = path.relative_to(root).with_suffix("")
+    parts = list(rel.parts)
+    metadata: dict[str, T.Any] = {
+        "source_landmarks": str(path.resolve()),
+        "image_id": rel.as_posix(),
+    }
+    if dataset in {"xm2vts", "frgc", "multipie", "menpo2d"} and parts:
+        metadata.setdefault("subject_id", parts[0])
+    if dataset in {"xm2vts", "frgc"} and len(parts) > 1:
+        metadata.setdefault("session_id", parts[1])
+    if dataset in {"xm2vts", "frgc"} and len(parts) > 2:
+        metadata.setdefault("capture_id", parts[-1])
+    return metadata
+
+
+def _split_from_entry_or_identity(
+    entry: T.Mapping[str, T.Any],
+    metadata: T.Mapping[str, T.Any],
+    *,
+    dataset: str,
+    sample_id: str,
+) -> str:
+    explicit = _label(entry.get("split") or metadata.get("split") or "")
+    if explicit in {"train", "test"}:
+        return explicit
+    if explicit in {"val", "valid", "validation", "dev"}:
+        return "test"
+    split_identity = (
+        metadata.get("split_safe_id")
+        or metadata.get("video_id")
+        or metadata.get("clip_id")
+        or metadata.get("sequence_id")
+        or metadata.get("session_id")
+        or metadata.get("subject_id")
+        or sample_id
+    )
+    return _deterministic_split(dataset, str(split_identity))
+
+
 def _save_landmarks(output_dir: Path, sample_id: str, points68: np.ndarray) -> Path:
     safe = _safe_id(sample_id).replace("#", "_")
     path = output_dir / "landmarks" / f"{safe}.npy"
@@ -571,14 +682,14 @@ def _sample(
     meta.setdefault("target_schema", target_schema)
     meta.setdefault("landmark_count", int(points68.shape[0]))
     meta.setdefault("head_name", head_name)
-    meta.setdefault(
-        "mapping_audit",
-        {
+    if not isinstance(meta.get("mapping_audit"), dict):
+        meta["mapping_audit"] = {
             "status": "native",
             "source_schema": source_schema,
             "target_schema": target_schema,
-        },
-    )
+            "projection_to_68": projection_audit_for_schema(source_schema),
+        }
+    meta["mapping_audit"].setdefault("projection_to_68", projection_audit_for_schema(source_schema))
 
     out: dict[str, T.Any] = {
         "sample_id": sample_id,
@@ -596,7 +707,20 @@ def _sample(
         "metadata": meta,
         "mapping_audit": dict(meta["mapping_audit"]),
     }
-    for identity_key in ("subject_id", "session_id", "video_id", "frame_id", "archive_id", "image_id"):
+    for identity_key in (
+        "subject_id",
+        "person_id",
+        "identity_id",
+        "session_id",
+        "capture_id",
+        "video_id",
+        "clip_id",
+        "sequence_id",
+        "frame_id",
+        "frame_index",
+        "archive_id",
+        "image_id",
+    ):
         if meta.get(identity_key) not in (None, ""):
             out[identity_key] = meta[identity_key]
     out["split_safe_id"] = split_safe_id_for_sample(out)
@@ -741,20 +865,27 @@ def _build_json(
             skipped.append({"sample_id": str(idx), "reason": "missing image or landmarks"})
             continue
         sample_id = str(entry.get("sample_id") or entry.get("id") or entry.get("name") or idx)
-        metadata = dict(entry.get("metadata", {})) if isinstance(entry.get("metadata"), dict) else {}
+        entry_dataset = _dataset(str(entry.get("dataset") or dataset))
+        metadata = _entry_metadata(entry, dataset=entry_dataset, source_file=path)
         source_schema = str(entry.get("source_schema") or metadata.get("source_schema") or "") or None
         try:
             points68, detected_schema = _load_points(landmark_value, base_dir=path.parent, source_schema=source_schema)
+            image_path = _resolve_path(image_value, base_dir=image_base)
+            if not image_path.is_file():
+                raise FileNotFoundError(f"image not found: {image_path}")
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": sample_id, "reason": str(err)})
             continue
         conds = _conditions(entry, scenario)
+        split = _split_from_entry_or_identity(entry, metadata, dataset=entry_dataset, sample_id=sample_id)
+        conds = tuple(dict.fromkeys((*conds, f"{split}set")))
         samples.append(
-            _sample(
+            _with_split(
+                _sample(
                 output_dir=output_dir,
-                dataset=_dataset(str(entry.get("dataset") or dataset)),
+                dataset=entry_dataset,
                 sample_id=sample_id,
-                image=_resolve_path(image_value, base_dir=image_base),
+                image=image_path,
                 points68=points68,
                 condition=str(entry.get("condition") or conds[0]),
                 conditions=conds,
@@ -763,8 +894,12 @@ def _build_json(
                 metadata=metadata,
                 visibility=entry.get("visibility", metadata.get("visibility")),
                 normalizer=entry.get("normalizer", metadata.get("normalizer")),
+                ),
+                split,
             )
         )
+    if not samples:
+        raise ValueError(f"no JSON samples built from {path}; skipped={skipped[:5]}")
     return _write_manifest(
         output_dir,
         dataset,
@@ -787,6 +922,12 @@ def _condition_for_landmark_file(dataset: str, path: Path, scenario: str) -> tup
     for token in ("profile", "pose", "occlusion", "occluded", "frontal", "normal", "clean", "challenging"):
         if token in parts or any(token in part for part in parts):
             labels.append(token)
+    for token in ("train", "training"):
+        if token in parts or any(token == part for part in parts):
+            labels.append("trainset")
+    for token in ("test", "testing", "validation", "val"):
+        if token in parts or any(token == part for part in parts):
+            labels.append("testset")
     if not labels:
         labels.append(_label(scenario))
     labels = list(dict.fromkeys(_label(item) for item in labels))
@@ -845,7 +986,20 @@ def _build_directory(
         condition, conds = _condition_for_landmark_file(dataset, landmark_path.relative_to(root), scenario)
         sample_image = image
         sample_points68 = points68
-        sample_metadata = {"source_landmarks": str(landmark_path.resolve())}
+        sample_metadata = _path_identity_metadata(landmark_path, root=root, dataset=dataset)
+        entry_for_split: dict[str, T.Any] = {}
+        if "trainset" in conds:
+            entry_for_split["split"] = "train"
+        elif "testset" in conds:
+            entry_for_split["split"] = "test"
+        split = _split_from_entry_or_identity(
+            entry_for_split,
+            sample_metadata,
+            dataset=dataset,
+            sample_id=sample_id,
+        )
+        if f"{split}set" not in conds:
+            conds = tuple(dict.fromkeys((*conds, f"{split}set")))
         if dataset in {"300w", "w300"}:
             sample_image, sample_points68, crop_metadata = _crop_sample_image(
                 output_dir=output_dir,
@@ -860,21 +1014,24 @@ def _build_directory(
             sample_metadata.update(crop_metadata)
 
         samples.append(
-            _sample(
-                output_dir=output_dir,
-                dataset=dataset,
-                sample_id=sample_id,
-                image=sample_image,
-                points68=sample_points68,
-                condition=condition,
-                conditions=conds,
-                source_schema=source_schema,
-                source_id=sample_id,
-                metadata=sample_metadata,
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset=dataset,
+                    sample_id=sample_id,
+                    image=sample_image,
+                    points68=sample_points68,
+                    condition=condition,
+                    conditions=conds,
+                    source_schema=source_schema,
+                    source_id=sample_id,
+                    metadata=sample_metadata,
+                ),
+                split,
             )
         )
     if not samples:
-        raise ValueError(f"no usable 68/98-point landmark samples found under {root}; skipped={skipped[:5]}")
+        raise ValueError(f"no usable schema-aware landmark samples found under {root}; skipped={skipped[:5]}")
     return _write_manifest(
         output_dir,
         dataset,
@@ -1208,6 +1365,7 @@ def _build_multipie(
                 bbox = bbox or _bbox_from_points(points68)
                 sample_id = Path(image_rel).with_suffix("").as_posix()
                 normalizer = _normalizer(points68, sample_id)
+                split = "train" if "trainset" in conds else _deterministic_split("multipie", sample_id)
 
                 metadata = {
                     "annotation_file": str(annotation_file.resolve()),
@@ -1217,6 +1375,7 @@ def _build_multipie(
                     "face_bbox_source": "multipie_landmark_bounds",
                     "normalizer_source": DEFAULT_NORMALIZER_SOURCE,
                     "source_schema": source_schema,
+                    "split": split,
                 }
 
                 sample_kwargs = dict(
@@ -1236,7 +1395,7 @@ def _build_multipie(
                 except TypeError:
                     sample = _sample(**sample_kwargs)
 
-                samples.append(sample)
+                samples.append(_with_split(sample, split))
             except Exception as err:  # noqa: BLE001
                 skipped.append(
                     {
@@ -1356,31 +1515,35 @@ def _build_wflw(
         if not image_path.is_file():
             skipped.append({"sample_id": sample_id, "reason": f"image not found: {image_path}"})
             continue
-        points68 = normalize_landmarks(points98, source_schema="2d_98")
+        points98 = normalize_landmark_array(points98, schema="2d_98")
         crop_image_path, crop_points68, crop_metadata = _crop_sample_image(
             output_dir=output_dir,
             dataset="wflw",
             sample_id=sample_id,
             image_path=image_path,
-            points68=points68,
+            points68=points98,
             bbox_xyxy=bbox,
             bbox_source="wflw_rect_attr_bbox",
             pad_ratio=0.25,
         )
-        metadata = {"bbox": bbox, "attributes": attrs, "image_id": image_rel}
+        split = _deterministic_split("wflw", sample_id)
+        metadata = {"bbox": bbox, "attributes": attrs, "image_id": image_rel, "split": split}
         metadata.update(crop_metadata)
         samples.append(
-            _sample(
-                output_dir=output_dir,
-                dataset="wflw",
-                sample_id=sample_id,
-                image=crop_image_path,
-                points68=crop_points68,
-                condition=conds[0],
-                conditions=tuple(_label(item) for item in conds),
-                source_schema="2d_98",
-                source_id=sample_id,
-                metadata=metadata,
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset="wflw",
+                    sample_id=sample_id,
+                    image=crop_image_path,
+                    points68=crop_points68,
+                    condition=conds[0],
+                    conditions=tuple(dict.fromkeys((*(_label(item) for item in conds), f"{split}set"))),
+                    source_schema="2d_98",
+                    source_id=sample_id,
+                    metadata=metadata,
+                ),
+                split,
             )
         )
     if not samples:
@@ -1388,6 +1551,171 @@ def _build_wflw(
     return _write_manifest(
         output_dir,
         "wflw",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
+def _candidate_frame_stems(frame_index: int) -> tuple[str, ...]:
+    one_based = int(frame_index) + 1
+    return tuple(
+        dict.fromkeys(
+            (
+                f"frame_{frame_index:06d}",
+                f"{frame_index:06d}",
+                f"{frame_index:05d}",
+                f"{frame_index:04d}",
+                str(frame_index),
+                f"frame_{one_based:06d}",
+                f"{one_based:06d}",
+                f"{one_based:05d}",
+                f"{one_based:04d}",
+                str(one_based),
+            )
+        )
+    )
+
+
+def _find_frame_landmark_file(root: Path, video_id: str, frame_index: int) -> Path | None:
+    safe_video_id = str(video_id).replace("\\", "/").strip("/")
+    search_roots = [
+        root / "annotations" / safe_video_id,
+        root / "landmarks" / safe_video_id,
+        root / "labels" / safe_video_id,
+        root / safe_video_id,
+    ]
+    for search_root in search_roots:
+        if not search_root.is_dir():
+            continue
+        for stem in _candidate_frame_stems(frame_index):
+            for suffix in LANDMARK_EXTS:
+                candidate = search_root / f"{stem}{suffix}"
+                if candidate.is_file():
+                    return candidate
+
+    for stem in _candidate_frame_stems(frame_index):
+        for suffix in LANDMARK_EXTS:
+            matches = sorted(root.rglob(f"{safe_video_id}*{stem}{suffix}"), key=lambda item: len(item.parts))
+            if matches:
+                return matches[0]
+    return None
+
+
+def _build_video_dataset(
+    root: Path,
+    output_dir: Path,
+    *,
+    dataset: str,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+    video_root: str | None,
+    frame_output_dir: str | None,
+    frame_stride: int,
+    max_frames_per_video: int | None,
+) -> Path:
+    json_path = _json_source(root)
+    if json_path is not None:
+        return _build_json(
+            json_path,
+            output_dir,
+            dataset=dataset,
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    videos_root = Path(video_root) if video_root else root
+    videos = video_files(videos_root)
+    if not videos:
+        return _build_directory(
+            root,
+            output_dir,
+            dataset=dataset,
+            scenario=scenario,
+            scenarios=scenarios,
+            limit=limit,
+            mode=mode,
+            allow_overlap=allow_overlap,
+            image_root=image_root,
+        )
+
+    frame_root = Path(frame_output_dir) if frame_output_dir else output_dir / "frames" / dataset
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for video_path in videos:
+        video_id = video_path.resolve().relative_to(videos_root.resolve()).with_suffix("").as_posix()
+        split = _deterministic_split(dataset, video_id)
+        try:
+            frame_records = extract_video_frames(
+                video_path,
+                frame_root,
+                stride=frame_stride,
+                max_frames=max_frames_per_video,
+                video_id=video_id,
+            )
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": video_id, "reason": str(err)})
+            continue
+
+        for record in frame_records:
+            frame_index = int(record["frame_index"])
+            sample_id = f"{dataset}/{video_id}/frame_{frame_index:06d}"
+            landmark_path = _find_frame_landmark_file(root, video_id, frame_index)
+            if landmark_path is None:
+                skipped.append({"sample_id": sample_id, "reason": "matching frame landmarks not found"})
+                continue
+            try:
+                points, source_schema = _load_landmark_file(landmark_path)
+            except Exception as err:  # noqa: BLE001
+                skipped.append({"sample_id": sample_id, "reason": str(err)})
+                continue
+
+            metadata = {
+                "dataset": dataset,
+                "video_id": video_id,
+                "frame_index": frame_index,
+                "frame_id": record["frame_id"],
+                "split": split,
+                "split_safe_id": video_id,
+                "source_video": str(video_path.resolve()),
+                "source_landmarks": str(landmark_path.resolve()),
+            }
+            conditions = ("video_frame", f"{split}set")
+            samples.append(
+                _with_split(
+                    _sample(
+                        output_dir=output_dir,
+                        dataset=dataset,
+                        sample_id=sample_id,
+                        image=Path(record["image"]),
+                        points68=points,
+                        condition="video_frame",
+                        conditions=conditions,
+                        source_schema=source_schema,
+                        source_id=sample_id,
+                        metadata=metadata,
+                    ),
+                    split,
+                )
+            )
+
+    if not samples:
+        raise ValueError(f"no {dataset} video-frame samples built; skipped={skipped[:10]}")
+
+    return _write_manifest(
+        output_dir,
+        dataset,
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,
@@ -1471,6 +1799,24 @@ def build(args: argparse.Namespace) -> Path:
                 mode=args.manifest_mode,
                 allow_overlap=args.allow_overlap,
             )
+        if dataset in {"300vw", "wflw-v"}:
+            if root is None and not args.video_root:
+                raise ValueError("--source-dir, --source-zip, or --video-root is required for video datasets")
+            return _build_video_dataset(
+                root or Path(args.video_root),
+                output_dir,
+                dataset=dataset,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+                video_root=args.video_root,
+                frame_output_dir=args.frame_output_dir,
+                frame_stride=args.frame_stride,
+                max_frames_per_video=args.max_frames_per_video,
+            )
         if root is None:
             raise ValueError("--source-dir, --source-zip, --wflw-annotations, or --cofw-json is required")
         return _build_directory(
@@ -1498,6 +1844,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest-mode", choices=("replace", "merge"), default="replace")
     parser.add_argument("--allow-overlap", action="store_true")
     parser.add_argument("--image-root", default=None)
+    parser.add_argument("--video-root", default=None)
+    parser.add_argument("--frame-output-dir", default=None)
+    parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--max-frames-per-video", type=int, default=None)
     parser.add_argument("--recursive", action="store_true", help="Accepted for compatibility; scans are recursive.")
     parser.add_argument("--wflw-annotations", default=None)
     parser.add_argument("--cofw-json", default=None)

@@ -1,0 +1,106 @@
+# Landmark Dataset Staging
+
+This document records the staging contract for the schema-aware manifest builder.
+The builder keeps native point schemas and routes them to native training heads:
+
+- `2d_194` -> `landmarks_194`
+- `2d_106` -> `landmarks_106`
+- `2d_98` -> `landmarks_98`
+- `2d_68` -> `landmarks_68`
+- `2d_29` -> `landmarks_29`
+- `2d_39`, `menpo2d_profile_39`, `multipie_profile_39` -> `profile39`
+
+Only `2d_98` currently has an audited projection to canonical 68 via
+`MAP_98_TO_68`. The 29-, 39-, 106-, and 194-point schemas are trainable native
+schemas and are marked `not_projectable` for 68-point projection until an
+audited overlap map is added.
+
+## Generic Staged Layout
+
+For HELEN, LaPa, JD-landmark, FFL2, FLL3, COFW original, XM2VTS, and FRGC, the
+preferred local staging layout is:
+
+```text
+<dataset-root>/
+  images/.../<sample>.jpg
+  annotations/.../<sample>.pts
+```
+
+The builder also accepts `.txt`, `.npy`, `.mat`, and a JSON file with `samples`
+or `entries`. Image and landmark files can be same-stem siblings, or the image
+can be found recursively under `--image-root`.
+
+JSON entries should use:
+
+```json
+{
+  "sample_id": "subject/session/sample",
+  "dataset": "lapa",
+  "image": "images/sample.jpg",
+  "landmarks": "annotations/sample.pts",
+  "source_schema": "2d_106",
+  "split": "train",
+  "visibility": [1, 1, 0],
+  "metadata": {
+    "subject_id": "subject",
+    "session_id": "session"
+  }
+}
+```
+
+If `split` is absent, a deterministic train/test split is assigned from
+`split_safe_id`, `video_id`, `session_id`, `subject_id`, or `sample_id` in that
+order. XM2VTS and FRGC directory layouts should keep subject/session/capture
+folders because those identifiers are preserved for leakage checks.
+
+## Dataset Sources
+
+| Dataset | Schema | Source | Builder command |
+| --- | --- | --- | --- |
+| HELEN | `2d_194` | `https://github.com/argiacomi/faceswap/issues/99` | `python tools/landmarks/build_quality_dataset.py --dataset helen --source-dir <root> --output-dir runs/landmarks/build_helen` |
+| LaPa | `2d_106` | `https://github.com/argiacomi/faceswap-test-dev/blob/master/tools/automask/lapa_adapter.py` | `python tools/landmarks/build_quality_dataset.py --dataset lapa --source-dir <root> --output-dir runs/landmarks/build_lapa` |
+| JD-landmark | `2d_106` | `https://github.com/argiacomi/faceswap/issues/98` | `python tools/landmarks/build_quality_dataset.py --dataset jd-landmark --source-dir <root> --output-dir runs/landmarks/build_jd_landmark` |
+| FFL2 | `2d_106` | Google Drive file id `16fiVoBaTtOevQa4mH34rWggfkNKNEL2A` | `python tools/landmarks/build_quality_dataset.py --dataset ffl2 --source-dir <root> --output-dir runs/landmarks/build_ffl2` |
+| FLL3 | `2d_106` | Google Drive file id `1F_UnmpRnUnNS3Wk3V6CkJiIUYmG5Wjdr` | `python tools/landmarks/build_quality_dataset.py --dataset fll3 --source-dir <root> --output-dir runs/landmarks/build_fll3` |
+| COFW original | `2d_29` | `https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1` | `python tools/landmarks/build_quality_dataset.py --dataset cofw-original --source-dir <root> --output-dir runs/landmarks/build_cofw_original` |
+| XM2VTS | staged schema | Google Drive file id `1qdBlQhq9YEt5lzX1OGy5_AyjFL3vWxRs` | `python tools/landmarks/build_quality_dataset.py --dataset xm2vts --source-dir <root> --output-dir runs/landmarks/build_xm2vts` |
+| FRGC | staged schema | Google Drive file id `1T2Ux0tjd5CxI9PWZb5sXThuGvWH-oM5p` | `python tools/landmarks/build_quality_dataset.py --dataset frgc --source-dir <root> --output-dir runs/landmarks/build_frgc` |
+| 300VW | frame annotations | `https://ibug.doc.ic.ac.uk/download/300VW_Dataset_2015_12_14.zip/` | `python tools/landmarks/build_quality_dataset.py --dataset 300vw --source-dir <root> --output-dir runs/landmarks/build_300vw --frame-stride 5` |
+| WFLW-V | frame annotations | Google Drive file id `1YSJdgIb-vToJIAV04PGh_U7nX6dxVSjt` | `python tools/landmarks/build_quality_dataset.py --dataset wflw-v --source-dir <root> --output-dir runs/landmarks/build_wflw_v --frame-stride 5` |
+
+Use `tools/landmarks/download_landmark_datasets.py --list --dataset all` to
+inspect configured sources. Google Drive downloads require
+`--include-google-drive` and `gdown`; otherwise the downloader writes manual
+staging notes.
+
+## Video Layout
+
+Video datasets can be staged with videos and per-frame annotations:
+
+```text
+<dataset-root>/
+  videos/<video_id>.avi
+  annotations/<video_id>/000001.pts
+  annotations/<video_id>/000002.pts
+```
+
+The builder searches `annotations/`, `landmarks/`, `labels/`, and
+`<dataset-root>/<video_id>/` for zero-based and one-based frame names. Extracted
+frames are written under `<output-dir>/frames/<dataset>/...` unless
+`--frame-output-dir` is provided.
+
+All frames from a video use `split_safe_id=<video_id>` and share the same split.
+Each manifest entry includes `video_id`, `frame_id`, `frame_index`, and source
+video/landmark paths for leakage-safe evaluation and auditing.
+
+## Manifest Reports
+
+Every build writes:
+
+- `manifest.json`
+- `dataset_audit.json`
+
+Reports include per-dataset counts, split counts, source/target schema counts,
+head counts, skipped sample examples, and projection status counts. Unsupported
+or unaudited projection status is reported as `not_projectable` instead of
+silently collapsing labels to 68 points.

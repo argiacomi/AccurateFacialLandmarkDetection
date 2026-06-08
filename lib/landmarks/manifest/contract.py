@@ -110,10 +110,19 @@ def manifest_summary(samples: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, di
         "target_schemas": Counter(),
         "heads": Counter(),
         "hard_negative_buckets": Counter(),
+        "projection_status": Counter(),
     }
     for sample in samples:
         metadata = sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
         source = sample.get("source") if isinstance(sample.get("source"), dict) else {}
+        mapping_audit = sample.get("mapping_audit")
+        if not isinstance(mapping_audit, dict):
+            mapping_audit = metadata.get("mapping_audit")
+        if not isinstance(mapping_audit, dict):
+            mapping_audit = {}
+        projection_audit = mapping_audit.get("projection_to_68")
+        if not isinstance(projection_audit, dict):
+            projection_audit = {}
 
         dataset = sample.get("dataset") or source.get("dataset") or metadata.get("dataset") or "unknown"
         split = sample.get("split") or metadata.get("split") or "unspecified"
@@ -135,6 +144,7 @@ def manifest_summary(samples: T.Sequence[T.Mapping[str, T.Any]]) -> dict[str, di
             ("target_schemas", target_schema),
             ("heads", head),
             ("hard_negative_buckets", bucket),
+            ("projection_status", projection_audit.get("status") or mapping_audit.get("status") or "unknown"),
         ):
             counters[key][_label(value)] += 1
 
