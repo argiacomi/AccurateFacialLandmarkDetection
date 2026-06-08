@@ -542,6 +542,41 @@ def test_cofw_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
     assert saved[0, 0].max() < 50
 
 
+def test_overlay_uses_small_uniform_visibility_colors(tmp_path):
+    image_path = tmp_path / "img.png"
+    assert cv2.imwrite(str(image_path), np.zeros((256, 256, 3), dtype=np.uint8))
+    # Five well-separated points; index 3 is occluded, the rest visible.
+    points = np.asarray(
+        [[40, 40], [80, 40], [120, 40], [160, 40], [200, 40]], dtype=np.float32
+    )
+    landmarks_path = tmp_path / "lmk.npy"
+    np.save(landmarks_path, points)
+    visibility = [True, True, True, False, True]
+
+    out = tmp_path / "overlay.png"
+    builder._draw_manifest_overlay(image_path, landmarks_path, out, visibility=visibility)
+    drawn = cv2.imread(str(out), cv2.IMREAD_COLOR)  # BGR
+
+    def is_green(px):
+        b, g, r = (int(v) for v in px)
+        return g > 180 and r < 100 and b < 100
+
+    def is_red(px):
+        b, g, r = (int(v) for v in px)
+        return r > 180 and g < 100 and b < 100
+
+    # Visible points are green -- including index 0, which the old code colored
+    # differently for every 5th point.
+    assert is_green(drawn[40, 40])
+    assert is_green(drawn[40, 80])
+    assert is_green(drawn[40, 120])
+    assert is_green(drawn[40, 200])
+    # The occluded point is red.
+    assert is_red(drawn[40, 160])
+    # Points are small: a pixel a few px away from a center is background.
+    assert drawn[55, 40].max() < 40
+
+
 @pytest.mark.parametrize(
     ("dataset", "release_dir", "list_name", "image_rel", "expected_identity"),
     [

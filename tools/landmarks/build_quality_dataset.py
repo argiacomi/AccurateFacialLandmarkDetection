@@ -844,7 +844,13 @@ def _write_manifest(
     return manifest_path
 
 
-def _draw_manifest_overlay(image_path: Path, landmarks_path: Path, output_path: Path) -> None:
+def _draw_manifest_overlay(
+    image_path: Path,
+    landmarks_path: Path,
+    output_path: Path,
+    *,
+    visibility: T.Sequence[T.Any] | None = None,
+) -> None:
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"could not read overlay image: {image_path}")
@@ -852,10 +858,14 @@ def _draw_manifest_overlay(image_path: Path, landmarks_path: Path, output_path: 
     height, width = image.shape[:2]
     if points.size and float(np.nanmax(points)) <= 1.5:
         points = points * np.asarray([width - 1, height - 1], dtype=np.float32)
-    radius = max(1, int(round(max(width, height) / 256.0 * 2.0)))
+    radius = max(1, int(round(max(width, height) / 512.0)))
+    visible_color = (0, 255, 0)  # green (BGR)
+    occluded_color = (0, 0, 255)  # red (BGR)
+    vis = list(visibility) if visibility is not None else None
     for index, (x, y) in enumerate(points):
-        color = (0, 255, 255) if index % 5 else (0, 0, 255)
-        cv2.circle(image, (int(round(x)), int(round(y))), radius, color, -1)
+        occluded = vis is not None and index < len(vis) and not bool(vis[index])
+        color = occluded_color if occluded else visible_color
+        cv2.circle(image, (int(round(x)), int(round(y))), radius, color, -1, lineType=cv2.LINE_AA)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(str(output_path), image)
     if not ok:
@@ -890,8 +900,11 @@ def _write_visual_audit(manifest_path: Path, output_dir: Path, *, limit: int = 5
         landmarks_path = _resolve_path(landmarks_value, base_dir=base_dir)
         overlay_name = _safe_id(sample_id).replace("/", "_").replace("#", "_")
         overlay_path = audit_dir / "overlays" / schema / f"{overlay_name}.jpg"
+        visibility = entry.get("visibility")
+        if visibility is None and isinstance(entry.get("metadata"), dict):
+            visibility = entry["metadata"].get("visibility")
         try:
-            _draw_manifest_overlay(image_path, landmarks_path, overlay_path)
+            _draw_manifest_overlay(image_path, landmarks_path, overlay_path, visibility=visibility)
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": sample_id, "reason": str(err)})
             continue
