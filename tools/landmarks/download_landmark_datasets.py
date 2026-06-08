@@ -121,7 +121,7 @@ SOURCES: tuple[SourceAsset, ...] = (
     SourceAsset(
         dataset="cofw68",
         name="cofw68 color images",
-        filename="cofw68_color.zip",
+        filename="COFW_color.zip",
         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
         required_for_builder=False,
         note="cofw68 color image archive. Pair with cofw6868 annotations/JSON for manifest building.",
@@ -136,7 +136,7 @@ SOURCES: tuple[SourceAsset, ...] = (
     SourceAsset(
         dataset="cofw29",
         name="cofw68 original color images",
-        filename="cofw68_color.zip",
+        filename="COFW_color.zip",
         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
         note="Original cofw68 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
     ),

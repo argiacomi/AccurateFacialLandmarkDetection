@@ -2506,7 +2506,7 @@ def _cofw68_original_mat_files(root: Path) -> list[tuple[Path, str]]:
     out: list[tuple[Path, str]] = []
     for path in sorted(root.rglob("*.mat"), key=lambda item: len(item.parts)):
         name = path.name.lower()
-        if "cofw68" not in name:
+        if "cofw" not in name or "color" not in name:
             continue
         if "train" in name:
             out.append((path, "train"))
@@ -2702,6 +2702,9 @@ def _cofw68_original_hdf5_arrays(
 
     return points_rows, images, visibility_rows, bbox_rows
 
+def _is_matlab_hdf_reader_error(err: Exception) -> bool:
+    message = str(err)
+    return "HDF reader" in message or "MATLAB 7.3" in message
 
 def _build_cofw68_original(
     root: Path,
@@ -2721,7 +2724,7 @@ def _build_cofw68_original(
             output_dir,
             dataset="cofw29",
             expected_schema="2d_29",
-            parser_name="cofw68_original_29",
+            parser_name="cofw_original_29",
             scenario=scenario,
             scenarios=scenarios,
             limit=limit,
@@ -2745,26 +2748,41 @@ def _build_cofw68_original(
                         import scipy.io as sio_module
                     except ImportError as err:
                         raise RuntimeError(
-                            "scipy is required to read cofw68 original .mat files"
+                            "scipy is required to read COFW original .mat files"
                         ) from err
                     sio = sio_module
-                payload = sio.loadmat(mat_path)
-                points_rows = _cofw68_original_points_array(
-                    _mat_first_key(
-                        payload, ("phisTr", "phisT", "phis", "points", "landmarks")
+
+                try:
+                    payload = sio.loadmat(mat_path)
+                except (NotImplementedError, ValueError) as err:
+                    if not _is_matlab_hdf_reader_error(err):
+                        raise
+                    points_rows, images, visibility_rows, bbox_rows = (
+                        _cofw68_original_hdf5_arrays(mat_path, declared_split)
                     )
-                )
-                images = _cofw68_original_image_array(
-                    _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
-                )
-                visibility_rows = _cofw68_original_visibility(
-                    _mat_first_key(
-                        payload,
-                        ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded"),
-                    ),
-                    len(points_rows),
-                )
-                bbox_rows = [None] * len(points_rows)
+                else:
+                    points_rows = _cofw68_original_points_array(
+                        _mat_first_key(
+                            payload, ("phisTr", "phisT", "phis", "points", "landmarks")
+                        )
+                    )
+                    images = _cofw68_original_image_array(
+                        _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
+                    )
+                    visibility_rows = _cofw68_original_visibility(
+                        _mat_first_key(
+                            payload,
+                            (
+                                "occlusionsTr",
+                                "occlusionsT",
+                                "occlusion",
+                                "occ",
+                                "occluded",
+                            ),
+                        ),
+                        len(points_rows),
+                    )
+                    bbox_rows = [None] * len(points_rows)
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
             continue
@@ -2789,7 +2807,7 @@ def _build_cofw68_original(
             visibility = visibility_rows[index] if index < len(visibility_rows) else [True] * 29
             metadata = {
                 "dataset": "cofw29",
-                "dataset_parser": "cofw68_original_29",
+                "dataset_parser": "cofw_original_29",
                 "parser_type": "dataset_specific",
                 "annotation_file": str(mat_path.resolve()),
                 "source_schema": "2d_29",
@@ -2848,10 +2866,10 @@ def _cofw6868_annotation_paths(root: Path) -> list[Path]:
 
 def _cofw68_test_color_mat(root: Path) -> Path:
     matches = sorted(
-        root.rglob("cofw68_test_color.mat"), key=lambda item: len(item.parts)
+        root.rglob("COFW_test_color.mat"), key=lambda item: len(item.parts)
     )
     if not matches:
-        raise FileNotFoundError(f"cofw68_test_color.mat not found below {root}")
+        raise FileNotFoundError(f"COFW_test_color.mat not found below {root}")
     return matches[0]
 
 

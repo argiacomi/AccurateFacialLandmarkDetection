@@ -1,0 +1,215 @@
+diff --git a/lib/landmarks/datasets/sources.py b/lib/landmarks/datasets/sources.py
+index 23484b3..fb74d7a 100644
+--- a/lib/landmarks/datasets/sources.py
++++ b/lib/landmarks/datasets/sources.py
+@@ -28,7 +28,7 @@ IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+ 
+ WFLW_ANNOTATIONS_URL = "https://wywu.github.io/projects/LAB/support/WFLW_annotations.tar.gz"
+ WFLW_IMAGES_GOOGLE_DRIVE_FILE_ID = "1hzBd48JIdWTJSsATBEB_eFVvPL1bx6UC"
+-cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/cofw68_color.zip"
++cofw68_COLOR_URL = "http://www.vision.caltech.edu/xpburgos/ICCV13/Data/COFW_color.zip"
+ MERL_RAV_LABELS_URL = "https://github.com/abhi1kumar/MERL-RAV_dataset/archive/refs/heads/master.zip"
+ AFLW2000_3D_URL = "http://www.cbsr.ia.ac.cn/users/xiangyuzhu/projects/3DDFA/Database/AFLW2000-3D.zip"
+ AFLW2000_3D_SHA256 = "252bc35274d65ff27b6e573aa96c2f4c116ad88452cc984fb882258c0ed6e2d8"
+diff --git a/tests/test_issue8_dataset_ingestion.py b/tests/test_issue8_dataset_ingestion.py
+index 2051be5..1079c57 100644
+--- a/tests/test_issue8_dataset_ingestion.py
++++ b/tests/test_issue8_dataset_ingestion.py
+@@ -442,7 +442,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
+     occlusions = np.zeros((1, 29), dtype=np.uint8)
+     occlusions[0, 3] = 1
+     scipy.savemat(
+-        source / "cofw68_train_color.mat",
++        source / "COFW_train_color.mat",
+         {
+             "phisTr": points,
+             "IsTr": images,
+@@ -469,7 +469,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
+     assert sample["split"] == "train"
+     assert sample["visibility"][3] is False
+     assert sample["metadata"]["occlusion_mask"][3] is True
+-    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
++    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+     assert manifest["projection_status"] == {"not_projectable": 1}
+ 
+ 
+@@ -485,7 +485,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
+     phis[58 + 3, 0] = 1.0
+     image = np.full((3, 64, 64), 127, dtype=np.uint8)
+ 
+-    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
++    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+         image_ds = handle.create_dataset("image_0000", data=image)
+         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
+         refs[0, 0] = image_ds.ref
+@@ -509,7 +509,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
+     assert sample["visibility"][3] is False
+     assert sample["metadata"]["bbox_xyxy"] == [1.0, 2.0, 30.0, 40.0]
+     assert Path(sample["image"]).is_file()
+-    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
++    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
+ 
+ 
+ def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
+@@ -528,7 +528,7 @@ def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
+     image = np.zeros((3, 60, 40), dtype=np.uint8)
+     image[:, 5, 10] = 255  # white marker at annotation (x=5, y=10)
+ 
+-    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
++    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
+         image_ds = handle.create_dataset("image_0000", data=image)
+         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
+         refs[0, 0] = image_ds.ref
+diff --git a/tools/landmarks/build_quality_dataset.py b/tools/landmarks/build_quality_dataset.py
+index 2c91e77..d8096e1 100644
+--- a/tools/landmarks/build_quality_dataset.py
++++ b/tools/landmarks/build_quality_dataset.py
+@@ -2506,7 +2506,7 @@ def _cofw68_original_mat_files(root: Path) -> list[tuple[Path, str]]:
+     out: list[tuple[Path, str]] = []
+     for path in sorted(root.rglob("*.mat"), key=lambda item: len(item.parts)):
+         name = path.name.lower()
+-        if "cofw68" not in name:
++        if "cofw" not in name or "color" not in name:
+             continue
+         if "train" in name:
+             out.append((path, "train"))
+@@ -2702,6 +2702,9 @@ def _cofw68_original_hdf5_arrays(
+ 
+     return points_rows, images, visibility_rows, bbox_rows
+ 
++def _is_matlab_hdf_reader_error(err: Exception) -> bool:
++    message = str(err)
++    return "HDF reader" in message or "MATLAB 7.3" in message
+ 
+ def _build_cofw68_original(
+     root: Path,
+@@ -2721,7 +2724,7 @@ def _build_cofw68_original(
+             output_dir,
+             dataset="cofw29",
+             expected_schema="2d_29",
+-            parser_name="cofw68_original_29",
++            parser_name="cofw_original_29",
+             scenario=scenario,
+             scenarios=scenarios,
+             limit=limit,
+@@ -2745,26 +2748,41 @@ def _build_cofw68_original(
+                         import scipy.io as sio_module
+                     except ImportError as err:
+                         raise RuntimeError(
+-                            "scipy is required to read cofw68 original .mat files"
++                            "scipy is required to read COFW original .mat files"
+                         ) from err
+                     sio = sio_module
+-                payload = sio.loadmat(mat_path)
+-                points_rows = _cofw68_original_points_array(
+-                    _mat_first_key(
+-                        payload, ("phisTr", "phisT", "phis", "points", "landmarks")
++
++                try:
++                    payload = sio.loadmat(mat_path)
++                except (NotImplementedError, ValueError) as err:
++                    if not _is_matlab_hdf_reader_error(err):
++                        raise
++                    points_rows, images, visibility_rows, bbox_rows = (
++                        _cofw68_original_hdf5_arrays(mat_path, declared_split)
+                     )
+-                )
+-                images = _cofw68_original_image_array(
+-                    _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
+-                )
+-                visibility_rows = _cofw68_original_visibility(
+-                    _mat_first_key(
+-                        payload,
+-                        ("occlusionsTr", "occlusionsT", "occlusion", "occ", "occluded"),
+-                    ),
+-                    len(points_rows),
+-                )
+-                bbox_rows = [None] * len(points_rows)
++                else:
++                    points_rows = _cofw68_original_points_array(
++                        _mat_first_key(
++                            payload, ("phisTr", "phisT", "phis", "points", "landmarks")
++                        )
++                    )
++                    images = _cofw68_original_image_array(
++                        _mat_first_key(payload, ("IsTr", "IsT", "images", "image"))
++                    )
++                    visibility_rows = _cofw68_original_visibility(
++                        _mat_first_key(
++                            payload,
++                            (
++                                "occlusionsTr",
++                                "occlusionsT",
++                                "occlusion",
++                                "occ",
++                                "occluded",
++                            ),
++                        ),
++                        len(points_rows),
++                    )
++                    bbox_rows = [None] * len(points_rows)
+         except Exception as err:  # noqa: BLE001
+             skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
+             continue
+@@ -2789,7 +2807,7 @@ def _build_cofw68_original(
+             visibility = visibility_rows[index] if index < len(visibility_rows) else [True] * 29
+             metadata = {
+                 "dataset": "cofw29",
+-                "dataset_parser": "cofw68_original_29",
++                "dataset_parser": "cofw_original_29",
+                 "parser_type": "dataset_specific",
+                 "annotation_file": str(mat_path.resolve()),
+                 "source_schema": "2d_29",
+@@ -2848,10 +2866,10 @@ def _cofw6868_annotation_paths(root: Path) -> list[Path]:
+ 
+ def _cofw68_test_color_mat(root: Path) -> Path:
+     matches = sorted(
+-        root.rglob("cofw68_test_color.mat"), key=lambda item: len(item.parts)
++        root.rglob("COFW_test_color.mat"), key=lambda item: len(item.parts)
+     )
+     if not matches:
+-        raise FileNotFoundError(f"cofw68_test_color.mat not found below {root}")
++        raise FileNotFoundError(f"COFW_test_color.mat not found below {root}")
+     return matches[0]
+ 
+ 
+diff --git a/tools/landmarks/download_landmark_datasets.py b/tools/landmarks/download_landmark_datasets.py
+index 7df42fc..e781e57 100644
+--- a/tools/landmarks/download_landmark_datasets.py
++++ b/tools/landmarks/download_landmark_datasets.py
+@@ -121,7 +121,7 @@ SOURCES: tuple[SourceAsset, ...] = (
+     SourceAsset(
+         dataset="cofw68",
+         name="cofw68 color images",
+-        filename="cofw68_color.zip",
++        filename="COFW_color.zip",
+         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
+         required_for_builder=False,
+         note="cofw68 color image archive. Pair with cofw6868 annotations/JSON for manifest building.",
+@@ -136,7 +136,7 @@ SOURCES: tuple[SourceAsset, ...] = (
+     SourceAsset(
+         dataset="cofw29",
+         name="cofw68 original color images",
+-        filename="cofw68_color.zip",
++        filename="COFW_color.zip",
+         url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
+         note="Original cofw68 29-point color source. Preserve 29-point labels and visibility/occlusion metadata.",
+     ),
+diff --git a/tools/landmarks/prepare_landmark_dataset.py b/tools/landmarks/prepare_landmark_dataset.py
+index 3c5de1d..ecf1071 100644
+--- a/tools/landmarks/prepare_landmark_dataset.py
++++ b/tools/landmarks/prepare_landmark_dataset.py
+@@ -318,7 +318,12 @@ def _parser() -> argparse.ArgumentParser:
+     parser.add_argument("--audit-overlay-limit", type=int, default=50)
+     parser.add_argument("--frame-stride", type=int, default=1, help="Frame stride for video datasets.")
+     parser.add_argument("--max-frames-per-video", type=int, default=None, help="Cap frames per video for video datasets.")
+-    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).")
++    parser.add_argument(
++        "--workers",
++        type=int,
++        default=16,
++        help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).",
++    )
+     parser.add_argument("--force", action="store_true", help="Redownload/re-extract existing files.")
+     parser.add_argument("--skip-checksum", action="store_true", help="Skip stored checksum verification.")
+     parser.add_argument("--skip-download", action="store_true", help="Reuse already-downloaded/extracted assets from --data-root.")

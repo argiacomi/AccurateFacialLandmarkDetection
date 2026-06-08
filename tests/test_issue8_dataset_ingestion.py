@@ -442,7 +442,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
     occlusions = np.zeros((1, 29), dtype=np.uint8)
     occlusions[0, 3] = 1
     scipy.savemat(
-        source / "cofw68_train_color.mat",
+        source / "COFW_train_color.mat",
         {
             "phisTr": points,
             "IsTr": images,
@@ -469,7 +469,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
     assert sample["split"] == "train"
     assert sample["visibility"][3] is False
     assert sample["metadata"]["occlusion_mask"][3] is True
-    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
+    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
     assert manifest["projection_status"] == {"not_projectable": 1}
 
 
@@ -485,7 +485,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
     phis[58 + 3, 0] = 1.0
     image = np.full((3, 64, 64), 127, dtype=np.uint8)
 
-    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
         image_ds = handle.create_dataset("image_0000", data=image)
         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
         refs[0, 0] = image_ds.ref
@@ -509,7 +509,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
     assert sample["visibility"][3] is False
     assert sample["metadata"]["bbox_xyxy"] == [1.0, 2.0, 30.0, 40.0]
     assert Path(sample["image"]).is_file()
-    assert sample["metadata"]["dataset_parser"] == "cofw68_original_29"
+    assert sample["metadata"]["dataset_parser"] == "cofw_original_29"
 
 
 def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
@@ -528,7 +528,7 @@ def test_cofw68_original_hdf5_image_is_reoriented_to_annotation_frame(tmp_path):
     image = np.zeros((3, 60, 40), dtype=np.uint8)
     image[:, 5, 10] = 255  # white marker at annotation (x=5, y=10)
 
-    with h5py.File(source / "cofw68_train_color.mat", "w") as handle:
+    with h5py.File(source / "COFW_train_color.mat", "w") as handle:
         image_ds = handle.create_dataset("image_0000", data=image)
         refs = handle.create_dataset("IsTr", (1, 1), dtype=h5py.ref_dtype)
         refs[0, 0] = image_ds.ref
