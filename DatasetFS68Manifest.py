@@ -320,6 +320,10 @@ def _manifest_index_path(manifest_path):
     return manifest_path.with_name(f"{manifest_path.name}.index.jsonl")
 
 
+def manifest_index_path(manifest_path):
+    return _manifest_index_path(manifest_path)
+
+
 def _manifest_index_header(manifest_path):
     return {
         "type": "manifest_index_meta",
@@ -556,6 +560,58 @@ def _landmark_contract_for_entry(entry, metadata, landmarks_path, entry_index, i
         "contract": contract,
     }
     return contract, record, False
+
+
+def build_manifest_index(manifest_path):
+    """Build the landmark contract index beside a schema-aware manifest."""
+
+    manifest_path = Path(manifest_path)
+    base_dir = manifest_path.parent
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entries = payload.get("samples", payload.get("scenarios", []))
+    if not isinstance(entries, list):
+        raise ValueError(f"manifest {manifest_path} must contain a samples or scenarios list")
+
+    cached_index_records = _load_manifest_index(manifest_path)
+    records_by_index = dict(cached_index_records)
+    indexed_count = 0
+    cache_hit_count = 0
+    skipped_count = 0
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            skipped_count += 1
+            continue
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {}
+        landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
+        if not landmarks_value:
+            skipped_count += 1
+            continue
+        landmarks_path = _resolve_path(base_dir, landmarks_value)
+        try:
+            _, index_record, cache_hit = _landmark_contract_for_entry(
+                entry,
+                metadata,
+                landmarks_path,
+                index,
+                cached_index_records,
+            )
+        except ManifestContractError:
+            raise
+        except ValueError:
+            skipped_count += 1
+            continue
+        records_by_index[int(index)] = index_record
+        indexed_count += 1
+        if cache_hit:
+            cache_hit_count += 1
+
+    _write_manifest_index(manifest_path, records_by_index)
+    return {
+        "index_path": str(_manifest_index_path(manifest_path)),
+        "indexed_count": int(indexed_count),
+        "cache_hit_count": int(cache_hit_count),
+        "skipped_count": int(skipped_count),
+    }
 
 
 class LandmarkDataset(Dataset):

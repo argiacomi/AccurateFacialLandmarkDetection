@@ -27,6 +27,7 @@ PHASE_TIMING_KEYS: tuple[str, ...] = (
     "scaler_update_seconds",
     "eval_seconds",
     "ema_eval_seconds",
+    "distributed_eval_wait_seconds",
     "checkpoint_seconds",
 )
 

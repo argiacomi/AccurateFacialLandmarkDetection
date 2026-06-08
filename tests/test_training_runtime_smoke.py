@@ -5,7 +5,16 @@ import json
 import time
 from pathlib import Path
 
+import torch
+
 import TrainHeatmapStageFP16 as train
+from lib.landmarks.training.cli import build_heatmap_stage_arg_parser
+from lib.landmarks.training.config import (
+    DatasetBuildConfig,
+    EvalConfig,
+    TrainingRuntimeConfig,
+    config_dict,
+)
 from tools.landmarks import run_cdvit_manifest_training_pipeline as pipeline
 
 
@@ -14,10 +23,18 @@ def _trainer_args(tmp_path: Path, **overrides):
     manifest.write_text(json.dumps({"samples": []}) + "\n", encoding="utf-8")
     values = {
         "eval_num_workers": 0,
+        "eval_batch_size": 8,
+        "eval_every": 1,
+        "full_eval_every": 0,
+        "eval_ema_every": 1,
+        "eval_max_samples": 0,
+        "eval_slice_reports_every": 1,
         "num_workers": 2,
+        "preload": 0,
         "pin_memory": True,
         "persistent_workers": True,
         "prefetch_factor": 2,
+        "log_every": 20,
         "runtime_metrics_jsonl": "",
         "ckpt_folder": str(tmp_path / "ckpt"),
         "train_manifest": "",
@@ -150,6 +167,7 @@ def test_epoch_timing_payload_keys_and_metrics_append(tmp_path):
         "scaler_update_seconds",
         "eval_seconds",
         "ema_eval_seconds",
+        "distributed_eval_wait_seconds",
         "checkpoint_seconds",
         "compute_seconds",
         "forward_backward_update_seconds",
@@ -171,6 +189,46 @@ def test_epoch_timing_payload_keys_and_metrics_append(tmp_path):
     assert "forward_loss_seconds" in payload["timing"]
     assert "backward_seconds" in payload["timing"]
     assert "forward_backward_update_seconds" in payload["timing"]
+
+
+def test_typed_training_config_snapshots_from_args(tmp_path):
+    args = _trainer_args(tmp_path, eval_ema_scope="full-only", eval_progress=False)
+
+    runtime = TrainingRuntimeConfig.from_args(args)
+    eval_config = EvalConfig.from_args(args)
+    dataset = DatasetBuildConfig.from_args(args)
+
+    assert runtime.num_workers == 2
+    assert eval_config.eval_ema_scope == "full-only"
+    assert eval_config.eval_progress is False
+    assert dataset.data_name == "FS68Manifest"
+    assert config_dict(eval_config)["eval_ema_scope"] == "full-only"
+
+
+def test_heatmap_stage_cli_builder_preserves_eval_flags():
+    parser = build_heatmap_stage_arg_parser()
+    args = parser.parse_args(
+        [
+            "--eval-ema-scope",
+            "full-only",
+            "--no-eval-progress",
+            "--respect-declared-splits",
+        ]
+    )
+
+    assert args.eval_ema_scope == "full-only"
+    assert args.eval_progress is False
+    assert args.respect_declared_splits is True
+
+
+def test_save_best_weights_writes_explicit_and_legacy_names(tmp_path):
+    state = {"weight": torch.tensor([1.0])}
+    ckpt_dir = tmp_path / "ckpt"
+
+    train._save_best_weights(state, ckpt_dir)
+
+    assert (ckpt_dir / "best.weights.pt").is_file()
+    assert (ckpt_dir / "best_model").is_file()
 
 
 def test_pipeline_auto_resume_accepts_matching_full_checkpoint_metadata(tmp_path):

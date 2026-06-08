@@ -33,6 +33,7 @@ from lib.landmarks.core.manifest_aliases import (
     MANIFEST_DATA_NAME_ALIASES,
 )
 from lib.landmarks.manifest.validator import validate_training_manifest
+from DatasetFS68Manifest import build_manifest_index, manifest_index_path
 from lib.landmarks.pipeline.config import (
     _extract_config_path,
     _json_safe_pipeline_value,
@@ -43,6 +44,7 @@ from lib.landmarks.training.checkpoint_compat import (
     checkpoint_compat_errors_for_config,
     training_compat_digest_from_config,
 )
+from lib.landmarks.training.config import PipelineConfig, config_dict
 
 TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
 DEFAULT_DATASETS = "wflw,cofw,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
@@ -529,7 +531,10 @@ def _validate_manifest_stage_request(
             "max_validation_examples": int(args.max_validation_examples),
         },
         "inputs": _path_fingerprints([Path(_pipeline_effective_manifest(args, paths))]),
-        "output_paths": [str(paths.validation_report)],
+        "output_paths": [
+            str(paths.validation_report),
+            str(manifest_index_path(_pipeline_effective_manifest(args, paths))),
+        ],
         "tools": {
             "validator.py": _repo_file_fingerprint(
                 "lib/landmarks/manifest/validator.py"
@@ -550,6 +555,41 @@ def _manifest_stage_request(
     if stage == "validate_cdvit_manifest":
         return _validate_manifest_stage_request(args, paths)
     raise ValueError(f"stage does not use manifest-stage signatures: {stage}")
+
+
+def _train_cdvit_stage_request(
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+    command: T.Sequence[str] | None = None,
+) -> dict[str, T.Any]:
+    runtime_metrics_jsonl = _pipeline_effective_runtime_metrics_path(args, paths)
+    return {
+        "version": 2,
+        "stage": "train_cdvit",
+        "manifest": _pipeline_effective_manifest(args, paths),
+        "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))),
+        "ckpt_folder": _normalize_path_for_signature(_checkpoint_dir(args, paths)),
+        "config": config_dict(
+            PipelineConfig.from_args(
+                args,
+                runtime_metrics_jsonl=_normalize_path_for_signature(runtime_metrics_jsonl),
+            )
+        ),
+        "training_compat_config": _pipeline_training_compat_config(args, paths),
+        "training_compat_config_digest": _pipeline_training_compat_digest(args, paths),
+        "command": list(command or _train_command(args, paths)),
+    }
+
+
+def _stage_request(
+    stage: str,
+    args: argparse.Namespace,
+    paths: PipelinePaths,
+    command: T.Sequence[str] | None = None,
+) -> dict[str, T.Any]:
+    if stage == "train_cdvit":
+        return _train_cdvit_stage_request(args, paths, command=command)
+    return _manifest_stage_request(stage, args, paths)
 
 
 def _read_stage_signature(paths: PipelinePaths, stage: str) -> dict[str, T.Any] | None:
@@ -576,7 +616,7 @@ def _stage_signature_matches(
     if not stored:
         return False
 
-    current_request = _manifest_stage_request(stage, args, paths)
+    current_request = _stage_request(stage, args, paths)
     if stored.get("request_digest") != _json_digest(current_request):
         return False
 
@@ -606,7 +646,7 @@ def _write_stage_signature(
     command: T.Sequence[str] | None = None,
     notes: T.Sequence[str] | None = None,
 ) -> None:
-    request = _manifest_stage_request(stage, args, paths)
+    request = _stage_request(stage, args, paths, command=command)
     payload = {
         "version": 2,
         "stage": stage,
@@ -747,46 +787,27 @@ def _pipeline_training_compat_digest(args: argparse.Namespace, paths: PipelinePa
 def _pipeline_training_signature(args: argparse.Namespace, paths: PipelinePaths) -> dict[str, T.Any]:
     ckpt_folder = _checkpoint_dir(args, paths)
     runtime_metrics_jsonl = _pipeline_effective_runtime_metrics_path(args, paths)
+    pipeline_config = PipelineConfig.from_args(
+        args,
+        runtime_metrics_jsonl=_normalize_path_for_signature(runtime_metrics_jsonl),
+    )
     return {
         "version": 2,
         "manifest": _pipeline_effective_manifest(args, paths),
         "manifest_sha256": _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))),
         "ckpt_folder": _normalize_path_for_signature(ckpt_folder),
-        "train_data_name": str(args.train_data_name),
-        "nproc_per_node": int(args.nproc_per_node),
-        "batch_size": int(args.batch_size),
-        "heatmap_size": int(args.heatmap_size),
-        "lmk_num": int(args.lmk_num),
-        "lr": float(args.lr),
-        "train_arg": list(args.train_arg or []),
-        "runtime": {
-            "num_workers": int(args.num_workers),
-            "preload": int(args.preload),
-            "pin_memory": bool(args.pin_memory),
-            "persistent_workers": bool(args.persistent_workers),
-            "prefetch_factor": int(args.prefetch_factor),
-            "log_every": int(args.log_every),
-            "synchronize_runtime_timing": bool(args.synchronize_runtime_timing),
-        },
-        "eval": {
-            "eval_batch_size": int(args.eval_batch_size),
-            "eval_num_workers": int(args.eval_num_workers),
-            "eval_every": int(args.eval_every),
-            "full_eval_every": int(args.full_eval_every),
-            "eval_ema_every": int(args.eval_ema_every),
-            "eval_ema_scope": str(args.eval_ema_scope),
-            "eval_progress": bool(args.eval_progress),
-            "eval_max_samples": int(args.eval_max_samples),
-            "eval_slice_reports_every": int(args.eval_slice_reports_every),
-        },
-        "checkpoint": {
-            "save_last_checkpoint": bool(args.save_last_checkpoint),
-            "save_legacy_epoch_state_dict": bool(args.save_legacy_epoch_state_dict),
-            "restore_rng": bool(args.restore_rng),
-            "allow_incompatible_resume": bool(args.allow_incompatible_resume),
-            "auto_resume": bool(args.auto_resume),
-            "runtime_metrics_jsonl": _normalize_path_for_signature(runtime_metrics_jsonl),
-        },
+        "config": config_dict(pipeline_config),
+        # Backward-compatible top-level mirrors retained for existing summary readers.
+        "train_data_name": pipeline_config.train_data_name,
+        "nproc_per_node": pipeline_config.nproc_per_node,
+        "batch_size": pipeline_config.batch_size,
+        "heatmap_size": pipeline_config.heatmap_size,
+        "lmk_num": pipeline_config.lmk_num,
+        "lr": pipeline_config.lr,
+        "train_arg": list(pipeline_config.train_arg),
+        "runtime": config_dict(pipeline_config.runtime),
+        "eval": config_dict(pipeline_config.eval),
+        "checkpoint": config_dict(pipeline_config.checkpoint),
         "training_compat_config": _pipeline_training_compat_config(args, paths),
         "training_compat_config_digest": _pipeline_training_compat_digest(args, paths),
     }
@@ -1220,7 +1241,7 @@ def _validate_training_manifest(
     manifest_path = paths.hard_negative_manifest
     if not manifest_path.is_file():
         raise FileNotFoundError(f"missing manifest: {manifest_path}")
-    return validate_training_manifest(
+    report = validate_training_manifest(
         manifest_path,
         report_path=paths.validation_report,
         require_images=not args.skip_image_exists_check,
@@ -1230,6 +1251,12 @@ def _validate_training_manifest(
         max_examples=args.max_validation_examples,
         raise_on_error=True,
     )
+    report["manifest_index"] = build_manifest_index(manifest_path)
+    paths.validation_report.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return report
 
 
 def _validate_cdvit_manifest(
@@ -1250,6 +1277,20 @@ def _build_manifest_outputs(
     return outputs
 
 
+def _train_stage_outputs(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
+    ckpt_folder = _checkpoint_dir(args, paths)
+    outputs = [
+        str(ckpt_folder / "training_complete.json"),
+        str(paths.train_command_json),
+    ]
+    if bool(args.save_last_checkpoint):
+        outputs.append(str(ckpt_folder / "last_checkpoint.pt"))
+    if int(args.eval_every or 0) > 0:
+        outputs.append(str(ckpt_folder / "best.weights.pt"))
+        outputs.append(str(ckpt_folder / "best_checkpoint.pt"))
+    return outputs
+
+
 def _stage_complete(stage: str, args: argparse.Namespace, paths: PipelinePaths) -> bool:
     if args.manifest and stage in {
         "build_dataset_manifests",
@@ -1263,13 +1304,19 @@ def _stage_complete(stage: str, args: argparse.Namespace, paths: PipelinePaths) 
         outputs = [str(paths.hard_negative_manifest)]
         return _stage_signature_matches(stage, args, paths, outputs)
     if stage == "validate_cdvit_manifest":
-        outputs = [str(paths.validation_report)]
+        outputs = [
+            str(paths.validation_report),
+            str(manifest_index_path(_pipeline_effective_manifest(args, paths))),
+        ]
         return _stage_signature_matches(stage, args, paths, outputs)
     if stage == "train_cdvit":
         ckpt_folder = (
             Path(args.ckpt_folder) if args.ckpt_folder else paths.checkpoint_dir
         )
         if args.resume is not None:
+            return False
+        outputs = _train_stage_outputs(args, paths)
+        if not _stage_signature_matches(stage, args, paths, outputs):
             return False
         sentinel = ckpt_folder / "training_complete.json"
         if not sentinel.is_file():
@@ -1288,7 +1335,7 @@ def _stage_complete(stage: str, args: argparse.Namespace, paths: PipelinePaths) 
             return False
         if payload.get("pipeline_manifest_sha256") != _safe_sha256_file(Path(_pipeline_effective_manifest(args, paths))):
             return False
-        if int(args.eval_every or 0) > 0 and not (ckpt_folder / "best_model").exists():
+        if int(args.eval_every or 0) > 0 and not (ckpt_folder / "best.weights.pt").exists():
             return False
         return completed_epochs >= int(args.epoch)
     raise ValueError(f"unknown stage: {stage}")
@@ -1337,7 +1384,10 @@ def _run_stage(
 
         elif stage == "validate_cdvit_manifest":
             report = {} if args.dry_run else _validate_cdvit_manifest(args, paths)
-            outputs = [str(paths.validation_report)]
+            outputs = [
+                str(paths.validation_report),
+                str(manifest_index_path(_pipeline_effective_manifest(args, paths))),
+            ]
             if report:
                 notes.append(
                     f"validated {report['valid_samples']} trainable sample(s) "
@@ -1362,7 +1412,10 @@ def _run_stage(
             ckpt_folder = _checkpoint_dir(args, paths)
             if not args.dry_run:
                 _write_pipeline_training_signature(args, paths, command, ckpt_folder)
-            outputs = [str(ckpt_folder), str(paths.train_command_json)]
+                outputs = _train_stage_outputs(args, paths)
+                _write_stage_signature(stage, args, paths, outputs, command=command)
+            else:
+                outputs = [str(ckpt_folder), str(paths.train_command_json)]
 
         else:
             raise ValueError(f"unknown stage: {stage}")

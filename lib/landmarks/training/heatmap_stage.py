@@ -15,7 +15,6 @@ _CDVIT_ROOT = _Path(__file__).resolve().parents[3]
 if str(_CDVIT_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_CDVIT_ROOT))
 
-import argparse
 import math
 import os
 import time
@@ -38,8 +37,6 @@ from lib.landmarks.core.manifest_aliases import (
     is_schema_aware_manifest_dataset,
 )
 from lib.landmarks.evaluation.split_safe import (
-    EVAL_MODES,
-    SPLIT_POLICIES,
     write_eval_csv,
     write_eval_json,
     write_eval_records_csv,
@@ -56,11 +53,12 @@ from lib.landmarks.training.checkpointing import (
     _torch_load_training_checkpoint,
     _write_training_complete_sentinel,
 )
-from lib.landmarks.training.eval_schedule import (
-    build_eval_schedule,
-)
-from lib.landmarks.training.loaders import (
-    build_training_loaders,
+from lib.landmarks.training.cli import build_heatmap_stage_arg_parser
+from lib.landmarks.training.config import (
+    DatasetBuildConfig,
+    EvalConfig,
+    TrainingRuntimeConfig,
+    config_dict,
 )
 from lib.landmarks.training.data import (
     AUXILIARY_CLASS_NAMES,
@@ -69,13 +67,19 @@ from lib.landmarks.training.data import (
     schema_aware_collate,
     unpack_train_batch,
 )
+from lib.landmarks.training.ddp import (
+    distributed_rank,
+    distributed_world_size,
+    is_rank_zero,
+    setup_distributed_from_env,
+)
 from lib.landmarks.training.eval_schedule import build_eval_schedule
 from lib.landmarks.training.evaluator import (
+    eval_collate,
     eval_report_json_path,
     evaluate_landmark_model,
     print_eval_summary,
     records_from_report,
-    eval_collate,
 )
 from lib.landmarks.training.loaders import build_training_loaders
 from lib.landmarks.training.losses import (
@@ -140,6 +144,9 @@ _start_timing = start_timing
 _time_call = time_call
 _build_training_loaders = build_training_loaders
 _build_eval_schedule = build_eval_schedule
+_dataset_build_config = DatasetBuildConfig.from_args
+_eval_config = EvalConfig.from_args
+_training_runtime_config = TrainingRuntimeConfig.from_args
 
 
 
@@ -149,230 +156,17 @@ _build_eval_schedule = build_eval_schedule
 # Checkpoint save/load/RNG helpers live in lib.landmarks.training.checkpointing.
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root_folder", type=str, default="WFLW")
-    parser.add_argument("--ckpt_folder", type=str, default="checkpoint")
-    parser.add_argument("--batch_size", type=int, default="16")
-    parser.add_argument("--num_workers", type=int, default="12")
-    parser.add_argument("--epoch", type=int, default="500")
-    parser.add_argument("--lr", type=float, default="0.0001")
-    parser.add_argument("--local_rank", type=int, help="local rank, will passed by ddp")
-    parser.add_argument("--local-rank", type=int, help="local rank, will passed by ddp")
-    parser.add_argument("--sched_step", type=int, default="200")
-    parser.add_argument("--save_n_epoch", type=int, default="100")
-    parser.add_argument(
-        "--preload",
-        type=int,
-        default="0",
-        help="0 streams samples through DataLoader workers; 1 preloads the dataset in memory.",
-    )
+def _save_best_weights(state_dict, ckpt_folder: str | os.PathLike[str]) -> None:
+    """Write explicit best weights and the legacy best_model compatibility copy."""
 
-    parser.add_argument(
-        "--pin-memory",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Pin DataLoader host memory so CUDA transfers can use non_blocking=True.",
-    )
-    parser.add_argument(
-        "--persistent-workers",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep DataLoader workers alive for throughput. Worker RNG is seeded once; use --no-persistent-workers for epoch-reseeded workers or --restore-rng replay.",
-    )
-    parser.add_argument(
-        "--prefetch-factor",
-        type=int,
-        default=2,
-        help="DataLoader batches prefetched per worker. Ignored when num_workers == 0.",
-    )
-    parser.add_argument("--eval-batch-size", type=int, default=8)
-    parser.add_argument("--eval-num-workers", type=int, default=0)
-    parser.add_argument("--eval-every", type=int, default=1)
-    parser.add_argument("--full-eval-every", type=int, default=0)
-    parser.add_argument(
-        "--eval-ema-every",
-        "--eval-on-ema-every",
-        dest="eval_ema_every",
-        type=int,
-        default=1,
-    )
-    parser.add_argument("--eval-max-samples", type=int, default=0)
-    parser.add_argument(
-        "--eval-slice-reports-every",
-        type=int,
-        default=1,
-        help=(
-            "Build per-sample slice reports every N evaluated epochs. "
-            "Default 1 preserves direct trainer behavior; pipeline runs "
-            "override this to a larger value for throughput."
-        ),
-    )
-    parser.add_argument(
-        "--eval-ema-scope",
-        choices=("same", "full-only", "final-only", "off"),
-        default="same",
-        help=(
-            "Controls when EMA evaluation runs after --eval-ema-every is due. "
-            "same preserves legacy behavior; full-only skips EMA on sampled evals; "
-            "final-only runs EMA only on the final epoch; off disables EMA eval."
-        ),
-    )
-    parser.add_argument(
-        "--eval-progress",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Show tqdm progress bars during evaluation.",
-    )
-    parser.add_argument("--log-every", type=int, default=20)
-    parser.add_argument(
-        "--save-last-checkpoint",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Write <ckpt_folder>/last_checkpoint.pt after each epoch.",
-    )
-    parser.add_argument(
-        "--save-legacy-epoch-state-dict",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Also write legacy epoch_N model state-dict files at --save_n_epoch intervals.",
-    )
-    parser.add_argument(
-        "--runtime-metrics-jsonl",
-        type=str,
-        default="",
-        help="Optional runtime metrics JSONL path. Defaults to <ckpt_folder>/runtime_metrics.jsonl.",
-    )
-    parser.add_argument(
-        "--restore-rng",
-        action="store_true",
-        help="Restore RNG state from full checkpoints. For exact replay this forces --no-persistent-workers so workers are re-seeded per epoch.",
-    )
-    parser.add_argument(
-        "--allow-incompatible-resume",
-        action="store_true",
-        help="Allow loading a full checkpoint even when manifest/config compatibility metadata differs.",
-    )
-    parser.add_argument("--hw", type=float, default="10")
-    parser.add_argument("--locw", type=float, default="1")
-    parser.add_argument("--nstack", type=int, default="8")
-    parser.add_argument("--heatmap_size", type=int, default="32")
-    parser.add_argument("--resume", type=str, default="")
-    parser.add_argument("--max_depth", type=int, default="256")
-    parser.add_argument("--mul", type=float, default="1.2")
-    parser.add_argument(
-        "--lmk_num",
-        type=int,
-        default="68",
-        help="fallback landmark count for schema-aware manifest aliases",
-    )
-    parser.add_argument(
-        "--manifest",
-        type=str,
-        default="",
-        help="schema-aware landmark manifest for train/test",
-    )
-    parser.add_argument(
-        "--train_manifest",
-        type=str,
-        default="",
-        help="schema-aware train manifest",
-    )
-    parser.add_argument(
-        "--test_manifest",
-        type=str,
-        default="",
-        help="schema-aware test manifest",
-    )
-    parser.add_argument("--eval-mode", choices=EVAL_MODES, default="random_hash")
-    parser.add_argument(
-        "--split-policy", choices=SPLIT_POLICIES, default="declared_or_random_hash"
-    )
-    parser.add_argument(
-        "--respect-declared-splits",
-        action="store_true",
-        help="Alias for --split-policy declared.",
-    )
-    parser.add_argument(
-        "--ignore-declared-splits",
-        action="store_true",
-        help="Alias for --split-policy random_hash.",
-    )
-    parser.add_argument(
-        "--heldout-dataset",
-        action="append",
-        default=[],
-        help="Dataset label to hold out. by_dataset accepts one or more; leave_one_dataset_out requires exactly one.",
-    )
-    parser.add_argument(
-        "--eval-report-json",
-        type=str,
-        default="",
-        help="Evaluation JSON path. Defaults to <ckpt_folder>/eval_report.json",
-    )
-    parser.add_argument(
-        "--eval-report-csv", type=str, default="", help="Optional evaluation CSV path"
-    )
-    parser.add_argument(
-        "--eval-records-jsonl",
-        type=str,
-        default="",
-        help="Optional per-sample evaluation records JSONL path",
-    )
-    parser.add_argument(
-        "--eval-records-csv",
-        type=str,
-        default="",
-        help="Optional per-sample evaluation records CSV path",
-    )
-    parser.add_argument(
-        "--schema-aware-training",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="For schema-aware manifest aliases, train schema-specific heads from mixed-schema manifests.",
-    )
-    parser.add_argument("--schema-consistency-weight", type=float, default=0.05)
-    parser.add_argument("--domain-balanced-sampling", action="store_true")
-    parser.add_argument(
-        "--bucket-targets",
-        default="anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
-        help="Comma-separated hard bucket target weights for domain-balanced sampling.",
-    )
-    parser.add_argument(
-        "--dataset-targets", default="", help="Comma-separated dataset target weights."
-    )
-    parser.add_argument(
-        "--schema-targets", default="", help="Comma-separated schema target weights."
-    )
-    parser.add_argument(
-        "--auxiliary-heads",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable optional pose/quality/visibility auxiliary heads for schema-aware manifest training.",
-    )
-    parser.add_argument("--auxiliary-loss-weight", type=float, default=0.1)
-    parser.add_argument(
-        "--synchronize-runtime-timing",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Synchronize CUDA around timed transfer/compute/eval sections for more accurate profiling. "
-            "Pass --no-synchronize-runtime-timing for low-overhead CPU wall-clock timing."
-        ),
-    )
-    parser.add_argument("--data_name", type=str, default="WFLW")
-    parser.add_argument("--seed", type=int, default="0")
-    parser.add_argument(
-        "--deterministic",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable deterministic cuDNN behavior. Default favors training throughput.",
-    )
-    parser.add_argument(
-        "--find_unused_parameters",
-        action="store_true",
-        help="Enable only if the model forward pass can skip trainable parameters",
-    )
+    ckpt_path = Path(ckpt_folder)
+    ckpt_path.mkdir(parents=True, exist_ok=True)
+    torch.save(state_dict, ckpt_path / "best.weights.pt")
+    torch.save(state_dict, ckpt_path / "best_model")
+
+
+def main():
+    parser = build_heatmap_stage_arg_parser()
     args = parser.parse_args()
     if args.respect_declared_splits and args.ignore_declared_splits:
         parser.error(
@@ -385,14 +179,10 @@ def main():
     args = normalize_runtime_args(args)
     setup_seed(args.seed, deterministic=args.deterministic)
     lmk_num = landmark_count_for_dataset(args)
-    if "LOCAL_RANK" in os.environ and os.environ["LOCAL_RANK"] is not None:
-        print(os.environ["LOCAL_RANK"])
-        args.local_rank = int(os.environ["LOCAL_RANK"])
-    else:
-        args.local_rank = 0
-    torch.cuda.set_device(args.local_rank)
-    dist.init_process_group("nccl", rank=args.local_rank, init_method="env://")
-    device = torch.device("cuda", args.local_rank)
+    device = setup_distributed_from_env(args)
+    training_runtime_config = TrainingRuntimeConfig.from_args(args)
+    eval_config = EvalConfig.from_args(args)
+    dataset_build_config = DatasetBuildConfig.from_args(args)
 
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         # if True:
@@ -404,8 +194,8 @@ def main():
         loaders = build_training_loaders(
             args,
             schema_aware_training=schema_aware_training,
-            rank=dist.get_rank(),
-            world_size=dist.get_world_size(),
+            rank=distributed_rank(),
+            world_size=distributed_world_size(),
         )
         train_dataset = loaders.train_dataset
         test_dataset = loaders.test_dataset
@@ -415,6 +205,16 @@ def main():
         test_dataloader = loaders.test_dataloader
         full_test_dataloader = loaders.full_test_dataloader
         print("----------------------len(train_dataset)", len(train_dataset))
+        if is_rank_zero():
+            append_runtime_metrics(
+                args,
+                {
+                    "event": "config_snapshot",
+                    "runtime": config_dict(training_runtime_config),
+                    "eval": config_dict(eval_config),
+                    "dataset": config_dict(dataset_build_config),
+                },
+            )
         net = build_cdvit_model(
             args,
             lmk_num,
@@ -472,7 +272,7 @@ def main():
         # heatmap_loss_func = HeatMapLoss2
         heatmap_loss_func = AWingLoss()
         # vertex_loss_func = STARLoss_v2()
-        ema = EMA(net.module, 0.99, 100, 10) if dist.get_rank() == 0 else None
+        ema = EMA(net.module, 0.99, 100, 10) if is_rank_zero() else None
         scaler = torch.amp.GradScaler("cuda")
         if isinstance(resume_checkpoint, dict) and "model" in resume_checkpoint:
             start_epoch, best_nme, best_record = _restore_training_checkpoint(
@@ -485,24 +285,45 @@ def main():
                 best_record,
                 args,
             )
-            if dist.get_rank() == 0:
+            if is_rank_zero():
                 print(f"resumed training checkpoint from epoch {start_epoch}")
         if start_epoch >= args.epoch:
-            if dist.get_rank() == 0:
+            if is_rank_zero():
                 print(
                     f"resume checkpoint next_epoch={start_epoch} is >= requested epoch={args.epoch}; "
                     "training is already complete for this epoch target",
                     flush=True,
                 )
             if dist.is_initialized():
+                barrier_start = time.time()
                 dist.barrier()
+                wait_seconds = time.time() - barrier_start
+                local_wait = torch.tensor([wait_seconds], device=device, dtype=torch.float64)
+                gathered_waits = [
+                    torch.zeros_like(local_wait) for _ in range(distributed_world_size())
+                ]
+                dist.all_gather(gathered_waits, local_wait)
+                if is_rank_zero():
+                    waits = [float(value.item()) for value in gathered_waits]
+                    append_runtime_metrics(
+                        args,
+                        {
+                            "event": "distributed_eval_wait",
+                            "epoch": int(epoch),
+                            "distributed_eval_wait_seconds": round(max(waits), 6),
+                            "distributed_eval_wait_seconds_by_rank": {
+                                str(rank): round(wait, 6)
+                                for rank, wait in enumerate(waits)
+                            },
+                        },
+                    )
             return
         for epoch in range(start_epoch, args.epoch):
             n = 0
             net.train()
-            if dist.get_rank() == 0:
+            if is_rank_zero():
                 ema.train()
-            if dist.get_rank() == 0:
+            if is_rank_zero():
                 epoch_start_time = time.time()
                 epoch_timing = empty_epoch_timing()
                 if torch.cuda.is_available():
@@ -512,7 +333,7 @@ def main():
             if (
                 args.persistent_workers
                 and epoch == start_epoch
-                and dist.get_rank() == 0
+                and is_rank_zero()
             ):
                 print(
                     "note: --persistent-workers seeds DataLoader workers once for throughput; "
@@ -521,7 +342,7 @@ def main():
                 )
             batch_fetch_start_time = time.time()
             for batch_idx, batch in enumerate(train_dataloader):
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     accumulate_timing(
                         epoch_timing, "data_wait_seconds", batch_fetch_start_time
                     )
@@ -538,7 +359,7 @@ def main():
                     data, target, heatmap, sample_weight, landmark_mask = (
                         unpack_train_batch(batch, device, non_blocking=args.pin_memory)
                     )
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     accumulate_timing(
                         epoch_timing,
                         "device_transfer_seconds",
@@ -600,7 +421,7 @@ def main():
                             )  # for awing loss
                             # loss_heatmap = heatmap_loss_func(pred_heatmap, heatmap) * args.hw
                             loss = loss + (loss_loc + loss_heatmap) * weights[i]
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     accumulate_timing(
                         epoch_timing,
                         "forward_loss_seconds",
@@ -613,7 +434,7 @@ def main():
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 scaler.scale(loss).backward()
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     accumulate_timing(
                         epoch_timing,
                         "backward_seconds",
@@ -626,7 +447,7 @@ def main():
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 scaler.step(optimizer)
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     accumulate_timing(
                         epoch_timing,
                         "optimizer_step_seconds",
@@ -639,7 +460,7 @@ def main():
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
                 scaler.update()
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     accumulate_timing(
                         epoch_timing,
                         "scaler_update_seconds",
@@ -657,7 +478,7 @@ def main():
                 if (
                     args.log_every > 0
                     and batch_idx % args.log_every == 0
-                    and dist.get_rank() == 0
+                    and is_rank_zero()
                 ):
                     mix_text = (
                         f" mix: {batch.get('mix')}"
@@ -665,13 +486,13 @@ def main():
                         else ""
                     )
                     print(
-                        f"train epoch {epoch} batch_idx {batch_idx} rank {dist.get_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} loss_aux: {loss_aux.item()}{mix_text}"
+                        f"train epoch {epoch} batch_idx {batch_idx} rank {distributed_rank()}  {n}/{len(train_dataset)} loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} loss_aux: {loss_aux.item()}{mix_text}"
                     )
                 batch_fetch_start_time = time.time()
 
             if (
                 args.save_legacy_epoch_state_dict
-                and dist.get_rank() == 0
+                and is_rank_zero()
                 and args.save_n_epoch > 0
                 and (epoch + 1) % args.save_n_epoch == 0
             ):
@@ -699,7 +520,7 @@ def main():
             # own RNG state instead of replaying rank 0 RNG everywhere.
             _set_checkpoint_rng_state_by_rank(_collect_rng_state_by_rank())
 
-            if dist.get_rank() == 0:
+            if is_rank_zero():
                 if args.save_n_epoch > 0 and (epoch + 1) % args.save_n_epoch == 0:
                     time_call(
                         epoch_timing,
@@ -756,7 +577,7 @@ def main():
                 should_build_eval_records = eval_schedule.should_build_records
                 if eval_schedule.forced_final_full_eval:
                     print(
-                        "running full final eval so best_model and best_checkpoint are selected "
+                        "running full final eval so best.weights.pt and best_checkpoint.pt are selected "
                         "from the full validation set"
                     )
                 model_report = None
@@ -795,14 +616,12 @@ def main():
                     if is_full_eval and nme is not None and best_nme > nme:
                         best_nme = nme
                         best_record.append((epoch, best_nme * 100))
-                        if not os.path.exists(args.ckpt_folder):
-                            os.mkdir(args.ckpt_folder)
                         time_call(
                             epoch_timing,
                             "checkpoint_seconds",
-                            torch.save,
+                            _save_best_weights,
                             net.module.state_dict(),
-                            os.path.join(args.ckpt_folder, "best_model"),
+                            args.ckpt_folder,
                         )
                         time_call(
                             epoch_timing,
@@ -862,14 +681,12 @@ def main():
                     if is_full_eval and nme is not None and best_nme > nme:
                         best_nme = nme
                         best_record.append((epoch, "ema", best_nme * 100))
-                        if not os.path.exists(args.ckpt_folder):
-                            os.mkdir(args.ckpt_folder)
                         time_call(
                             epoch_timing,
                             "checkpoint_seconds",
-                            torch.save,
+                            _save_best_weights,
                             ema.model.state_dict(),
-                            os.path.join(args.ckpt_folder, "best_model"),
+                            args.ckpt_folder,
                         )
                         time_call(
                             epoch_timing,
