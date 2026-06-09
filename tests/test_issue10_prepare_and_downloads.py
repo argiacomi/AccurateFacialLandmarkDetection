@@ -374,6 +374,7 @@ def _prepare_args(**overrides) -> argparse.Namespace:
         skip_validate=False,
         skip_image_exists_check=False,
         keep_going=True,
+        samples_per_scenario=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)

@@ -705,6 +705,59 @@ def test_wflw_builder_keeps_native_98_points(tmp_path):
     assert manifest["projection_status"] == {"audited": 1}
 
 
+def test_samples_per_scenario_prunes_unreferenced_crop_artifacts(tmp_path):
+    source = tmp_path / "wflw"
+    output = tmp_path / "out"
+    points = _points(98).reshape(-1).tolist()
+    bbox = [10.0, 10.0, 230.0, 230.0]
+    attrs = [0, 0, 0, 0, 0, 0]
+    candidate_count = 6
+    lines = []
+    for index in range(candidate_count):
+        image_rel = f"0--Parade/sample_{index}.jpg"
+        _write_image(source / "images" / image_rel)
+        lines.append(
+            " ".join(str(value) for value in [*points, *bbox, *attrs, image_rel])
+        )
+    ann = source / "list_98pt_rect_attr_train.txt"
+    ann.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "wflw",
+            "--wflw-annotations",
+            str(ann),
+            "--image-root",
+            str(source / "images"),
+            "--output-dir",
+            str(output),
+            "--samples-per-scenario",
+            "1",
+        )
+    )
+
+    manifest = _load_manifest(manifest_path)
+    kept = len(manifest["samples"])
+    # The limit must actually drop candidates, otherwise the prune path is not
+    # exercised. All candidates share one condition, so limit 1 keeps exactly 1.
+    assert 0 < kept < candidate_count
+
+    # On-disk crops and landmarks must match the filtered manifest, not the full
+    # unfiltered candidate set: --samples-per-scenario only trimmed the manifest,
+    # leaving orphaned crops/landmarks on disk before the prune step.
+    image_files = [p for p in (output / "images" / "wflw").glob("*") if p.is_file()]
+    landmark_files = [
+        p for p in (output / "landmarks" / "wflw").glob("*") if p.is_file()
+    ]
+    assert len(image_files) == kept
+    assert len(landmark_files) == kept
+
+    for sample in manifest["samples"]:
+        assert Path(sample["image"]).is_file()
+        assert (output / sample["landmarks"]).is_file()
+
+
 def test_write_overlays_generates_visual_audit_for_native_schema(tmp_path):
     source = tmp_path / "source"
     cache = tmp_path / "300w" / "data" / "300w" / "300w"
@@ -797,3 +850,115 @@ def test_video_frame_extraction_and_300vw_manifest_are_video_split_safe(tmp_path
     assert len({sample["split"] for sample in samples}) == 1
     assert {sample["frame_index"] for sample in samples} == {0, 4}
     assert manifest["projection_status"] == {"native": 2}
+
+
+def test_split_marker_is_secondary_condition_not_primary_bucket():
+    # A path with a "train" split directory must not make "trainset" the primary
+    # hard-negative bucket; it is recorded only as a secondary condition.
+    primary, conds = builder._condition_for_landmark_file(
+        "fll2", Path("train/landmark/sample.txt"), "default"
+    )
+    assert primary != "trainset"
+    assert conds[0] != "trainset"
+    assert "trainset" in conds
+
+    # A real visual token still wins the primary bucket, split stays secondary.
+    primary2, conds2 = builder._condition_for_landmark_file(
+        "wflw", Path("profile/train/img.txt"), "default"
+    )
+    assert primary2 == "profile"
+    assert "trainset" in conds2
+
+
+def test_dataset_condition_label_buckets_by_dataset():
+    assert builder._dataset_condition_label("fll2") == "fll2"
+    assert builder._dataset_condition_label("jd-landmark") == "jd_landmark"
+    assert builder._dataset_condition_label("merl-rav") == "merl_rav"
+
+
+def test_fll_native_build_uses_dataset_bucket_not_trainset(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+    _write_image(source / "train" / "picture" / "sample.jpg")
+    _write_counted_txt(source / "train" / "landmark" / "sample.txt", _points(106))
+    (source / "train" / "bbox").mkdir(parents=True)
+    (source / "train" / "bbox" / "sample.txt").write_text(
+        "10 20 210 220\n", encoding="utf-8"
+    )
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "fll2",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    sample = _load_manifest(manifest_path)["samples"][0]
+    # "default" is remapped to the dataset bucket, "trainset" kept secondary.
+    assert sample["condition"] == "fll2"
+    assert sample["condition"] != "trainset"
+    assert "trainset" in sample["conditions"]
+    assert sample["split"] == "train"
+
+
+def _stage_lapa(root: Path, *, stem: str = "s") -> None:
+    _write_image(root / "LaPa" / "train" / "images" / f"{stem}.jpg")
+    _write_counted_txt(
+        root / "LaPa" / "train" / "landmarks" / f"{stem}.txt", _points(106)
+    )
+
+
+def _stage_fll2(root: Path, *, stem: str = "s") -> None:
+    _write_image(root / "train" / "picture" / f"{stem}.jpg")
+    _write_counted_txt(root / "train" / "landmark" / f"{stem}.txt", _points(106))
+
+
+def test_single_dataset_manifest_metadata_keeps_dataset(tmp_path):
+    output = tmp_path / "out"
+    src = tmp_path / "lapa"
+    _stage_lapa(src)
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset", "lapa", "--source-dir", str(src), "--output-dir", str(output)
+        )
+    )
+    manifest = _load_manifest(manifest_path)
+    assert manifest["metadata"]["dataset"] == "lapa"
+
+
+def test_merged_manifest_metadata_marks_multi_dataset(tmp_path):
+    output = tmp_path / "out"
+    _stage_lapa(tmp_path / "lapa")
+    builder.build(
+        _builder_args(
+            "--dataset",
+            "lapa",
+            "--source-dir",
+            str(tmp_path / "lapa"),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    _stage_fll2(tmp_path / "fll2")
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "fll2",
+            "--source-dir",
+            str(tmp_path / "fll2"),
+            "--output-dir",
+            str(output),
+            "--manifest-mode",
+            "merge",
+        )
+    )
+
+    manifest = _load_manifest(manifest_path)
+    assert {s["dataset"] for s in manifest["samples"]} == {"lapa", "fll2"}
+    # Top-level dataset must reflect the multi-dataset manifest, not the last one.
+    assert manifest["metadata"]["dataset"] == "multi_dataset"

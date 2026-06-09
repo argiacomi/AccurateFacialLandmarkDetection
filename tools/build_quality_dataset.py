@@ -146,6 +146,17 @@ def _dataset(value: str) -> str:
     return aliases.get(key, key)
 
 
+def _dataset_condition_label(dataset: str) -> str:
+    """Hard-negative bucket name for a dataset that lacks richer condition labels.
+
+    Datasets without per-sample visual conditions (e.g. HELEN, LaPa, FLL2/FLL3,
+    XM2VTS, FRGC, plain WFLW/cofw29 samples) would otherwise all collapse into one
+    oversized generic ``default`` bucket. Falling back to the dataset id keeps the
+    buckets balanceable and meaningful.
+    """
+    return _label(_dataset(dataset))
+
+
 def _parse_csv(value: str | None) -> tuple[str, ...] | None:
     if value is None:
         return None
@@ -546,13 +557,7 @@ def _crop_image_and_remap_points(
 
 
 def _artifact_stem(dataset: str, sample_id: str) -> str:
-    """Stable filename stem for prepared image/landmark artifacts.
-
-    Artifacts are grouped by dataset directory, so remove leading dataset aliases
-    and extraction/archive wrapper components before flattening. Keep enough
-    semantic path to avoid collisions: sequence ids, video ids, image ids, and
-    frame ids remain.
-    """
+    """Stable filename stem for prepared image/landmark artifacts."""
 
     dataset_key = _dataset(dataset)
     raw = str(sample_id or "sample").replace("\\", "/").strip("/")
@@ -567,49 +572,51 @@ def _artifact_stem(dataset: str, sample_id: str) -> str:
             raw = raw[len(prefix) :]
             break
 
-    parts = [part for part in raw.split("/") if part and part not in {".", "extracted"}]
-    cleaned: list[str] = []
-    skip_next_duplicate_archive_root = None
+    archive_suffixes = (".tar.gz", ".zip", ".tar", ".tgz", ".rar", ".7z")
+    noisy_labels = {
+        "labels",
+        "landmarks",
+        "annotations",
+        "annot",
+        "images",
+        "frames",
+        "videos",
+        "bboxes",
+        "bbox",
+        "extracted",
+        "wflw_v_release",
+        "wflw_v_release_v1",
+        "wflw_v_release_v2",
+        "wflw_release",
+        "wflw_v",
+        "300vw_dataset_2015_12_14",
+        "merl_rav_dataset_master",
+    }
 
-    archive_suffixes = (
-        ".zip",
-        ".tar",
-        ".tar.gz",
-        ".tgz",
-        ".rar",
-        ".7z",
-    )
+    parts = [part for part in raw.split("/") if part and part not in {".", ".."}]
+    cleaned: list[str] = []
+    skip_next_duplicate_archive_root: str | None = None
 
     for part in parts:
         lowered = part.lower()
+        label = _label(part)
 
-        # Drop archive filename components such as AFLW2000-3D.zip or WFLW-V.zip.
-        if lowered.endswith(archive_suffixes):
-            base = part
-            for suffix in archive_suffixes:
-                if lowered.endswith(suffix):
-                    base = part[: -len(suffix)]
-                    break
-            skip_next_duplicate_archive_root = _label(base)
+        archive_base = None
+        for suffix in archive_suffixes:
+            if lowered.endswith(suffix):
+                archive_base = part[: -len(suffix)]
+                break
+        if archive_base is not None:
+            skip_next_duplicate_archive_root = _label(archive_base)
             continue
 
-        # Drop the common duplicated extraction root immediately after an archive:
-        # 300VW_Dataset_2015_12_14.zip/300VW_Dataset_2015_12_14/...
         if skip_next_duplicate_archive_root is not None:
-            if _label(part) == skip_next_duplicate_archive_root:
+            if label == skip_next_duplicate_archive_root:
                 skip_next_duplicate_archive_root = None
                 continue
             skip_next_duplicate_archive_root = None
 
-        # Drop noisy structural wrappers while retaining actual ids.
-        if _label(part) in {
-            "labels",
-            "landmarks",
-            "annotations",
-            "images",
-            "frames",
-            "extracted",
-        }:
+        if label in noisy_labels:
             continue
 
         cleaned.append(part)
@@ -617,8 +624,7 @@ def _artifact_stem(dataset: str, sample_id: str) -> str:
     if not cleaned:
         cleaned = parts or [raw or "sample"]
 
-    safe = "_".join(cleaned)
-    return safe_id(safe).replace("#", "_").replace("/", "_")
+    return safe_id("_".join(cleaned)).replace("#", "_").replace("/", "_")
 
 
 def _write_crop_image(
@@ -898,11 +904,26 @@ def _sample(
         "projection_to_68", projection_audit_for_schema(source_schema)
     )
 
+    primary_condition = _label(condition)
+    sample_conditions = tuple(dict.fromkeys(_label(item) for item in conditions))
+    # "default" is a non-bucket. Replace it with a dataset-specific hard-negative
+    # bucket so datasets without richer condition labels do not all collapse into
+    # one oversized generic bucket. Split markers stay only as secondary entries.
+    if primary_condition == "default":
+        dataset_bucket = _dataset_condition_label(dataset)
+        sample_conditions = tuple(
+            dataset_bucket if item == "default" else item for item in sample_conditions
+        )
+        if dataset_bucket not in sample_conditions:
+            sample_conditions = (dataset_bucket, *sample_conditions)
+        sample_conditions = tuple(dict.fromkeys(sample_conditions))
+        primary_condition = dataset_bucket
+
     out: dict[str, T.Any] = {
         "sample_id": sample_id,
         "dataset": dataset,
-        "condition": _label(condition),
-        "conditions": tuple(_label(item) for item in conditions),
+        "condition": primary_condition,
+        "conditions": sample_conditions,
         "image": str(image.resolve()),
         "landmarks": relative_or_absolute(landmarks, output_dir),
         "source_schema": source_schema,
@@ -1009,6 +1030,47 @@ def _filter(
     return out
 
 
+def _prune_unreferenced_artifacts(
+    output_dir: Path, dataset: str, samples: list[dict[str, T.Any]]
+) -> int:
+    """Delete prepared image/landmark files not referenced by the manifest.
+
+    Crop-writing builders (WFLW, cofw68, cofw29, 300W, ...) emit one cropped
+    image and one landmark file per *candidate* sample, but the
+    ``--samples-per-scenario`` limit and ``allow_overlap=False`` dedup only trim
+    the manifest afterwards. Without this step the filesystem keeps crops and
+    landmarks for samples that were dropped from the manifest. Scoped to this
+    dataset's own ``images/<dataset>`` and ``landmarks/<dataset>`` subtrees and
+    removes only files the manifest does not point at, so the prepared artifacts
+    always match the written manifest. ``source_images/`` is left untouched: it
+    is a deliberate intermediate decode cache reused across runs.
+    """
+    ds = _dataset(dataset)
+    referenced: set[Path] = set()
+    for sample in samples:
+        for key in ("image", "landmarks"):
+            value = sample.get(key)
+            if value:
+                referenced.add((output_dir / Path(str(value))).resolve())
+
+    removed = 0
+    for subdir in ("images", "landmarks"):
+        artifact_dir = output_dir / subdir / ds
+        if not artifact_dir.is_dir():
+            continue
+        for path in artifact_dir.rglob("*"):
+            if path.is_file() and path.resolve() not in referenced:
+                path.unlink()
+                removed += 1
+    if removed:
+        logger.info(
+            "Pruned %s unreferenced %s artifact file(s) not in the manifest",
+            removed,
+            ds,
+        )
+    return removed
+
+
 def _write_manifest(
     output_dir: Path,
     dataset: str,
@@ -1037,13 +1099,24 @@ def _write_manifest(
         merged.append(sample)
 
     summary = manifest_summary(merged)
+    # A merged manifest can span multiple datasets; reflect that at the top level
+    # instead of leaking the last-processed dataset. Per-sample "dataset" fields
+    # remain authoritative.
+    distinct_datasets = {
+        str(sample.get("dataset")) for sample in merged if sample.get("dataset")
+    }
+    manifest_dataset = (
+        next(iter(distinct_datasets))
+        if len(distinct_datasets) == 1
+        else ("multi_dataset" if distinct_datasets else dataset)
+    )
     payload = {
         "version": TRAINING_MANIFEST_VERSION,
         "manifest_contract": TRAINING_MANIFEST_CONTRACT,
         "landmark_schema": "multi_schema",
         "metadata": {
             "builder": "AccurateFacialLandmarkDetection.tools.landmarks.build_quality_dataset",
-            "dataset": dataset,
+            "dataset": manifest_dataset,
             "scenario": _label(scenario),
             "scenarios": list(scenarios or []),
             "sample_count": len(merged),
@@ -1066,6 +1139,12 @@ def _write_manifest(
             **summary,
         },
     )
+
+    # Crops/landmarks are written per candidate during the build, before the
+    # manifest is filtered. Remove this dataset's artifacts that the final
+    # manifest does not reference so disk usage tracks the manifest, not the
+    # unfiltered candidate set.
+    _prune_unreferenced_artifacts(output_dir, dataset, merged)
     return manifest_path
 
 
@@ -1263,7 +1342,9 @@ def _build_json(
     image_base = Path(image_root) if image_root else path.parent
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for idx, entry in enumerate(entries):
+    for idx, entry in track(
+        enumerate(entries), desc=f"Build {dataset}", total=len(entries), unit="sample"
+    ):
         if not isinstance(entry, dict):
             continue
         image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
@@ -1345,11 +1426,11 @@ def _condition_for_landmark_file(
     dataset: str, path: Path, scenario: str
 ) -> tuple[str, tuple[str, ...]]:
     parts = {_label(part) for part in path.parts}
-    labels: list[str] = []
+    visual_labels: list[str] = []
     if dataset == "cofw68":
-        labels.append("occlusion")
+        visual_labels.append("occlusion")
     if dataset in {"300w", "w300"}:
-        labels.append("anchor")
+        visual_labels.append("anchor")
     for token in (
         "profile",
         "pose",
@@ -1361,16 +1442,26 @@ def _condition_for_landmark_file(
         "challenging",
     ):
         if token in parts or any(token in part for part in parts):
-            labels.append(token)
+            visual_labels.append(token)
+
+    # Split markers are recorded as secondary conditions only: "trainset" is a
+    # split, not a visual condition, and must never become the primary
+    # hard-negative bucket.
+    split_labels: list[str] = []
     for token in ("train", "training"):
         if token in parts or any(token == part for part in parts):
-            labels.append("trainset")
+            split_labels.append("trainset")
     for token in ("test", "testing", "validation", "val"):
         if token in parts or any(token == part for part in parts):
-            labels.append("testset")
-    if not labels:
-        labels.append(_label(scenario))
-    labels = list(dict.fromkeys(_label(item) for item in labels))
+            split_labels.append("testset")
+
+    # Primary bucket is a real visual condition when present; otherwise fall back
+    # to the scenario label ("default" by default), which _sample() maps to a
+    # dataset-specific bucket.
+    primary = visual_labels[0] if visual_labels else _label(scenario)
+    labels = list(
+        dict.fromkeys(_label(item) for item in (primary, *visual_labels, *split_labels))
+    )
     return labels[0], tuple(labels)
 
 
@@ -2275,7 +2366,9 @@ def _build_expected_schema_json(
     image_base = Path(image_root) if image_root else path.parent
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for idx, entry in enumerate(entries):
+    for idx, entry in track(
+        enumerate(entries), desc=f"Build {dataset}", total=len(entries), unit="sample"
+    ):
         if not isinstance(entry, dict):
             continue
         image_value = entry.get("image") or entry.get("image_path") or entry.get("path")
@@ -2406,7 +2499,9 @@ def _build_helen(
     helen_image_index = _build_combined_image_index(helen_roots)
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for index, entry in enumerate(payload):
+    for index, entry in track(
+        enumerate(payload), desc="Build helen", total=len(payload), unit="sample"
+    ):
         sample_id = f"annotations/{index:05d}"
         try:
             if isinstance(entry, dict):
@@ -2551,7 +2646,13 @@ def _build_lapa(
             label_dir = split_dir / "labels"
             if not landmark_dir.is_dir():
                 continue
-            for landmark_path in sorted(landmark_dir.glob("*.txt")):
+            lapa_landmark_files = sorted(landmark_dir.glob("*.txt"))
+            for landmark_path in track(
+                lapa_landmark_files,
+                desc=f"Build lapa ({source_split})",
+                total=len(lapa_landmark_files),
+                unit="file",
+            ):
                 try:
                     points, detected_schema = _load_landmark_file(landmark_path)
                     if detected_schema != "2d_106":
@@ -2709,7 +2810,13 @@ def _build_jd_landmark(
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     for landmark_dir, image_dir, bbox_dir, source_split, source_name in sources:
-        for landmark_path in sorted(landmark_dir.glob("*.txt")):
+        jd_landmark_files = sorted(landmark_dir.glob("*.txt"))
+        for landmark_path in track(
+            jd_landmark_files,
+            desc=f"Build jd-landmark ({source_name})",
+            total=len(jd_landmark_files),
+            unit="file",
+        ):
             if (
                 source_name == "corrected_landmark"
                 and landmark_path.name in test_data1_landmark_names
@@ -2897,7 +3004,13 @@ def _build_ffl_family(
             "picture_mask" if (split_dir / "picture_mask").is_dir() else "picture"
         )
         bbox_dir = split_dir / "bbox"
-        for landmark_path in sorted(landmark_dir.glob("*.txt")):
+        ffl_landmark_files = sorted(landmark_dir.glob("*.txt"))
+        for landmark_path in track(
+            ffl_landmark_files,
+            desc=f"Build {dataset} ({source_split})",
+            total=len(ffl_landmark_files),
+            unit="file",
+        ):
             try:
                 points, detected_schema = _load_landmark_file(landmark_path)
                 if detected_schema != "2d_106":
@@ -3544,7 +3657,12 @@ def _build_cofw68_original(
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": mat_path.as_posix(), "reason": str(err)})
             continue
-        for index, points in enumerate(points_rows):
+        for index, points in track(
+            enumerate(points_rows),
+            desc="Build cofw29",
+            total=len(points_rows),
+            unit="sample",
+        ):
             sample_id = f"cofw68_original/{declared_split}/{mat_path.stem}_{index:04d}"
             try:
                 points29 = normalize_landmark_array(points, schema="2d_29")
@@ -3755,7 +3873,9 @@ def _build_cofw68(
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
 
-    for ann in annotations:
+    for ann in track(
+        annotations, desc="Build cofw68", total=len(annotations), unit="sample"
+    ):
         try:
             idx = _cofw68_annotation_index(ann)
             sample_id = f"cofw68_test_{idx + 1:04d}"
@@ -3954,7 +4074,12 @@ def _build_multipie(
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
 
-    for annotation_file in annotation_files:
+    for annotation_file in track(
+        annotation_files,
+        desc="Build multipie",
+        total=len(annotation_files),
+        unit="file",
+    ):
         for line_no, line in enumerate(
             annotation_file.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
         ):
@@ -4131,7 +4256,9 @@ def _build_wflw(
     seen: Counter[str] = Counter()
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    for points98, bbox, attrs, image_rel in rows:
+    for points98, bbox, attrs, image_rel in track(
+        rows, desc="Build wflw", total=len(rows), unit="sample"
+    ):
         seen[image_rel] += 1
         base_id = Path(image_rel).with_suffix("").as_posix()
         sample_id = (
@@ -4845,6 +4972,11 @@ def _build_merl_rav(
         if face_index is not None:
             metadata["face_index"] = face_index
 
+        if visibility is None:
+            metadata.pop("visibility_target_source", None)
+            metadata.pop("visible_landmark_count", None)
+            metadata.pop("occluded_landmark_count", None)
+
         samples.append(
             _with_split(
                 _sample(
@@ -4881,6 +5013,79 @@ def _build_merl_rav(
         scenarios=scenarios,
         skipped=skipped,
     )
+
+
+def _video_dataset_source_metadata(dataset: str, video_id: str) -> dict[str, T.Any]:
+    dataset = _dataset(dataset)
+    raw_parts = [part for part in str(video_id).replace("\\", "/").split("/") if part]
+    parts = [_label(part) for part in raw_parts]
+    metadata: dict[str, T.Any] = {}
+
+    if dataset == "300vw":
+        # In the unpacked 300VW layout, directories like 001/002/003 are sequence
+        # ids, not challenge-category ids. Only infer category from explicit
+        # category/scenario tokens. Otherwise use a general 300vw bucket.
+        sequence_id = None
+        if "vid" in parts:
+            vid_index = parts.index("vid")
+            if vid_index > 0:
+                sequence_id = raw_parts[vid_index - 1]
+        elif raw_parts:
+            sequence_id = raw_parts[-1]
+
+        category: int | None = None
+        for part in parts:
+            match = re.fullmatch(r"(?:category|cat|scenario|challenge)_?([123])", part)
+            if match:
+                category = int(match.group(1))
+                break
+
+        if sequence_id is not None:
+            metadata["sequence_id"] = str(sequence_id)
+
+        if category is not None:
+            difficulty = {
+                1: "well_lit",
+                2: "mild_unconstrained",
+                3: "challenging",
+            }[category]
+            metadata["video_dataset_category"] = category
+            metadata["video_difficulty"] = difficulty
+            metadata["source_condition"] = f"300vw_category_{category}"
+            metadata["source_conditions"] = [f"300vw_category_{category}", difficulty]
+        else:
+            metadata["source_condition"] = "300vw"
+            metadata["source_conditions"] = ["300vw"]
+
+    elif dataset == "wflw-v":
+        metadata["source_condition"] = "wflw_v"
+        metadata["source_conditions"] = ["wflw_v"]
+
+    return metadata
+
+
+def _video_dataset_source_conditions(
+    dataset: str,
+    scenario: str,
+    split: str,
+    video_id: str,
+) -> tuple[str, tuple[str, ...]]:
+    metadata = _video_dataset_source_metadata(dataset, video_id)
+    conditions: list[str] = []
+
+    source_conditions = metadata.get("source_conditions")
+    if isinstance(source_conditions, list):
+        conditions.extend(str(item) for item in source_conditions)
+
+    conditions.append("video_frame")
+
+    scenario_label = _label(scenario)
+    if scenario_label != "default":
+        conditions.append(scenario_label)
+
+    conditions.append(f"{split}set")
+    conditions = list(dict.fromkeys(_label(item) for item in conditions))
+    return conditions[0], tuple(conditions)
 
 
 def _build_video_dataset(
@@ -5020,11 +5225,14 @@ def _build_video_dataset(
                 "source_video": str(video_path.resolve()),
                 "source_landmarks": str(landmark_path.resolve()),
             }
+            metadata.update(_video_dataset_source_metadata(dataset, video_id))
             if bbox_path is not None and bbox_xyxy is not None:
                 metadata["source_bbox"] = str(bbox_path.resolve())
                 metadata["bbox_xyxy"] = bbox_xyxy
                 metadata["bbox_source"] = "wflw_v_bbox_npy"
-            conditions = ("video_frame", f"{split}set")
+            condition, conditions = _video_dataset_source_conditions(
+                dataset, scenario, split, video_id
+            )
             samples.append(
                 _with_split(
                     _sample(
@@ -5033,7 +5241,7 @@ def _build_video_dataset(
                         sample_id=sample_id,
                         image=Path(record["image"]),
                         points68=points,
-                        condition="video_frame",
+                        condition=condition,
                         conditions=conditions,
                         source_schema=source_schema,
                         source_id=sample_id,
@@ -5602,7 +5810,9 @@ def _build_cofw68_json_cropped(
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
 
-    for idx, entry in enumerate(entries):
+    for idx, entry in track(
+        enumerate(entries), desc="Build cofw68", total=len(entries), unit="sample"
+    ):
         if not isinstance(entry, dict):
             continue
 
