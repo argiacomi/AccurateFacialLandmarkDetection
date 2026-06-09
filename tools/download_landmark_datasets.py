@@ -157,6 +157,14 @@ SOURCES: tuple[SourceAsset, ...] = (
         ),
     ),
     SourceAsset(
+        dataset="lapa",
+        name="LaPa release",
+        filename="LaPa.tar.gz",
+        google_drive_file_id="1XOBoRGSraP50_pS1YPB8_i8Wmw_5L-NG",
+        google_drive_view_url="https://drive.google.com/file/d/1XOBoRGSraP50_pS1YPB8_i8Wmw_5L-NG/view",
+        note="Official LaPa 106-point release (train/val/test with images, landmarks, labels).",
+    ),
+    SourceAsset(
         dataset="jd-landmark",
         name="JD-landmark Test_data1",
         filename="Test_data1.zip",
@@ -626,6 +634,23 @@ def _find_reusable_archive(
     return None
 
 
+def _find_existing_extraction(asset: SourceAsset, output_root: Path) -> Path | None:
+    """Find a completed extraction to reuse when the source archive is gone.
+
+    A prior run may have extracted the archive and then deleted the (often large)
+    archive to reclaim disk space. The extracted tree is still a valid builder
+    source, so reuse it instead of re-downloading the archive only to re-extract.
+    Only directories carrying the ``.extracted_from.json`` marker -- written after
+    a successful extraction -- count, so partial/aborted extractions are ignored.
+    """
+    extracted_root = Path(output_root) / asset.dataset / "extracted"
+    for name in _archive_candidate_names(asset):
+        candidate = extracted_root / name
+        if candidate.is_dir() and (candidate / ".extracted_from.json").is_file():
+            return candidate
+    return None
+
+
 def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.Any]:
     dataset_dir = Path(args.output_root) / asset.dataset
     archive_dir = dataset_dir / "archives"
@@ -656,6 +681,19 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
     destination = archive_dir / asset.filename
     try:
         reuse = None if args.force else _find_reusable_archive(asset, args.output_root)
+        if reuse is None and not args.force and args.extract and asset.extract:
+            # No archive to reuse: if a completed extraction already exists (e.g.
+            # the archive was deleted after a prior run), use it rather than
+            # re-downloading the archive just to re-extract.
+            extraction = _find_existing_extraction(asset, args.output_root)
+            if extraction is not None:
+                print(f"Using existing extraction {extraction} for {asset.name}")
+                result.update(
+                    status="reused_extraction",
+                    extracted=str(extraction),
+                    checksum_status="reused",
+                )
+                return result
         if reuse is not None:
             path, status = reuse
             print(f"Reusing existing archive {path} for {asset.name}")
@@ -714,7 +752,7 @@ def _write_summary(results: list[dict[str, T.Any]], output_root: Path) -> Path:
 
 REGISTRY_VERSION = 1
 MANUAL_STATUSES = frozenset({"manual", "manual_google_drive"})
-REUSED_STATUSES = frozenset({"reused", "reused_shared"})
+REUSED_STATUSES = frozenset({"reused", "reused_shared", "reused_extraction"})
 
 
 def registry_path(output_root: Path) -> Path:

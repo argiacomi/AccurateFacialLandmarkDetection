@@ -114,6 +114,57 @@ def test_wflw_images_reuse_alternate_zip(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Existing extraction reuse when the archive has been deleted
+# ---------------------------------------------------------------------------
+def test_existing_extraction_is_reused_when_archive_is_absent(tmp_path, monkeypatch):
+    output_root = tmp_path / "data"
+    lapa = _asset("lapa", gdrive=True)
+    # A completed extraction exists (marker written), but the archive was deleted
+    # after the prior run to reclaim disk space.
+    extracted = output_root / "lapa" / "extracted" / lapa.filename
+    (extracted / "LaPa").mkdir(parents=True)
+    (extracted / ".extracted_from.json").write_text("{}", encoding="utf-8")
+
+    def fail(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("must not download when an extraction already exists")
+
+    monkeypatch.setattr(downloader, "_download_google_drive", fail)
+    monkeypatch.setattr(downloader, "_download_url", fail)
+
+    result = downloader._process_asset(lapa, _args(output_root, extract=True))
+
+    assert result["status"] == "reused_extraction"
+    assert Path(result["extracted"]) == extracted
+    assert "archive" not in result
+
+    registry = downloader.build_registry([result], output_root)
+    asset_entry = registry["datasets"]["lapa"]["assets"][0]
+    assert asset_entry["reused"] is True
+    assert asset_entry["extracted"] == str(extracted)
+
+
+def test_present_archive_still_preferred_over_extraction(tmp_path, monkeypatch):
+    # When both an archive and an extraction exist, the archive-reuse path runs
+    # (and extraction is skipped via its marker), so the new branch must not
+    # shadow it.
+    output_root = tmp_path / "data"
+    wflw_images = _asset("wflw", gdrive=True)
+    _valid_targz(output_root / "wflw" / "archives" / "WFLW_images.tar.gz")
+    extracted = output_root / "wflw" / "extracted" / "WFLW_images.tar.gz"
+    (extracted).mkdir(parents=True)
+    (extracted / ".extracted_from.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_google_drive",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not download")),
+    )
+    result = downloader._process_asset(wflw_images, _args(output_root, extract=True))
+    assert result["status"] == "reused"
+    assert result["reused_from"].endswith("WFLW_images.tar.gz")
+
+
+# ---------------------------------------------------------------------------
 # Shared COFW image archive reuse (both orders) + separate annotations
 # ---------------------------------------------------------------------------
 def _cofw_color(dataset: str) -> downloader.SourceAsset:
