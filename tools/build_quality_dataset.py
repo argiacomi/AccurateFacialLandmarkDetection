@@ -38,7 +38,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -747,9 +747,6 @@ def _split_from_entry_or_identity(
 
 
 def _save_landmarks(output_dir: Path, sample_id: str, points68: np.ndarray) -> Path:
-    # Flatten like _write_crop_image does. Keeping "/" creates deep trees such as
-    # data/prepared/landmarks/<archive>/<release>/<split>/..., which is slow on
-    # reruns and noisy to inspect.
     safe = safe_id(sample_id).replace("#", "_").replace("/", "_")
     path = output_dir / "landmarks" / f"{safe}.npy"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4428,6 +4425,114 @@ def _merl_rav_landmark_files(root: Path) -> list[Path]:
     )
 
 
+def _merl_rav_image_identity(sample_stem: str) -> tuple[str, int | None]:
+    """Return the base AFLW image id and optional MERL-RAV face index.
+
+    MERL-RAV labels can be named like image00070_2.pts, where the suffix is a
+    face/annotation index in the same AFLW image. AFLW image lookup should use
+    image00070, while sample ids should keep image00070_2.
+    """
+
+    stem = str(sample_stem)
+    base, sep, tail = stem.rpartition("_")
+    if sep and tail.isdigit() and re.fullmatch(r"image\d+", base, flags=re.IGNORECASE):
+        return base, int(tail)
+    return stem, None
+
+
+def _merl_rav_image_name_candidates(sample_stem: str) -> tuple[str, ...]:
+    image_id, _ = _merl_rav_image_identity(sample_stem)
+    return tuple(dict.fromkeys((sample_stem, image_id)))
+
+
+def _merl_rav_landmark_files(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob("*.pts")
+        if path.is_file() and not path.name.startswith(".")
+    )
+
+
+def _parse_merl_rav_pts_with_visibility(
+    path: Path,
+) -> tuple[np.ndarray, tuple[bool, ...] | None, str | None]:
+    """Parse MERL-RAV .pts rows and optional visibility/occlusion flags.
+
+    Expected rows are x y [visibility]. For MERL-style labels, the third column
+    is commonly a point visibility flag. We interpret 1 as visible and 0 as
+    occluded when the file only uses {0, 1}. If all values are visible, the
+    sample is clean; otherwise it is tagged occlusion.
+    """
+
+    rows: list[list[float]] = []
+    flags: list[float] = []
+
+    in_block = False
+    saw_brace = False
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "{":
+            in_block = True
+            saw_brace = True
+            continue
+        if line == "}":
+            break
+        if saw_brace and not in_block:
+            continue
+        if ":" in line and not re.match(r"^[+-]?\d", line):
+            continue
+
+        parts = line.replace(",", " ").split()
+        if len(parts) < 2:
+            continue
+        try:
+            x = float(parts[0])
+            y = float(parts[1])
+        except ValueError:
+            continue
+
+        rows.append([x, y])
+        if len(parts) >= 3:
+            try:
+                flags.append(float(parts[2]))
+            except ValueError:
+                pass
+
+    if not rows:
+        raise ValueError(f"no point rows found in {path}")
+
+    points = np.asarray(rows, dtype=np.float32)
+    if len(flags) != len(rows):
+        return points, None, None
+
+    unique = {int(value) for value in flags if float(value).is_integer()}
+    if unique.issubset({0, 1}):
+        visibility = tuple(bool(int(value)) for value in flags)
+        return points, visibility, "merl_rav_pts_visibility_1_visible_0_occluded"
+
+    # Fallback for non-binary numeric visibility: positive means visible.
+    visibility = tuple(float(value) > 0.0 for value in flags)
+    return points, visibility, "merl_rav_pts_visibility_positive_visible"
+
+
+def _merl_rav_conditions(
+    scenario: str,
+    split: str,
+    visibility: tuple[bool, ...] | None,
+) -> tuple[str, tuple[str, ...]]:
+    base_condition, base_conditions = _native_conditions_for_split(scenario, split)
+    extra: list[str] = []
+    if visibility is not None:
+        if any(not bool(value) for value in visibility):
+            extra.append("occlusion")
+        else:
+            extra.append("clean")
+    conditions = tuple(dict.fromkeys((*extra, *base_conditions)))
+    return conditions[0] if conditions else base_condition, conditions
+
+
 def _build_merl_rav(
     root: Path,
     output_dir: Path,
@@ -4455,26 +4560,39 @@ def _build_merl_rav(
         unit="file",
     ):
         sample_stem = landmark_path.stem
+        image_id, face_index = _merl_rav_image_identity(sample_stem)
         sample_id = f"merl-rav/{sample_stem}"
         try:
-            raw_points = _parse_pts(landmark_path)
+            raw_points, visibility, visibility_source = (
+                _parse_merl_rav_pts_with_visibility(landmark_path)
+            )
             points, detected_schema = _canonical_points(
                 raw_points,
                 source_schema=f"2d_{raw_points.shape[0]}",
             )
-            image = _find_named_image(
-                image_roots,
-                sample_stem,
-                image_index=image_index,
-            )
+
+            image = None
+            for candidate_name in _merl_rav_image_name_candidates(sample_stem):
+                image = _find_named_image(
+                    image_roots,
+                    candidate_name,
+                    image_index=image_index,
+                )
+                if image is not None:
+                    break
             if image is None:
-                raise FileNotFoundError(f"AFLW image not found for {sample_stem}")
+                raise FileNotFoundError(
+                    f"AFLW image not found for {sample_stem} "
+                    f"(tried base image id {image_id})"
+                )
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": sample_id, "reason": str(err)})
             continue
 
-        split = _deterministic_split("merl-rav", sample_stem)
-        condition, conds = _native_conditions_for_split(scenario, split)
+        # Split by source image, not face index, so multiple faces from the same
+        # AFLW image cannot leak across train/test.
+        split = _deterministic_split("merl-rav", image_id)
+        condition, conds = _merl_rav_conditions(scenario, split, visibility)
         metadata = _path_identity_metadata(landmark_path, root=root, dataset="merl-rav")
         metadata.update(
             {
@@ -4483,9 +4601,19 @@ def _build_merl_rav(
                 "source_schema": detected_schema,
                 "source_image": str(image.resolve()),
                 "source_image_name": image.name,
-                "image_id": sample_stem,
+                "image_id": image_id,
+                "merl_rav_label_id": sample_stem,
+                "visibility_target_source": visibility_source,
+                "visible_landmark_count": int(
+                    sum(1 for value in visibility or () if bool(value))
+                ),
+                "occluded_landmark_count": int(
+                    sum(1 for value in visibility or () if not bool(value))
+                ),
             }
         )
+        if face_index is not None:
+            metadata["face_index"] = face_index
 
         samples.append(
             _with_split(
@@ -4500,6 +4628,7 @@ def _build_merl_rav(
                     source_schema=detected_schema,
                     source_id=sample_id,
                     metadata=metadata,
+                    visibility=visibility,
                 ),
                 split,
             )
@@ -4517,7 +4646,9 @@ def _build_merl_rav(
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,
-        allow_overlap=allow_overlap,
+        # MERL-RAV can contain multiple face labels for one AFLW image. These are
+        # distinct samples, so do not dedupe by shared image path.
+        allow_overlap=True,
         scenarios=scenarios,
         skipped=skipped,
     )

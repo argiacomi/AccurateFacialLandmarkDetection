@@ -17,7 +17,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -830,15 +830,15 @@ def _print_build_hints(output_root: Path) -> None:
     print("\nBuild hints:")
     print(
         "  WFLW: "
-        f"python tools/landmarks/build_quality_dataset.py --dataset wflw --source-dir {output_root / 'wflw' / 'extracted'} --output-dir runs/landmarks/build_wflw"
+        f"python tools/build_quality_dataset.py --dataset wflw --source-dir {output_root / 'wflw' / 'extracted'} --output-dir runs/landmarks/build_wflw"
     )
     print(
         "  cofw68: "
-        f"python tools/landmarks/build_quality_dataset.py --dataset cofw68 --source-dir {output_root / 'cofw68' / 'extracted'} --output-dir runs/landmarks/build_cofw68"
+        f"python tools/build_quality_dataset.py --dataset cofw68 --source-dir {output_root / 'cofw68' / 'extracted'} --output-dir runs/landmarks/build_cofw68"
     )
     print(
         "  300W: "
-        f"python tools/landmarks/build_quality_dataset.py --dataset 300w --source-dir {output_root / '300w' / 'extracted'} --output-dir runs/landmarks/build_300w"
+        f"python tools/build_quality_dataset.py --dataset 300w --source-dir {output_root / '300w' / 'extracted'} --output-dir runs/landmarks/build_300w"
     )
     print(
         "  MERL-RAV native: "
@@ -846,15 +846,15 @@ def _print_build_hints(output_root: Path) -> None:
     )
     print(
         "  AFLW2000-3D: "
-        f"python tools/landmarks/build_quality_dataset.py --dataset aflw2000-3d --source-dir {output_root / 'aflw2000-3d' / 'extracted'} --output-dir runs/landmarks/build_aflw2000_3d"
+        f"python tools/build_quality_dataset.py --dataset aflw2000-3d --source-dir {output_root / 'aflw2000-3d' / 'extracted'} --output-dir runs/landmarks/build_aflw2000_3d"
     )
     print(
         "  Menpo2D: "
-        f"python tools/landmarks/build_quality_dataset.py --dataset menpo2d --source-dir {output_root / 'menpo2d' / 'extracted'} --output-dir runs/landmarks/build_menpo2d"
+        f"python tools/build_quality_dataset.py --dataset menpo2d --source-dir {output_root / 'menpo2d' / 'extracted'} --output-dir runs/landmarks/build_menpo2d"
     )
     print(
         "  MultiPIE: "
-        f"python tools/landmarks/build_quality_dataset.py --dataset multipie --source-dir {output_root / 'multipie' / 'extracted'} --output-dir runs/landmarks/build_multipie"
+        f"python tools/build_quality_dataset.py --dataset multipie --source-dir {output_root / 'multipie' / 'extracted'} --output-dir runs/landmarks/build_multipie"
     )
     print(
         "  Issue #8 still-image datasets: "

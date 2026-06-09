@@ -3,7 +3,7 @@
 Issue #7 adds a reproducible tuning orchestrator:
 
 ```bash
-python tools/landmarks/tune_training_hyperparameters.py \
+python tools/tune_training_hyperparameters.py \
   --output-dir runs/hparam_tuning \
   --dry-run
 ```
@@ -57,7 +57,7 @@ For parallel workers, launch multiple script processes with the same `--output-d
 Dry-run mode prints and stores commands without launching training:
 
 ```bash
-python tools/landmarks/tune_training_hyperparameters.py \
+python tools/tune_training_hyperparameters.py \
   --output-dir runs/hparam_tuning \
   --dry-run \
   --train-command "python TrainHeatmapStageFP16.py" \
@@ -84,7 +84,7 @@ Each run receives flags like:
 Use `--execute` to launch the generated commands:
 
 ```bash
-python tools/landmarks/tune_training_hyperparameters.py \
+python tools/tune_training_hyperparameters.py \
   --output-dir runs/hparam_tuning \
   --execute \
   --train-command "python TrainHeatmapStageFP16.py" \
@@ -114,7 +114,7 @@ Missing hard slices are reported in each result's objective diagnostics instead 
 For planner and CI smoke tests, `--mock-metrics` writes deterministic synthetic metrics instead of launching training while still exercising Optuna trial creation when Optuna is installed:
 
 ```bash
-python tools/landmarks/tune_training_hyperparameters.py \
+python tools/tune_training_hyperparameters.py \
   --output-dir /tmp/landmark_tuning_smoke \
   --dry-run \
   --mock-metrics \

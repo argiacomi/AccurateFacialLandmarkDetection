@@ -16,14 +16,14 @@ Signed MERL-RAV semantics:
 
 Typical usage after downloading/extracting sources:
 
-    python tools/landmarks/prepare_merl_rav_aflw.py \
+    python tools/prepare_merl_rav_aflw.py \
       --merl-rav-root data/landmarks/merl-rav/extracted/MERL-RAV_dataset-master.zip \
       --aflw-root data/landmarks/aflw/extracted/AFLW.zip \
       --output-dir data/landmarks/merl-rav/organized
 
 Then build the CD-ViT dataset manifest:
 
-    python tools/landmarks/build_quality_dataset.py \
+    python tools/build_quality_dataset.py \
       --dataset merl-rav \
       --source-dir data/landmarks/merl-rav/organized \
       --output-dir runs/landmarks/build_merl_rav
@@ -45,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

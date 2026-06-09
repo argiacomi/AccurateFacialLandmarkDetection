@@ -16,7 +16,7 @@ plumbing source/cache paths between tools. For each requested dataset it will:
 
 Example::
 
-    python tools/landmarks/prepare_landmark_dataset.py \
+    python tools/prepare_landmark_dataset.py \
       --datasets wflw-v \
       --write-overlays
 """
@@ -29,7 +29,7 @@ import typing as T
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -283,6 +283,8 @@ def _build_dataset(
             "--audit-overlay-limit",
             str(args.audit_overlay_limit),
         ]
+    if args.samples_per_scenario is not None:
+        arglist += ["--samples-per-scenario", str(args.samples_per_scenario)]
     build_args = builder._parser().parse_args(arglist)
     return builder.build(build_args)
 
@@ -449,7 +451,7 @@ def _print_summary(
     if combined_manifest.is_file():
         print("\nTraining command:")
         print(
-            "  python tools/landmarks/run_cdvit_manifest_training_pipeline.py "
+            "  python tools/run_cdvit_manifest_training_pipeline.py "
             f"--manifest {combined_manifest}"
         )
 
@@ -497,6 +499,15 @@ def _parser() -> argparse.ArgumentParser:
         "--write-overlays",
         action="store_true",
         help="Write visual landmark overlay audit images.",
+    )
+    parser.add_argument(
+        "--samples-per-scenario",
+        type=int,
+        default=None,
+        help=(
+            "Maximum samples to keep per scenario/condition when building each dataset. "
+            "Forwarded to build_quality_dataset.py as --samples-per-scenario."
+        ),
     )
     parser.add_argument("--audit-overlay-limit", type=int, default=50)
     parser.add_argument(

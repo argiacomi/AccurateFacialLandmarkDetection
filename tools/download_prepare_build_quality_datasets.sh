@@ -2,7 +2,7 @@
 # Download landmark datasets, prepare MERL-RAV/AFLW, and build quality manifests.
 #
 # This script performs the data-prep stages that should exist before running
-# tools/landmarks/run_cdvit_manifest_training_pipeline.py.
+# tools/run_cdvit_manifest_training_pipeline.py.
 #
 # Required for Google Drive-backed sources:
 #   pip install gdown
@@ -21,10 +21,10 @@
 #   SAMPLES_PER_SCENARIO=           # e.g. 100 for a quick smoke build
 #
 # Example:
-#   bash tools/landmarks/download_prepare_build_quality_datasets.sh
+#   bash tools/download_prepare_build_quality_datasets.sh
 #
 # Partial/smoke run:
-#   SAMPLES_PER_SCENARIO=50 CONTINUE_ON_ERROR=1 bash tools/landmarks/download_prepare_build_quality_datasets.sh
+#   SAMPLES_PER_SCENARIO=50 CONTINUE_ON_ERROR=1 bash tools/download_prepare_build_quality_datasets.sh
 
 set -Eeuo pipefail
 
@@ -83,15 +83,15 @@ if [[ "${ALLOW_OVERLAP}" == "1" ]]; then
   maybe_args+=(--allow-overlap)
 fi
 
-need_file "tools/landmarks/download_landmark_datasets.py"
-need_file "tools/landmarks/prepare_merl_rav_aflw.py"
-need_file "tools/landmarks/build_quality_dataset.py"
+need_file "tools/download_landmark_datasets.py"
+need_file "tools/prepare_merl_rav_aflw.py"
+need_file "tools/build_quality_dataset.py"
 
 mkdir -p "${DATA_ROOT}" "${QUALITY_ROOT}"
 
 # 1. Download all configured sources into DATA_ROOT.
 download_args=(
-  "tools/landmarks/download_landmark_datasets.py"
+  "tools/download_landmark_datasets.py"
   --output-root "${DATA_ROOT}"
   --dataset all
   --extract
@@ -112,7 +112,7 @@ AFLW_ROOT="${AFLW_ROOT:-${DATA_ROOT}/aflw/extracted/AFLW.zip}"
 MERL_RAV_ORGANIZED="${MERL_RAV_ORGANIZED:-${DATA_ROOT}/merl-rav/organized}"
 
 prepare_merl_args=(
-  "tools/landmarks/prepare_merl_rav_aflw.py"
+  "tools/prepare_merl_rav_aflw.py"
   --merl-rav-root "${MERL_RAV_ROOT}"
   --aflw-root "${AFLW_ROOT}"
   --output-dir "${MERL_RAV_ORGANIZED}"
@@ -143,7 +143,7 @@ build_dataset() {
   fi
 
   run_step "Build ${dataset} quality manifest" \
-    "${PYTHON}" tools/landmarks/build_quality_dataset.py \
+    "${PYTHON}" tools/build_quality_dataset.py \
       --dataset "${dataset}" \
       --source-dir "${source_dir}" \
       --output-dir "${output_dir}" \
@@ -186,4 +186,4 @@ printf 'Data root: %s\n' "${DATA_ROOT}"
 printf 'Quality manifests root: %s\n' "${QUALITY_ROOT}"
 printf 'Dataset-source args: %s\n' "${DATASET_SOURCE_ARGS}"
 printf '\nNext step example:\n'
-printf '  %s tools/landmarks/run_cdvit_manifest_training_pipeline.py --dataset wflw,cofw68,300w,aflw2000-3d,merl-rav,menpo2d,multipie $(tr "\\n" " " < %s)\n' "${PYTHON}" "${DATASET_SOURCE_ARGS}"
+printf '  %s tools/run_cdvit_manifest_training_pipeline.py --dataset wflw,cofw68,300w,aflw2000-3d,merl-rav,menpo2d,multipie $(tr "\\n" " " < %s)\n' "${PYTHON}" "${DATASET_SOURCE_ARGS}"

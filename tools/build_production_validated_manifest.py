@@ -7,7 +7,7 @@ file is Faceswap's compressed pickle alignment format, so only run this helper
 on trusted local files.
 
 Example:
-    python tools/landmarks/build_production_validated_manifest.py \
+    python tools/build_production_validated_manifest.py \
       --prod-dir /path/to/production_dir_or_zip \
       --output-dir data/landmarks/production_validated
 """
@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
