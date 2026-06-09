@@ -4121,24 +4121,34 @@ def _build_cofw68(
     )
 
 
-def _find_multipie_root(root: Path) -> Path:
+# MenpoBenchmark packages (MultiPIE, Menpo2D) share one annotation format:
+# ``<Prefix>_*_train.txt`` rows of ``image bbox(4) coarse(5x2) dense`` with 68-point
+# or 39-point profile dense blocks. They are parsed by the same builder.
+_MENPO_BENCHMARK_PREFIX = {"multipie": "MultiPIE", "menpo2d": "Menpo2D"}
+
+
+def _menpo_benchmark_prefix(dataset: str) -> str:
+    return _MENPO_BENCHMARK_PREFIX.get(_dataset(dataset), _dataset(dataset))
+
+
+def _find_multipie_root(root: Path, dataset: str = "multipie") -> Path:
+    prefix = _menpo_benchmark_prefix(dataset)
     candidates = sorted(
-        path.parent for path in root.rglob("MultiPIE_*_train.txt") if path.is_file()
+        path.parent for path in root.rglob(f"{prefix}*train.txt") if path.is_file()
     )
     if candidates:
         return candidates[0]
     if (root / "image").is_dir():
         return root
-    raise FileNotFoundError(f"MultiPIE root not found below {root}")
+    raise FileNotFoundError(f"{prefix} root not found below {root}")
 
 
-def _multipie_annotation_files(root: Path) -> list[Path]:
-    multipie_root = _find_multipie_root(root)
-    files = sorted(multipie_root.glob("MultiPIE_*_train.txt"))
+def _multipie_annotation_files(root: Path, dataset: str = "multipie") -> list[Path]:
+    prefix = _menpo_benchmark_prefix(dataset)
+    base = _find_multipie_root(root, dataset)
+    files = sorted(base.glob(f"{prefix}*train.txt"))
     if not files:
-        raise FileNotFoundError(
-            f"MultiPIE train txt files not found in {multipie_root}"
-        )
+        raise FileNotFoundError(f"{prefix} train txt files not found in {base}")
     return files
 
 
@@ -4209,21 +4219,23 @@ def _build_multipie(
     root: Path,
     output_dir: Path,
     *,
+    dataset: str = "multipie",
     scenario: str,
     scenarios: tuple[str, ...] | None,
     limit: int | None,
     mode: str,
     allow_overlap: bool,
 ) -> Path:
-    multipie_root = _find_multipie_root(root)
-    annotation_files = _multipie_annotation_files(root)
+    dataset = _dataset(dataset)
+    multipie_root = _find_multipie_root(root, dataset)
+    annotation_files = _multipie_annotation_files(root, dataset)
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
 
     for annotation_file in track(
         annotation_files,
-        desc="Build multipie",
+        desc=f"Build {dataset}",
         total=len(annotation_files),
         unit="file",
     ):
@@ -4251,7 +4263,7 @@ def _build_multipie(
                 split = (
                     "train"
                     if "trainset" in conds
-                    else _deterministic_split("multipie", sample_id)
+                    else _deterministic_split(dataset, sample_id)
                 )
 
                 metadata = {
@@ -4259,7 +4271,7 @@ def _build_multipie(
                     "annotation_line": line_no,
                     "image_id": image_rel,
                     "face_bbox": bbox,
-                    "face_bbox_source": "multipie_landmark_bounds",
+                    "face_bbox_source": f"{dataset}_landmark_bounds",
                     "normalizer_source": DEFAULT_NORMALIZER_SOURCE,
                     "source_schema": source_schema,
                     "split": split,
@@ -4267,7 +4279,7 @@ def _build_multipie(
 
                 sample_kwargs = dict(
                     output_dir=output_dir,
-                    dataset="multipie",
+                    dataset=dataset,
                     sample_id=sample_id,
                     image=image_path,
                     points68=points68,
@@ -4293,11 +4305,11 @@ def _build_multipie(
                 continue
 
     if not samples:
-        raise ValueError(f"no MultiPIE samples built; skipped={skipped[:5]}")
+        raise ValueError(f"no {dataset} samples built; skipped={skipped[:5]}")
 
     return _write_manifest(
         output_dir,
-        "multipie",
+        dataset,
         scenario,
         _filter(samples, scenarios, limit),
         mode=mode,
@@ -5482,14 +5494,15 @@ def build(args: argparse.Namespace) -> Path:
                     mode=args.manifest_mode,
                     allow_overlap=args.allow_overlap,
                 )
-        elif dataset == "multipie":
+        elif dataset in {"multipie", "menpo2d"}:
             if root is None:
                 raise ValueError(
-                    "--source-dir or --source-zip is required for MultiPIE"
+                    f"--source-dir or --source-zip is required for {dataset}"
                 )
             manifest_path = _build_multipie(
                 root,
                 output_dir,
+                dataset=dataset,
                 scenario=args.scenario,
                 scenarios=scenarios,
                 limit=limit,

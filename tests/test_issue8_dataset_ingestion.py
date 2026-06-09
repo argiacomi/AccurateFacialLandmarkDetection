@@ -982,3 +982,52 @@ def test_lapa_jd_106_to_68_projection_subsamples_to_canonical_order():
     projected = to_canonical_68(pts106, source_schema="2d_106")
     assert projected.shape == (68, 2)
     assert np.array_equal(projected, pts106[MAP_106_TO_68, :2])
+
+
+def _menpo_benchmark_row(image_rel, points, *, bbox=(10.0, 20.0, 230.0, 240.0)):
+    # MenpoBenchmark row: image bbox(4) coarse(5x2) dense(Nx2)
+    coarse = points[:5].reshape(-1).tolist()
+    dense = points.reshape(-1).tolist()
+    return " ".join([image_rel, *(str(v) for v in [*bbox, *coarse, *dense])])
+
+
+def test_menpo2d_uses_menpobenchmark_parser_not_directory_builder(tmp_path):
+    source = tmp_path / "menpo2d"
+    output = tmp_path / "out"
+    _write_image(source / "image" / "frontal_0001.jpg")
+    (source / "Menpo2D_semifrontal_train.txt").write_text(
+        _menpo_benchmark_row("image/frontal_0001.jpg", _points(68)) + "\n",
+        encoding="utf-8",
+    )
+    _write_image(source / "image" / "profile_0001.jpg")
+    (source / "Menpo2D_profile_train.txt").write_text(
+        _menpo_benchmark_row("image/profile_0001.jpg", _points(39)) + "\n",
+        encoding="utf-8",
+    )
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "menpo2d",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+    manifest = _load_manifest(manifest_path)
+    by_stem = {Path(s["metadata"]["image_id"]).stem: s for s in manifest["samples"]}
+
+    front = by_stem["frontal_0001"]
+    assert front["dataset"] == "menpo2d"
+    assert front["source_schema"] == "2d_68"
+    # The MenpoBenchmark parser stamps this provenance; the generic directory
+    # builder would not produce it.
+    assert front["metadata"]["face_bbox_source"] == "menpo2d_landmark_bounds"
+    assert "semifrontal" in front["conditions"]
+
+    profile = by_stem["profile_0001"]
+    assert profile["dataset"] == "menpo2d"
+    assert profile["source_schema"] == "2d_39"
+    assert profile["head_name"] == "profile39"
+    assert "profile" in profile["conditions"]
