@@ -45,6 +45,7 @@ if str(ROOT) not in sys.path:
 from lib.core import pose
 from lib.core.schema import (
     canonicalize_schema,
+    flip_map_for_schema,
     head_name_for_schema,
     normalize_landmark_array,
     normalize_landmarks,
@@ -952,6 +953,99 @@ def _geometry_yaw_side(pts68: np.ndarray | None) -> str:
     return "right" if est[0] > 0 else "left"
 
 
+def _dense_flip_pair_yaw(points: T.Any, source_schema: str) -> float | None:
+    """Estimate signed yaw from dense schemas with audited flip-pair geometry.
+
+    This is intentionally pose-only. It does not mark the schema as projectable to
+    68 landmarks. For HELEN/2d_194, the dense face outline and verified flip map
+    are enough to derive a coarse yaw bucket from the apparent centerline shift
+    inside the visible face silhouette.
+    """
+    try:
+        schema = canonicalize_schema(source_schema)
+    except Exception:  # noqa: BLE001
+        return None
+    if schema != "2d_194":
+        return None
+
+    try:
+        arr = np.asarray(points, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+            return None
+        xy = arr[:, :2]
+        if not np.all(np.isfinite(xy)):
+            return None
+        flip = flip_map_for_schema(schema)
+    except Exception:  # noqa: BLE001
+        return None
+
+    pairs = np.asarray(
+        [(idx, int(peer)) for idx, peer in enumerate(flip) if idx < int(peer)],
+        dtype=np.int64,
+    )
+    if pairs.size == 0:
+        return None
+
+    # Pair midpoints approximate the face's semantic centerline. Use a median to
+    # avoid over-weighting any one region of the 194-point markup.
+    pair_mid_x = (xy[pairs[:, 0], 0] + xy[pairs[:, 1], 0]) / 2.0
+    center_x = float(np.median(pair_mid_x))
+
+    # Percentile silhouette bounds are more stable than raw min/max if an outer
+    # contour point is noisy.
+    left_x, right_x = np.percentile(xy[:, 0], [2.0, 98.0])
+    face_width = float(right_x - left_x)
+    if not np.isfinite(face_width) or face_width <= 1e-6:
+        return None
+
+    d_left = center_x - float(left_x)
+    d_right = float(right_x) - center_x
+    denom = d_left + d_right
+    if abs(denom) <= 1e-6:
+        return 0.0
+
+    yaw = float(np.clip((d_left - d_right) / denom, -1.0, 1.0) * 90.0)
+    if abs(yaw) < 1.0:
+        return 0.0
+    return yaw
+
+
+def _dense_pose_fields(points: T.Any, source_schema: str) -> dict[str, T.Any]:
+    """Return pose metadata for dense non-68 schemas with pose-only heuristics."""
+    yaw = _dense_flip_pair_yaw(points, source_schema)
+    if yaw is None:
+        return {}
+
+    schema = canonicalize_schema(source_schema)
+    fields = _pose_fields(source=f"landmark_geometry_{schema}", yaw_signed=yaw)
+    fields["pose_geometry_schema"] = schema
+    fields["pose_geometry_audit"] = "flip_pair_centerline_heuristic"
+    return fields
+
+
+def _pose_condition_tags(meta: T.Mapping[str, T.Any]) -> tuple[str, ...]:
+    """Derive secondary balancing tags from pose metadata.
+
+    These tags are appended to ``conditions`` only. They never replace the
+    existing primary condition.
+    """
+    tags: list[str] = []
+
+    pose_bucket = _label(meta.get("pose_bucket"))
+    if pose_bucket not in ("default", "unknown"):
+        tags.append(f"pose_{pose_bucket}")
+
+    pitch_bucket = _label(meta.get("pitch_bucket"))
+    if pitch_bucket not in ("default", "unknown"):
+        tags.append(f"pitch_{pitch_bucket}")
+
+    pose_side = _label(meta.get("pose_side"))
+    if pose_side not in ("default", "unknown"):
+        tags.append(f"pose_side_{pose_side}")
+
+    return tuple(dict.fromkeys(tags))
+
+
 def _pose_metadata(
     dataset: str,
     points: T.Any,
@@ -997,6 +1091,11 @@ def _pose_metadata(
                 pitch=est[1],
                 roll=est[2],
             )
+
+    dense_pose = _dense_pose_fields(points, source_schema)
+    if dense_pose:
+        return dense_pose
+
     return {}
 
 
@@ -1070,6 +1169,12 @@ def _sample(
             sample_conditions = (dataset_bucket, *sample_conditions)
         sample_conditions = tuple(dict.fromkeys(sample_conditions))
         primary_condition = dataset_bucket
+
+    pose_condition_tags = _pose_condition_tags(meta)
+    if pose_condition_tags:
+        sample_conditions = tuple(
+            dict.fromkeys((*sample_conditions, *pose_condition_tags))
+        )
 
     out: dict[str, T.Any] = {
         "sample_id": sample_id,
