@@ -43,4 +43,10 @@ def build_cdvit_model(
         else None,
         visibility_heads=schema_aware_training
         and bool(getattr(args, "visibility_heads", True)),
+        # Compute the visibility head on every stage only when all stages are
+        # supervised; otherwise it runs on the final stage alone, which is the
+        # only stage the loss and evaluator read by default.
+        visibility_all_stages=(
+            str(getattr(args, "auxiliary_loss_stage", "final")) == "all"
+        ),
     )

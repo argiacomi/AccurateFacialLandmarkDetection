@@ -1609,6 +1609,7 @@ class VitAttnStage(nn.Module):
         schema_heads=None,
         auxiliary_heads=None,
         visibility_heads=False,
+        visibility_all_stages=False,
     ):
         super(VitAttnStage, self).__init__()
         # assert heatmap_size == 32
@@ -1621,6 +1622,13 @@ class VitAttnStage(nn.Module):
             self.schema_heads.setdefault("landmarks_68", lmk_num)
         self.auxiliary_heads = dict(auxiliary_heads or {})
         self.visibility_heads_enabled = bool(visibility_heads and self.multi_schema)
+        # When False (default), the landmark-conditioned visibility head only
+        # runs on the final stage, since the loss and evaluator consume only
+        # the final stage's visibility output unless all-stage supervision is
+        # requested. Set True to compute it on every stage (e.g. when
+        # auxiliary_loss_stage == 'all'). Modules are always instantiated for
+        # every stage so checkpoints stay compatible regardless of this flag.
+        self.visibility_all_stages = bool(visibility_all_stages)
 
         stages = []
         output_layers = []
@@ -1715,7 +1723,7 @@ class VitAttnStage(nn.Module):
         yy = (heatmap * self.yy_loc).sum([2, 3])
         return torch.stack([xx, yy], dim=2)
 
-    def _prediction_for_stage(self, stage_index, feature):
+    def _prediction_for_stage(self, stage_index, feature, is_final_stage=True):
         hm = self.output_layers[stage_index](feature)
         coord = self.GetCoord(hm)
         if not self.multi_schema:
@@ -1724,6 +1732,20 @@ class VitAttnStage(nn.Module):
         for name, layers in self.schema_output_layers.items():
             head_hm = layers[stage_index](feature)
             out[name] = (self.GetCoord(head_hm), head_hm)
+        # The visibility head is the most expensive per-stage head (dominated by
+        # its 1x1 feature projection). Skip it on non-final stages unless all
+        # stages are supervised, matching where its output is actually consumed.
+        if is_final_stage or self.visibility_all_stages:
+            self._append_visibility_outputs(stage_index, feature, out)
+        if self.auxiliary_output_layers:
+            pooled = F.adaptive_avg_pool2d(feature, 1).flatten(1)
+            out["_aux"] = {
+                name: layer(pooled)
+                for name, layer in self.auxiliary_output_layers.items()
+            }
+        return out
+
+    def _append_visibility_outputs(self, stage_index, feature, out):
         for name, layers in self.visibility_output_layers.items():
             if name not in out:
                 continue
@@ -1734,13 +1756,6 @@ class VitAttnStage(nn.Module):
             )
             landmark_heatmap = out[name][1]
             out[visibility_key] = layers[stage_index](feature, landmark_heatmap)
-        if self.auxiliary_output_layers:
-            pooled = F.adaptive_avg_pool2d(feature, 1).flatten(1)
-            out["_aux"] = {
-                name: layer(pooled)
-                for name, layer in self.auxiliary_output_layers.items()
-            }
-        return out
 
     def forward_res(self, img):
         feat = self.pre(img)
@@ -1753,7 +1768,11 @@ class VitAttnStage(nn.Module):
             else:
                 merge = feat
             hm_0 = self.stages[i](merge)
-            res.append(self._prediction_for_stage(i, hm_0))
+            res.append(
+                self._prediction_for_stage(
+                    i, hm_0, is_final_stage=(i == len(self.stages) - 1)
+                )
+            )
 
             pre_input = pre_output
             pre_output = hm_0
@@ -1771,7 +1790,11 @@ class VitAttnStage(nn.Module):
             else:
                 merge = feat
             hm_0 = self.stages[i](merge)
-            res.append(self._prediction_for_stage(i, hm_0))
+            res.append(
+                self._prediction_for_stage(
+                    i, hm_0, is_final_stage=(i == len(self.stages) - 1)
+                )
+            )
 
             pre_merged = merge
             pre_output = hm_0
@@ -1785,7 +1808,11 @@ class VitAttnStage(nn.Module):
         for i in range(len(self.stages)):
             hm_0 = self.stages[i](pre_hm)
             pre_hm = hm_0
-            res.append(self._prediction_for_stage(i, hm_0))
+            res.append(
+                self._prediction_for_stage(
+                    i, hm_0, is_final_stage=(i == len(self.stages) - 1)
+                )
+            )
 
         return res
 
@@ -1801,7 +1828,11 @@ class VitAttnStage(nn.Module):
                     merge = feat
                 hm_0 = self.stages[i](merge)
                 pre_hm = hm_0
-                res.append(self._prediction_for_stage(i, hm_0))
+                res.append(
+                    self._prediction_for_stage(
+                        i, hm_0, is_final_stage=(i == len(self.stages) - 1)
+                    )
+                )
 
             return res
         elif connect_type == 0:

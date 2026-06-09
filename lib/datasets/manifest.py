@@ -1,6 +1,9 @@
 import hashlib
 import json
+import os
+import stat as stat_module
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -89,11 +92,21 @@ def _coerce_conditions(entry, metadata):
     return tuple(labels)
 
 
+@lru_cache(maxsize=256)
+def _resolved_base_dir(base_dir):
+    # A manifest's base dir is reused for every entry, so resolve it once.
+    # Directory resolution is stable for the process lifetime, making the
+    # cache safe and bounded by the number of distinct manifest directories.
+    return str(Path(base_dir).resolve())
+
+
 def _resolve_path(base_dir, value):
-    path = Path(str(value or ""))
-    if path.is_absolute():
-        return str(path)
-    return str((base_dir / path).resolve())
+    raw = str(value or "")
+    if os.path.isabs(raw):
+        return str(Path(raw))
+    # Equivalent to str((base_dir / value).resolve()) but avoids re-resolving the
+    # constant base dir on every entry and uses the lighter os.path realpath.
+    return os.path.realpath(os.path.join(_resolved_base_dir(str(base_dir)), raw))
 
 
 def _clamp_weight(value):
@@ -335,21 +348,28 @@ def _sha256_path(path):
 
 def _path_fingerprint(path, *, include_sha256=False):
     path = Path(path)
-    payload = {
-        "path": str(path.resolve() if path.exists() else path.expanduser()),
-        "exists": path.exists(),
-        "is_file": path.is_file(),
-        "size": None,
-        "mtime_ns": None,
-    }
+    # A single stat() (which follows symlinks, like exists()/is_file()/stat())
+    # gives existence, file-ness, size, and mtime without repeated syscalls.
     try:
         stat = path.stat()
     except OSError:
-        return payload
+        return {
+            "path": str(path.expanduser()),
+            "exists": False,
+            "is_file": False,
+            "size": None,
+            "mtime_ns": None,
+        }
 
-    payload["size"] = int(stat.st_size)
-    payload["mtime_ns"] = int(stat.st_mtime_ns)
-    if include_sha256 and path.is_file():
+    is_file = stat_module.S_ISREG(stat.st_mode)
+    payload = {
+        "path": str(path.resolve()),
+        "exists": True,
+        "is_file": is_file,
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+    if include_sha256 and is_file:
         payload["sha256"] = _sha256_path(path)
     return payload
 
@@ -1044,7 +1064,7 @@ class LandmarkDataset(Dataset):
         ).float()
 
         if self.generateHM is not None:
-            heatmap = self.generateHM.Generate(lmk * (self.heatmap_size - 1))
+            heatmap = self.generateHM.Generate((lmk * (self.heatmap_size - 1)).numpy())
             heatmap = torch.from_numpy(heatmap).float()
             heatmap = heatmap * landmark_mask_t.reshape(-1, 1, 1)
             denom = torch.sum(heatmap, dim=(1, 2), keepdim=True).clamp_min(1e-6)

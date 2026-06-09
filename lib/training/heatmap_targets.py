@@ -118,18 +118,16 @@ class GenerateHeatmap:
         self.grid_index = np.stack([row, col], axis=2).astype(np.float32)
 
     def Generate(self, lmk):
-
-        hm = np.zeros((len(lmk), self.img_size, self.img_size), dtype=np.float32)
-        for i in range(len(lmk)):
-            x, y = lmk[i]
-            loc_idx = np.array([[[y, x]]], dtype=np.float32)
-            dist = self.grid_index - loc_idx
-            dist = np.sqrt(np.sum(dist * dist, axis=2))
-            # hm_i = np.exp(-dist / 0.6)  # 64-0.6
-            # hm_i = np.exp(-dist  / 0.75)  # 32-0.75
-            hm_i = np.exp(-dist * dist / 1.0)  # 32-0.75
-            hm[i] = hm_i
-        return hm
+        # The original per-landmark heatmap is exp(-((gy - y)^2 + (gx - x)^2)),
+        # an isotropic unit-variance 2-D Gaussian. That factors exactly into the
+        # outer product of two 1-D Gaussians, so the expensive exp() runs over
+        # 2 * L * img_size values instead of L * img_size^2 -- a large win while
+        # producing the same result to float32 precision.
+        pts = np.asarray(lmk, dtype=np.float32).reshape(-1, 2)
+        axis = np.arange(self.img_size, dtype=np.float32)[None, :]  # (1, img_size)
+        gx = np.exp(-((axis - pts[:, 0:1]) ** 2))  # (L, img_size) over columns
+        gy = np.exp(-((axis - pts[:, 1:2]) ** 2))  # (L, img_size) over rows
+        return (gy[:, :, None] * gx[:, None, :]).astype(np.float32)
 
     def GenerateDebug(self, lmk):
         hm = np.zeros((len(lmk), self.img_size, self.img_size), dtype=np.float32)
