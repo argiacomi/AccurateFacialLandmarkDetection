@@ -21,6 +21,7 @@ Supported raw inputs by dataset:
 Registered non-68 schemas are preserved for schema-aware multi-head training.
 """
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

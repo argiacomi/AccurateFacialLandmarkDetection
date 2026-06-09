@@ -3,7 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 
-from lib.models.attention import *
+from lib.models.attention import (
+    SA2SA1,
+    SA2SA1_2,
+    DoubleConv,
+    SelfAttention,
+    SelfAttention2,
+)
 from lib.models.blocks import bottleneck_IR_SE, get_block
 from lib.models.coord_conv import CoordConvTh
 from lib.models.heatmap import Heatmap

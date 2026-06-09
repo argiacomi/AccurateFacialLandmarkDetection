@@ -27,6 +27,7 @@ Metrics are expected as JSON files in each run directory. The objective minimize
 heldout 68-point NME plus weighted hard-slice NME terms and regression penalties.
 """
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

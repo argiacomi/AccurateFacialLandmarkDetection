@@ -29,6 +29,7 @@ Then build the CD-ViT dataset manifest:
       --output-dir runs/landmarks/build_merl_rav
 """
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

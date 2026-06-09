@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Download landmark dataset source archives used by local manifest builders."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse

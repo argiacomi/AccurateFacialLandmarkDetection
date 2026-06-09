@@ -10,6 +10,7 @@ Pipeline stages:
 5. launch ``TrainHeatmapStageFP16.py --data_name FS68Manifest``
 """
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

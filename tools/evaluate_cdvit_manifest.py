@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Evaluate a CD-ViT landmark checkpoint on an FS68 manifest once and exit."""
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

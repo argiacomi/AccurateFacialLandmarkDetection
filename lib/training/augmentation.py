@@ -1,13 +1,13 @@
+# ruff: noqa: E402
 import cv2
 
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
-from PIL import Image
-import numpy as np
-
-
 import random
 import time
+
+import numpy as np
+from PIL import Image
 
 try:
     import albumentations as A

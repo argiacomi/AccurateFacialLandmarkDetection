@@ -12,6 +12,7 @@ Example:
       --output-dir data/landmarks/production_validated
 """
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

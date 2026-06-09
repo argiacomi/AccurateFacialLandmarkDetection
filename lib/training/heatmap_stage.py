@@ -6,6 +6,7 @@ compatibility wrapper for existing commands, pipeline invocations, and
 checkpoint metadata.
 """
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import sys as _sys

@@ -10,7 +10,7 @@ from torchvision.transforms import transforms
 
 from lib.training.augmentation import GetAugTransform
 from lib.training.heatmap_targets import GenerateHeatmap
-from lib.transforms.flip import *
+from lib.transforms.flip import flip_points, random_flip
 
 
 class LandmarkDataset(Dataset):

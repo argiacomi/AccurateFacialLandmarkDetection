@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -8,7 +11,6 @@ from typing import Any
 
 import cv2
 import numpy as np
-
 
 TARGET_SCHEMAS = ("2d_106", "2d_194", "2d_29")
 

@@ -1,14 +1,18 @@
 import torch
 import torch.nn as nn
 
-from lib.models.attention import *
+from lib.models.attention import (
+    DoubleConv,
+    SelfAttention_block,
+    SelfAttention_block3,
+)
 from lib.models.coord_conv import CoordConvTh
 
 
 class PatchEmbed(nn.Module):
     """Image to Patch Embedding"""
 
-    # 第1步：通过patch_size=4，设置块的大小，对原始图像进行分块
+    # Step 1: Divide the original image into patches by setting the patch size to 4 (patch_size=4).
     def __init__(self, img_size=224, in_chans=3, embed_dim=768, patch_size=2):
         super().__init__()
         img_size = (img_size, img_size)
@@ -38,16 +42,16 @@ class PatchEmbed(nn.Module):
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         )
 
-        x = self.project(x)  # 第2步：通过2d卷积进行线性变换
-        # x = x.flatten(2)  # 第3步：拉平生成线性变量
-        # x = x.transpose(1, 2)  # 第4步：块的个数 与 每块的向量维度交换位置
+        x = self.project(x)  # Step 2: Perform linear transformation via 2D convolution
+        # x = x.flatten(2)  # Step 3: Flatten to generate linear variables
+        # x = x.transpose(1, 2)  # Step 4: Swap the number of blocks with the vector dimension per block
         return x
 
 
 class PatchEmbed2(nn.Module):
     """Image to Patch Embedding"""
 
-    # 第1步：通过patch_size=4，设置块的大小，对原始图像进行分块
+    # Step 1: Divide the original image into patches by setting the patch size to 4 (patch_size=4).
     def __init__(self, img_size=224, in_chans=3, embed_dim=768, patch_size=2, stride=2):
         super().__init__()
         img_size = (img_size, img_size)
@@ -85,9 +89,9 @@ class PatchEmbed2(nn.Module):
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         )
 
-        x = self.project(x)  # 第2步：通过2d卷积进行线性变换
-        # x = x.flatten(2)  # 第3步：拉平生成线性变量
-        # x = x.transpose(1, 2)  # 第4步：块的个数 与 每块的向量维度交换位置
+        x = self.project(x)  # Step 2: Perform linear transformation via 2D convolution
+        # x = x.flatten(2)  # Step 3: Flatten to generate linear variables
+        # x = x.transpose(1, 2)  # Step 4: Swap the number of blocks with the vector dimension per block
         return x
 
 

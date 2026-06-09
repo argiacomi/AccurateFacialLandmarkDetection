@@ -50,7 +50,7 @@ class AddCoordsTh(nn.Module):
         xx_channel = xx_channel.repeat(batch_size_tensor, 1, 1, 1)
         yy_channel = yy_channel.repeat(batch_size_tensor, 1, 1, 1)
 
-        if self.with_boundary and type(heatmap) != type(None):
+        if self.with_boundary and type(heatmap) is not type(None):
             boundary_channel = torch.clamp(heatmap[:, -1:, :, :], 0.0, 1.0)
 
             zero_tensor = torch.zeros_like(xx_channel).to(xx_channel)
@@ -67,7 +67,7 @@ class AddCoordsTh(nn.Module):
             rr = rr / torch.max(rr)
             ret = torch.cat([ret, rr], dim=1)
 
-        if self.with_boundary and type(heatmap) != type(None):
+        if self.with_boundary and type(heatmap) is not type(None):
             ret = torch.cat([ret, xx_boundary_channel, yy_boundary_channel], dim=1)
         return ret
 

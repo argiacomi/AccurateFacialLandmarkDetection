@@ -1,21 +1,24 @@
+# ruff: noqa: E402
 from collections import namedtuple
+
 import torch
 from torch.nn import (
+    AdaptiveAvgPool2d,
     BatchNorm2d,
+    MaxPool2d,
+    Module,
     PReLU,
     ReLU,
-    Sigmoid,
-    MaxPool2d,
-    AdaptiveAvgPool2d,
     Sequential,
-    Module,
+    Sigmoid,
 )
 
 """
 ArcFace implementation from [TreB1eN](https://github.com/TreB1eN/InsightFace_Pytorch)
 """
-import torch.nn as nn
 import math
+
+import torch.nn as nn
 
 
 class WSConv2d(nn.Module):

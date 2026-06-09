@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Merge dataset manifests into a ratio-based profile/occlusion hard-negative mix."""
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate a schema-aware landmark training manifest."""
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Audit visual landmark schema mappings for schema-aware CD-ViT training."""
 
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
