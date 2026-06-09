@@ -5,7 +5,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from lib.core.schema import MAP_98_TO_68
+from lib.core.schema import MAP_106_TO_68, MAP_98_TO_68
 from lib.training.auxiliary import (
     masked_visibility_bce_loss,
     parse_auxiliary_loss_weights,
@@ -13,6 +13,11 @@ from lib.training.auxiliary import (
     visibility_loss_weight_for_epoch,
 )
 from loss import STARLoss_v2
+
+CONSISTENCY_MAPS_TO_68 = {
+    "landmarks_98": MAP_98_TO_68,
+    "landmarks_106": MAP_106_TO_68,
+}
 
 
 def weighted_smooth_l1(pred_loc, target, sample_weight, landmark_mask, beta=0.001):
@@ -248,20 +253,31 @@ def schema_head_loss(
         details["head_sample_counts"][head_name] = head_samples
         details["head_loss_contributions"][head_name] = head_loss.detach()
 
-    if (
-        args.schema_consistency_weight > 0
-        and "landmarks_98" in heads
-        and "landmarks_68" in stage_pred
-    ):
-        payload = heads["landmarks_98"]
-        indices = payload["indices"]
-        pred_98 = stage_pred["landmarks_98"][0].index_select(0, indices)
-        pred_68 = stage_pred["landmarks_68"][0].index_select(0, indices)
-        projected = pred_98[:, torch.as_tensor(MAP_98_TO_68, device=pred_98.device), :]
-        loss_consistency = float(args.schema_consistency_weight) * F.smooth_l1_loss(
-            pred_68, projected.detach(), beta=0.001
-        )
-        loss = loss + loss_consistency
+    if args.schema_consistency_weight > 0 and "landmarks_68" in stage_pred:
+        consistency_terms = []
+        for source_head, map_to_68 in CONSISTENCY_MAPS_TO_68.items():
+            if source_head not in heads or source_head not in stage_pred:
+                continue
+
+            payload = heads[source_head]
+            indices = payload["indices"]
+
+            pred_source = stage_pred[source_head][0].index_select(0, indices)
+            pred_68 = stage_pred["landmarks_68"][0].index_select(0, indices)
+
+            projected = pred_source[
+                :, torch.as_tensor(map_to_68, device=pred_source.device), :
+            ]
+            consistency_terms.append(
+                F.smooth_l1_loss(pred_68, projected.detach(), beta=0.001)
+            )
+
+        if consistency_terms:
+            loss_consistency = (
+                float(args.schema_consistency_weight)
+                * torch.stack(consistency_terms).mean()
+            )
+            loss = loss + loss_consistency
 
     aux_outputs = stage_pred.get("_aux", {}) if isinstance(stage_pred, dict) else {}
     if include_auxiliary_loss and args.auxiliary_loss_weight > 0 and aux_outputs:
