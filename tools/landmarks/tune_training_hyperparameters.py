@@ -34,19 +34,19 @@ import importlib
 import json
 import math
 import os
-from pathlib import Path
 import random
 import shlex
 import statistics
 import subprocess
 import sys
 import typing as T
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.landmarks.io_utils import read_json, write_json
+from lib.landmarks.io_utils import jsonable, read_json, write_json
 
 DEFAULT_STAR_BRACKET = [0.0, 0.005, 0.01, 0.02, 0.05]
 DEFAULT_LR_SWEEP = [3e-5, 5e-5, 1e-4, 2e-4, 3e-4]
@@ -672,7 +672,7 @@ def run_one(
 def append_result(path: Path, result: dict[str, T.Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(result, sort_keys=True, default=_json_default) + "\n")
+        handle.write(json.dumps(jsonable(result), sort_keys=True) + "\n")
 
 
 def read_results(output_dir: Path) -> list[dict[str, T.Any]]:

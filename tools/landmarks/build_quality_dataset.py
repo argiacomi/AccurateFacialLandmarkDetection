@@ -1160,6 +1160,12 @@ def _build_json(
     )
 
 
+def _raise_if_interrupted() -> None:
+    """Give long dataset-build loops a cheap, explicit Ctrl-C checkpoint."""
+    # A no-op Python bytecode checkpoint; pending KeyboardInterrupt is raised here.
+    return None
+
+
 def _condition_for_landmark_file(
     dataset: str, path: Path, scenario: str
 ) -> tuple[str, tuple[str, ...]]:
@@ -1377,12 +1383,24 @@ def _image_for_dataset_landmarks(
     dataset: str,
     root: Path,
     image_root: str | None,
+    roots: T.Sequence[Path] | None = None,
+    image_indexes: T.Mapping[Path, dict[str, list[Path]]] | None = None,
 ) -> Path | None:
-    roots = (Path(image_root),) if image_root else _source_image_roots(root, dataset)
-    for candidate_root in roots:
-        image_index = _build_image_index(candidate_root)
+    search_roots = (
+        tuple(roots)
+        if roots is not None
+        else ((Path(image_root),) if image_root else _source_image_roots(root, dataset))
+    )
+    for candidate_root in search_roots:
+        image_index = (
+            image_indexes.get(candidate_root) if image_indexes is not None else None
+        )
+        if image_index is None:
+            image_index = _build_image_index(candidate_root)
         image = _matching_image(
-            landmark_path, root=candidate_root, image_index=image_index
+            landmark_path,
+            root=candidate_root,
+            image_index=image_index,
         )
         if image is not None:
             return image
@@ -1776,9 +1794,17 @@ def _build_expected_schema_dataset(
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
+    source_image_roots = (
+        (Path(image_root),) if image_root else _source_image_roots(root, dataset)
+    )
+    source_image_indexes = {
+        candidate_root: _build_image_index(candidate_root)
+        for candidate_root in source_image_roots
+    }
     for landmark_path in track(
         _landmark_paths(root), desc=f"Build {dataset}", unit="file"
     ):
+        _raise_if_interrupted()
         try:
             points, detected_schema = _load_landmark_file(landmark_path)
             if detected_schema != expected_schema:
@@ -1790,9 +1816,13 @@ def _build_expected_schema_dataset(
                 dataset=dataset,
                 root=root,
                 image_root=image_root,
+                roots=source_image_roots,
+                image_indexes=source_image_indexes,
             )
             if image is None:
                 raise FileNotFoundError("matching image not found")
+        except KeyboardInterrupt:
+            raise
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
             continue
@@ -3314,7 +3344,10 @@ def _cofw68_hdf5_image_by_index(mat_path: Path, index: int) -> np.ndarray:
 def _write_cofw68_image(output_dir: Path, index: int, image: np.ndarray) -> Path:
     from PIL import Image
 
-    path = output_dir / "images" / f"cofw68_test_{index + 1:04d}.png"
+    # This is an intermediate full-resolution decode used only as crop input.
+    # Keep it out of output_dir/images so the prepared image tree contains only
+    # final manifest images such as images/cofw68/*.jpg.
+    path = output_dir / "source_images" / "cofw68" / f"cofw68_test_{index + 1:04d}.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.is_file():
         Image.fromarray(image).save(path)
@@ -3869,6 +3902,14 @@ def _build_frame_landmark_index(root: Path) -> dict[tuple[str, int], Path]:
                     index, video_id=video_id, frame_index=frame_index, path=path
                 )
 
+        # 300VW layout: <sequence>/annot/<frame>.pts next to <sequence>/vid.avi.
+        if len(parts) > 2 and parts[-2] == "annot":
+            video_id = "/".join((*parts[:-2], "vid"))
+            for frame_index in frame_indices:
+                _add_frame_landmark_index_entry(
+                    index, video_id=video_id, frame_index=frame_index, path=path
+                )
+
         # Generic nested layout: <video_id>/<frame>.npy.
         if len(parts) > 1 and parts[0] not in structured_roots:
             video_id = "/".join(parts[:-1])
@@ -3882,7 +3923,7 @@ def _build_frame_landmark_index(root: Path) -> dict[tuple[str, int], Path]:
             for candidate_stem in _candidate_frame_stems(frame_index):
                 if path.stem == candidate_stem:
                     continue
-                for separator in ("_", "-", ".", " "):
+                for separator in ("_", "-", ".", " ", ""):
                     suffix = f"{separator}{candidate_stem}"
                     if not path.stem.endswith(suffix):
                         continue
