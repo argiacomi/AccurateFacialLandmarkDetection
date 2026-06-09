@@ -13,6 +13,7 @@ from lib.evaluation.split_safe import (
     metrics_for_nmes,
     record_for_sample,
 )
+from lib.training.log_format import fmt_count, fmt_num
 
 
 def eval_collate(batch):
@@ -390,15 +391,17 @@ def landmark_prediction_for_head(stage_pred, head_name):
 
 def print_eval_summary(title, report):
     metrics = report["overall"]
-    print(f"\n------------ {title} ------------")
     if metrics["sample_count"] == 0:
-        print("NME %: nan")
-        print("FR_{}% : nan".format(0.10))
-        print("AUC_{}: nan".format(0.10))
+        print(f"[eval] {title} | no samples", flush=True)
         return
-    print("NME %: {}".format(metrics["nme_percent"]))
-    print("FR_{}% : {}".format(0.10, metrics["fr_percent"]))
-    print("AUC_{}: {}".format(0.10, metrics["auc"]))
+    print(
+        f"[eval] {title} | "
+        f"NME {fmt_num(metrics['nme_percent'])}% | "
+        f"FR@0.10 {fmt_num(metrics['fr_percent'], 2)}% | "
+        f"AUC@0.10 {fmt_num(metrics['auc'])} | "
+        f"n={fmt_count(metrics['sample_count'])}",
+        flush=True,
+    )
 
 
 def eval_report_json_path(args):
