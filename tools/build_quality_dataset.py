@@ -27,6 +27,7 @@ import argparse
 import contextlib
 import hashlib
 import logging
+import os
 import re
 import sys
 import typing as T
@@ -1719,7 +1720,17 @@ def _download_300w_cache_if_missing() -> tuple[Path, ...]:
     HELEN dense annotations are an overlay on 300W Helen images. Standalone
     build_quality_dataset.py invocations do not go through prepare_landmark_dataset.py,
     so lazily populate data/datasets/300w when no cache is already discoverable.
+
+    Disabled by default so tests and local validation never perform an implicit
+    network download. Set LANDMARKS_AUTO_DOWNLOAD_300W=1 for CLI fallback use.
     """
+
+    if os.environ.get("LANDMARKS_AUTO_DOWNLOAD_300W") != "1":
+        logger.info(
+            "300W image cache not found and auto-download is disabled; "
+            "set LANDMARKS_AUTO_DOWNLOAD_300W=1 to enable fallback download"
+        )
+        return ()
 
     data_root = ROOT / "data" / "datasets"
     try:

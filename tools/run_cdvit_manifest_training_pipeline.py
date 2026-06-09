@@ -24,7 +24,7 @@ import typing as T
 from dataclasses import dataclass, field
 from pathlib import Path
 
-CDVIT_ROOT = Path(__file__).resolve().parents[2]
+CDVIT_ROOT = Path(__file__).resolve().parents[1]
 if str(CDVIT_ROOT) not in sys.path:
     sys.path.insert(0, str(CDVIT_ROOT))
 
@@ -50,7 +50,7 @@ from lib.training.checkpoint_compat import (
 )
 from lib.training.config import PipelineConfig, config_dict
 
-TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
+TOOLS_ROOT = CDVIT_ROOT / "tools"
 DEFAULT_DATASETS = "wflw,cofw68,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
 MINED_MANIFEST_NAME = "manifest.json"
 PROGRESS_LOG_NAME = "pipeline_progress.jsonl"

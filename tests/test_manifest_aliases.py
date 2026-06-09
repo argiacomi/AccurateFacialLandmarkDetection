@@ -117,7 +117,7 @@ def test_pipeline_script_help_runs_directly():
     result = subprocess.run(
         [
             sys.executable,
-            "tools/landmarks/run_cdvit_manifest_training_pipeline.py",
+            "tools/run_cdvit_manifest_training_pipeline.py",
             "--help",
         ],
         cwd=repo_root,

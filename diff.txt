@@ -1,0 +1,84 @@
+diff --git a/lib/datasets/wflw.py b/lib/datasets/wflw.py
+index 6b6e18f..ea4ffa4 100644
+--- a/lib/datasets/wflw.py
++++ b/lib/datasets/wflw.py
+@@ -1,4 +1,3 @@
+-
+ import os.path
+ from glob import glob
+ 
+diff --git a/lib/models/vit.py b/lib/models/vit.py
+index b3a20d4..4d21c76 100644
+--- a/lib/models/vit.py
++++ b/lib/models/vit.py
+@@ -1,4 +1,3 @@
+-
+ import torch
+ import torch.nn as nn
+ 
+diff --git a/tests/test_manifest_aliases.py b/tests/test_manifest_aliases.py
+index 4a54d15..af4dd1a 100644
+--- a/tests/test_manifest_aliases.py
++++ b/tests/test_manifest_aliases.py
+@@ -117,7 +117,7 @@ def test_pipeline_script_help_runs_directly():
+     result = subprocess.run(
+         [
+             sys.executable,
+-            "tools/landmarks/run_cdvit_manifest_training_pipeline.py",
++            "tools/run_cdvit_manifest_training_pipeline.py",
+             "--help",
+         ],
+         cwd=repo_root,
+diff --git a/tools/build_quality_dataset.py b/tools/build_quality_dataset.py
+index d56e049..0985ff5 100644
+--- a/tools/build_quality_dataset.py
++++ b/tools/build_quality_dataset.py
+@@ -27,6 +27,7 @@ import argparse
+ import contextlib
+ import hashlib
+ import logging
++import os
+ import re
+ import sys
+ import typing as T
+@@ -1719,8 +1720,18 @@ def _download_300w_cache_if_missing() -> tuple[Path, ...]:
+     HELEN dense annotations are an overlay on 300W Helen images. Standalone
+     build_quality_dataset.py invocations do not go through prepare_landmark_dataset.py,
+     so lazily populate data/datasets/300w when no cache is already discoverable.
++
++    Disabled by default so tests and local validation never perform an implicit
++    network download. Set LANDMARKS_AUTO_DOWNLOAD_300W=1 for CLI fallback use.
+     """
+ 
++    if os.environ.get("LANDMARKS_AUTO_DOWNLOAD_300W") != "1":
++        logger.info(
++            "300W image cache not found and auto-download is disabled; "
++            "set LANDMARKS_AUTO_DOWNLOAD_300W=1 to enable fallback download"
++        )
++        return ()
++
+     data_root = ROOT / "data" / "datasets"
+     try:
+         from tools import download_landmark_datasets as downloader
+diff --git a/tools/run_cdvit_manifest_training_pipeline.py b/tools/run_cdvit_manifest_training_pipeline.py
+index ecbdb21..3f32763 100644
+--- a/tools/run_cdvit_manifest_training_pipeline.py
++++ b/tools/run_cdvit_manifest_training_pipeline.py
+@@ -24,7 +24,7 @@ import typing as T
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+-CDVIT_ROOT = Path(__file__).resolve().parents[2]
++CDVIT_ROOT = Path(__file__).resolve().parents[1]
+ if str(CDVIT_ROOT) not in sys.path:
+     sys.path.insert(0, str(CDVIT_ROOT))
+ 
+@@ -50,7 +50,7 @@ from lib.training.checkpoint_compat import (
+ )
+ from lib.training.config import PipelineConfig, config_dict
+ 
+-TOOLS_ROOT = CDVIT_ROOT / "tools" / "landmarks"
++TOOLS_ROOT = CDVIT_ROOT / "tools"
+ DEFAULT_DATASETS = "wflw,cofw68,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
+ MINED_MANIFEST_NAME = "manifest.json"
+ PROGRESS_LOG_NAME = "pipeline_progress.jsonl"
