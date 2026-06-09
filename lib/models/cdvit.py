@@ -1,3 +1,5 @@
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 
@@ -1435,6 +1437,162 @@ class UNetStage(nn.Module):
             return self.forward_res(img)
 
 
+class LocalCrossLandmarkVisibilityHead(nn.Module):
+    """OccFace-inspired per-point visibility reasoning head.
+
+    This replaces the older simple visibility path:
+
+        Conv2d(max_depth, point_count, 1).mean(dim=(2, 3))
+
+    with:
+
+    1. Local landmark-conditioned tokens:
+       heatmap-weighted pooling of image features around each predicted landmark.
+
+    2. Cross-landmark context:
+       self-attention over all landmark tokens for the schema/head.
+
+    3. Gated fusion:
+       learnable blend of local occluder evidence and cross-landmark context.
+
+    Output:
+        logits with shape [B, point_count]
+
+    Target convention remains unchanged:
+        1 = visible
+        0 = occluded
+       -1 = unknown / masked out by loss
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        point_count: int,
+        hidden_channels: int = 128,
+        num_attention_heads: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.point_count = int(point_count)
+
+        if hidden_channels % num_attention_heads != 0:
+            raise ValueError(
+                "hidden_channels must be divisible by num_attention_heads: "
+                f"{hidden_channels=} {num_attention_heads=}"
+            )
+
+        self.feature_proj = nn.Conv2d(
+            int(in_channels),
+            int(hidden_channels),
+            kernel_size=1,
+        )
+
+        self.local_norm = nn.LayerNorm(hidden_channels)
+        self.local_mlp = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=hidden_channels,
+            num_heads=num_attention_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.cross_norm = nn.LayerNorm(hidden_channels)
+        self.cross_mlp = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.GELU(),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.Sigmoid(),
+        )
+
+        self.output = nn.Linear(hidden_channels, 1)
+
+    def forward(self, feature, landmark_heatmap):
+        """Return per-point visibility logits.
+
+        Args:
+            feature:
+                Stage feature map, shape [B, C, H, W].
+            landmark_heatmap:
+                Landmark heatmap logits for the same schema/head,
+                shape [B, N, Hh, Wh].
+
+        Returns:
+            Tensor with shape [B, N].
+        """
+        if landmark_heatmap.ndim != 4:
+            raise ValueError(
+                "landmark_heatmap must have shape [B, N, H, W], "
+                f"got {tuple(landmark_heatmap.shape)}"
+            )
+
+        local_feature = self.feature_proj(feature)
+        batch_size, hidden_channels, height, width = local_feature.shape
+
+        if landmark_heatmap.shape[0] != batch_size:
+            raise ValueError(
+                "feature and landmark_heatmap batch sizes differ: "
+                f"{batch_size=} heatmap_batch={landmark_heatmap.shape[0]}"
+            )
+
+        point_count = int(landmark_heatmap.shape[1])
+        if point_count != self.point_count:
+            raise ValueError(
+                "visibility head point count mismatch: "
+                f"expected {self.point_count}, got {point_count}"
+            )
+
+        if landmark_heatmap.shape[-2:] != (height, width):
+            landmark_heatmap = F.interpolate(
+                landmark_heatmap,
+                size=(height, width),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        # Landmark-conditioned local evidence.
+        #
+        # heatmap_prob:  [B, N, H*W]
+        # feature_flat:  [B, C, H*W]
+        # local_tokens:  [B, N, C]
+        heatmap_prob = F.softmax(
+            landmark_heatmap.reshape(batch_size, point_count, -1),
+            dim=-1,
+        )
+        feature_flat = local_feature.reshape(batch_size, hidden_channels, -1)
+        local_tokens = torch.einsum("bnh,bch->bnc", heatmap_prob, feature_flat)
+
+        local_tokens = self.local_norm(local_tokens)
+        local_context = self.local_mlp(local_tokens)
+
+        # Cross-landmark context for structured occlusion / self-occlusion.
+        cross_tokens, _ = self.cross_attention(
+            local_tokens,
+            local_tokens,
+            local_tokens,
+            need_weights=False,
+        )
+        cross_tokens = self.cross_norm(local_tokens + cross_tokens)
+        cross_context = self.cross_mlp(cross_tokens)
+
+        # Gated local/cross fusion.
+        gate = self.fusion_gate(torch.cat([local_context, cross_context], dim=-1))
+        fused = gate * local_context + (1.0 - gate) * cross_context
+
+        return self.output(fused).squeeze(-1)
+
+
 class VitAttnStage(nn.Module):
     def __init__(
         self,
@@ -1506,7 +1664,10 @@ class VitAttnStage(nn.Module):
             for name, point_count in visibility_output_layers.items():
                 point_count = int(self.schema_heads[name])
                 visibility_output_layers[name].append(
-                    nn.Conv2d(max_depth, point_count, 1)
+                    LocalCrossLandmarkVisibilityHead(
+                        in_channels=max_depth,
+                        point_count=point_count,
+                    )
                 )
             if i > 0:
                 merge.append(DoubleConv(max_depth * 2, max_depth, max_depth))
@@ -1564,12 +1725,15 @@ class VitAttnStage(nn.Module):
             head_hm = layers[stage_index](feature)
             out[name] = (self.GetCoord(head_hm), head_hm)
         for name, layers in self.visibility_output_layers.items():
+            if name not in out:
+                continue
             visibility_key = (
                 "visibility_profile39"
                 if name == "profile39"
                 else "visibility_" + name.split("_", 1)[1]
             )
-            out[visibility_key] = layers[stage_index](feature).mean(dim=(2, 3))
+            landmark_heatmap = out[name][1]
+            out[visibility_key] = layers[stage_index](feature, landmark_heatmap)
         if self.auxiliary_output_layers:
             pooled = F.adaptive_avg_pool2d(feature, 1).flatten(1)
             out["_aux"] = {
