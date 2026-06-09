@@ -116,6 +116,26 @@ All frames from a video use `split_safe_id=<video_id>` and share the same split.
 Each manifest entry includes `video_id`, `frame_id`, `frame_index`, and source
 video/landmark paths for leakage-safe evaluation and auditing.
 
+## Head Pose Metadata
+
+Each sample carries head-pose fields in its `metadata` when they can be
+resolved: `pose_yaw_deg`, `pose_pitch_deg`, `pose_roll_deg`, `pose_bucket`
+(`frontal`, `left_slight`/`right_slight`, `left_profile`/`right_profile`,
+`left_extreme`/`right_extreme` at yaw thresholds 15/30/60 degrees),
+`pitch_bucket` (`neutral`, `up`/`down`, `up_extreme`/`down_extreme`), and
+`pose_source`. Sign convention: yaw > 0 turns toward image-right, pitch > 0 is
+up, roll > 0 is clockwise.
+
+`pose_source` is one of:
+
+- `annotation` -- dataset-provided angles (e.g. AFLW2000-3D `Pose_Para`).
+- `dataset_label` -- MultiPIE profile/semifrontal capture labels.
+- `landmark_geometry` -- approximate estimate from the 68-point geometry, used
+  for any schema with an audited 68-point projection (300W, WFLW, Menpo2D,
+  300VW, cofw68, LaPa, JD-landmark). Yaw and roll are reliable; pitch is a
+  coarse 2D proxy. Sparse schemas without a 68 projection (e.g. cofw29) get no
+  pose fields.
+
 ## Manifest Reports
 
 Every build writes:

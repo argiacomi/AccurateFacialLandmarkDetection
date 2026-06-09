@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lib.core import pose
 from lib.core.schema import (
     canonicalize_schema,
     head_name_for_schema,
@@ -49,6 +50,7 @@ from lib.core.schema import (
     normalize_landmarks,
     point_count_for_schema,
     projection_audit_for_schema,
+    to_canonical_68,
 )
 from lib.datasets.parallel import parallel_map
 from lib.datasets.progress import track
@@ -853,6 +855,99 @@ def _save_landmarks(
     return path
 
 
+def _is_finite_number(value: T.Any) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _pose_points_68(points: T.Any, source_schema: str) -> np.ndarray | None:
+    """Return 68-point coordinates for pose geometry, or None if unavailable."""
+    try:
+        audit = projection_audit_for_schema(source_schema)
+    except Exception:  # noqa: BLE001
+        return None
+    if audit.get("status") not in ("audited", "native"):
+        return None
+    try:
+        arr = np.asarray(points, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[0] < 2:
+            return None
+        if arr.shape[0] == 68:
+            return arr[:, :2]
+        return to_canonical_68(arr, source_schema=source_schema)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _multipie_label_yaw(metadata: T.Mapping[str, T.Any]) -> float | None:
+    """Coarse yaw magnitude for MultiPIE profile/semifrontal capture labels."""
+    text = (
+        f"{metadata.get('annotation_file', '')} {metadata.get('image_id', '')}".lower()
+    )
+    if "profile" in text:
+        return 65.0
+    if "semifrontal" in text or "semi_frontal" in text:
+        return 35.0
+    return None
+
+
+def _pose_fields(
+    yaw: T.Any, pitch: T.Any, roll: T.Any, source: str
+) -> dict[str, T.Any]:
+    fields: dict[str, T.Any] = {"pose_source": source}
+    yaw_val = float(yaw) if _is_finite_number(yaw) else None
+    if yaw_val is not None:
+        fields["pose_yaw_deg"] = round(yaw_val, 2)
+    fields["pose_bucket"] = pose.yaw_bucket(yaw_val)
+    if _is_finite_number(pitch):
+        fields["pose_pitch_deg"] = round(float(pitch), 2)
+    fields["pitch_bucket"] = pose.pitch_bucket(
+        float(pitch) if _is_finite_number(pitch) else None
+    )
+    if _is_finite_number(roll):
+        fields["pose_roll_deg"] = round(float(roll), 2)
+    return fields
+
+
+def _pose_metadata(
+    dataset: str,
+    points: T.Any,
+    source_schema: str,
+    metadata: T.Mapping[str, T.Any],
+) -> dict[str, T.Any]:
+    """Resolve head-pose angles + buckets for one sample.
+
+    Source priority: dataset-provided annotation angles (e.g. AFLW2000-3D
+    ``Pose_Para``) > MultiPIE profile/semifrontal capture labels > approximate
+    landmark geometry (any schema with an audited 68-point projection). Sparse
+    schemas without a 68 projection or a usable label get no pose fields.
+    """
+    if _is_finite_number(metadata.get("pose_yaw_deg")):
+        return _pose_fields(
+            metadata.get("pose_yaw_deg"),
+            metadata.get("pose_pitch_deg"),
+            metadata.get("pose_roll_deg"),
+            "annotation",
+        )
+
+    pts68 = _pose_points_68(points, source_schema)
+
+    if _dataset(dataset) == "multipie":
+        magnitude = _multipie_label_yaw(metadata)
+        if magnitude is not None:
+            est = pose.estimate_pose_from_68(pts68) if pts68 is not None else None
+            sign = -1.0 if (est is not None and est[0] < 0) else 1.0
+            return _pose_fields(sign * magnitude, None, None, "dataset_label")
+
+    if pts68 is not None:
+        est = pose.estimate_pose_from_68(pts68)
+        if est is not None:
+            return _pose_fields(est[0], est[1], est[2], "landmark_geometry")
+    return {}
+
+
 def _sample(
     *,
     output_dir: Path,
@@ -903,6 +998,11 @@ def _sample(
     meta["mapping_audit"].setdefault(
         "projection_to_68", projection_audit_for_schema(source_schema)
     )
+
+    for pose_key, pose_value in _pose_metadata(
+        dataset, points68, source_schema, meta
+    ).items():
+        meta[pose_key] = pose_value
 
     primary_condition = _label(condition)
     sample_conditions = tuple(dict.fromkeys(_label(item) for item in conditions))
