@@ -80,7 +80,13 @@ def test_issue8_dataset_choices_and_projection_statuses_are_registered():
     }.issubset(choices)
 
     assert projection_audit_for_schema("2d_98")["status"] == "audited"
-    for schema in ("2d_29", "2d_106", "2d_194"):
+    # LaPa / JD-landmark share the standard 106-point markup and now have an
+    # audited 106 -> 68 projection.
+    audit_106 = projection_audit_for_schema("2d_106")
+    assert audit_106["status"] == "audited"
+    assert audit_106["map"] == "MAP_106_TO_68"
+    assert audit_106["target_schema"] == "2d_68"
+    for schema in ("2d_29", "2d_194"):
         audit = projection_audit_for_schema(schema)
         assert audit["status"] == "not_projectable"
         assert audit["target_schema"] == "2d_68"
@@ -962,3 +968,17 @@ def test_merged_manifest_metadata_marks_multi_dataset(tmp_path):
     assert {s["dataset"] for s in manifest["samples"]} == {"lapa", "fll2"}
     # Top-level dataset must reflect the multi-dataset manifest, not the last one.
     assert manifest["metadata"]["dataset"] == "multi_dataset"
+
+
+def test_lapa_jd_106_to_68_projection_subsamples_to_canonical_order():
+    from lib.core.schema import MAP_106_TO_68, to_canonical_68
+
+    # Audited 106 -> 68 semantic subsampling map: 68 source indices in range.
+    assert MAP_106_TO_68.shape == (68,)
+    assert int(MAP_106_TO_68.min()) >= 0
+    assert int(MAP_106_TO_68.max()) <= 105
+
+    pts106 = np.arange(106 * 2, dtype=np.float32).reshape(106, 2)
+    projected = to_canonical_68(pts106, source_schema="2d_106")
+    assert projected.shape == (68, 2)
+    assert np.array_equal(projected, pts106[MAP_106_TO_68, :2])

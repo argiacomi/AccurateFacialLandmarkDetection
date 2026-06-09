@@ -10,10 +10,12 @@ The builder keeps native point schemas and routes them to native training heads:
 - `2d_29` -> `landmarks_29`
 - `2d_39`, `menpo2d_profile_39`, `multipie_profile_39` -> `profile39`
 
-Only `2d_98` currently has an audited projection to canonical 68 via
-`MAP_98_TO_68`. The 29-, 39-, 106-, and 194-point schemas are trainable native
-schemas and are marked `not_projectable` for 68-point projection until an
-audited overlap map is added.
+`2d_98` (`MAP_98_TO_68`) and `2d_106` (`MAP_106_TO_68`) have audited projections
+to canonical 68. The 106-point map is a semantic subsampling of the standard
+106-point markup shared by LaPa and JD-landmark (and the FLL2/FLL3 derivatives
+that use the same `2d_106` layout). The 29-, 39-, and 194-point schemas are
+trainable native schemas and are marked `not_projectable` for 68-point
+projection until an audited overlap map is added.
 
 ## Generic Staged Layout
 
