@@ -42,6 +42,8 @@ from tools.landmarks import download_landmark_datasets as downloader
 VIDEO_DATASETS = frozenset({"300vw", "wflw-v"})
 # Datasets that are annotation layers over the existing 300W image cache.
 DATASETS_NEEDING_300W_IMAGES = frozenset({"jd-landmark", "helen"})
+# Datasets that are annotation layers over the native AFLW image cache.
+DATASETS_NEEDING_AFLW_IMAGES = frozenset({"merl-rav"})
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +69,121 @@ def _find_dir_with_child(root: Path, child: str) -> Path | None:
     for candidate in sorted(root.rglob(child)):
         if candidate.is_dir() and candidate.parent.is_dir():
             return candidate.parent
+    return None
+
+
+def _is_300w_image_cache_root(path: Path) -> bool:
+    return path.is_dir() and any(
+        (path / subset).is_dir() for subset in ("afw", "helen", "lfpw", "ibug")
+    )
+
+
+def _normalize_300w_image_cache_candidate(path: Path) -> Path | None:
+    if _is_300w_image_cache_root(path):
+        return path
+
+    # Accept a direct subset directory such as .../300w/helen by returning its parent.
+    if path.name.lower() in {
+        "afw",
+        "helen",
+        "lfpw",
+        "ibug",
+    } and _is_300w_image_cache_root(path.parent):
+        return path.parent
+
+    for nested in (
+        path / "data" / "300w" / "300w",
+        path / "300w",
+        path / "extracted" / "data" / "300w" / "300w",
+        path / "extracted" / "300w",
+    ):
+        if _is_300w_image_cache_root(nested):
+            return nested
+
+    return None
+
+
+def _resolve_300w_image_cache(
+    registry: dict[str, T.Any] | None,
+    data_root: Path,
+) -> Path | None:
+    """Find the actual 300W image root containing afw/helen/lfpw/ibug.
+
+    The downloader registry may point at an extraction wrapper directory such as
+    data/datasets/300w/extracted/300w.tar.gz. HELEN/JD builders need the nested
+    image cache root, not just the extraction wrapper.
+    """
+
+    candidates: list[Path] = []
+    resolved = downloader.resolve_source_dir(registry or {}, "300w", data_root)
+    if resolved is not None:
+        candidates.extend(
+            (
+                resolved,
+                resolved / "data" / "300w" / "300w",
+                resolved / "300w",
+            )
+        )
+
+    candidates.extend(
+        (
+            data_root / "300w" / "extracted" / "data" / "300w" / "300w",
+            data_root / "300w" / "extracted" / "300w",
+            data_root / "300w" / "extracted",
+            data_root / "300w",
+            ROOT
+            / "data"
+            / "datasets"
+            / "300w"
+            / "extracted"
+            / "data"
+            / "300w"
+            / "300w",
+            ROOT / "data" / "datasets" / "300w" / "extracted" / "300w",
+        )
+    )
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            key = candidate.resolve()
+        except OSError:
+            key = candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized = _normalize_300w_image_cache_candidate(candidate)
+        if normalized is not None:
+            return normalized
+
+    # Last resort: search below the 300W data root for a directory containing HELEN.
+    search_roots = []
+    if resolved is not None:
+        search_roots.append(resolved)
+    search_roots.append(data_root / "300w")
+
+    searched: set[Path] = set()
+    for search_root in search_roots:
+        if not search_root.is_dir():
+            continue
+        try:
+            key = search_root.resolve()
+        except OSError:
+            key = search_root
+        if key in searched:
+            continue
+        searched.add(key)
+
+        for helen_dir in sorted(search_root.rglob("helen")):
+            if not helen_dir.is_dir():
+                continue
+            normalized = _normalize_300w_image_cache_candidate(helen_dir)
+            if normalized is not None:
+                return normalized
+            normalized = _normalize_300w_image_cache_candidate(helen_dir.parent)
+            if normalized is not None:
+                return normalized
+
     return None
 
 
@@ -119,9 +236,13 @@ def _resolve_inputs(
     else:
         source = downloader.resolve_source_dir(registry or {}, dataset, data_root)
     if image_root is None and dataset in DATASETS_NEEDING_300W_IMAGES:
-        cache_300w = downloader.resolve_source_dir(registry or {}, "300w", data_root)
+        cache_300w = _resolve_300w_image_cache(registry, data_root)
         if cache_300w is not None:
             image_root = str(cache_300w)
+    if image_root is None and dataset in DATASETS_NEEDING_AFLW_IMAGES:
+        aflw_cache = downloader.resolve_source_dir(registry or {}, "aflw", data_root)
+        if aflw_cache is not None:
+            image_root = str(aflw_cache)
     return source, image_root
 
 
@@ -215,11 +336,12 @@ def prepare(args: argparse.Namespace) -> int:
 
     registry: dict[str, T.Any] | None = None
     if not args.skip_download:
-        download_targets = downloader.normalize_datasets(
-            [*datasets, "300w"]
-            if any(d in DATASETS_NEEDING_300W_IMAGES for d in datasets)
-            else datasets
-        )
+        download_target_names = list(datasets)
+        if any(d in DATASETS_NEEDING_300W_IMAGES for d in datasets):
+            download_target_names.append("300w")
+        if any(d in DATASETS_NEEDING_AFLW_IMAGES for d in datasets):
+            download_target_names.append("aflw")
+        download_targets = downloader.normalize_datasets(download_target_names)
         print(f"Downloading sources for: {', '.join(download_targets)}")
         _, registry = downloader.download_datasets(
             download_targets,

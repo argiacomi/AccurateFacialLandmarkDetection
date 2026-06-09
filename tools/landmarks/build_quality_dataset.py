@@ -339,6 +339,54 @@ def _parse_mat(path: Path) -> np.ndarray:
     raise ValueError(f"no supported landmark array found in {path}; tried {errors[:5]}")
 
 
+def _npy_shape_looks_like_single_landmark(path: Path) -> bool:
+    """Cheaply reject bbox/index/cache .npy files before full parsing."""
+
+    try:
+        arr = np.load(path, mmap_mode="r", allow_pickle=False)
+    except Exception:  # noqa: BLE001
+        # Let the normal parser produce the real error for unusual files.
+        return True
+
+    shape = tuple(int(item) for item in getattr(arr, "shape", ()))
+    counts = {29, 39, 68, 98, 106, 194}
+    flat_sizes = {count * dims for count in counts for dims in (2, 3)}
+
+    if len(shape) == 1:
+        return shape[0] in flat_sizes
+    if len(shape) == 2:
+        if shape[0] in counts and shape[1] >= 2:
+            return True
+        if shape[0] in {2, 3} and shape[1] in counts:
+            return True
+        if shape[1] in flat_sizes:
+            return True
+
+    # Sequence arrays such as (N, 68, 2) need a dataset-specific reader, not the
+    # generic one-file-per-sample path.
+    return False
+
+
+def _merl_rav_landmark_candidate(path: Path) -> bool:
+    lowered = path.as_posix().lower()
+    if path.suffix.lower() == ".npy":
+        if any(
+            token in lowered
+            for token in (
+                "bbox",
+                "bboxes",
+                "box",
+                "boxes",
+                "rect",
+                "face_detection",
+                "bounding",
+            )
+        ):
+            return False
+        return _npy_shape_looks_like_single_landmark(path)
+    return True
+
+
 def _load_landmark_file(path: Path) -> tuple[np.ndarray, str]:
     suffix = path.suffix.lower()
     if suffix == ".npy":
@@ -588,10 +636,12 @@ def _matching_image(
         if matches:
             return sorted(matches, key=lambda item: len(item.parts))[0]
     if root is not None:
-        raise ValueError(
-            "image_index is required for root-based image matching; "
-            "build it once with _build_combined_image_index"
-        )
+        # Fallback for less common builders/callers that have not precomputed an
+        # image index. Hot paths should still pass image_index explicitly.
+        fallback_index = _build_combined_image_index((root,))
+        matches = fallback_index.get(landmarks.stem.lower(), [])
+        if matches:
+            return sorted(matches, key=lambda item: len(item.parts))[0]
     return None
 
 
@@ -696,10 +746,25 @@ def _split_from_entry_or_identity(
 
 
 def _save_landmarks(output_dir: Path, sample_id: str, points68: np.ndarray) -> Path:
-    safe = safe_id(sample_id).replace("#", "_")
+    # Flatten like _write_crop_image does. Keeping "/" creates deep trees such as
+    # data/prepared/landmarks/<archive>/<release>/<split>/..., which is slow on
+    # reruns and noisy to inspect.
+    safe = safe_id(sample_id).replace("#", "_").replace("/", "_")
     path = output_dir / "landmarks" / f"{safe}.npy"
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(path, points68.astype(np.float32))
+
+    arr = np.asarray(points68, dtype=np.float32)
+    if path.is_file():
+        try:
+            existing = np.load(path, mmap_mode="r", allow_pickle=False)
+            if existing.shape == arr.shape and np.array_equal(
+                np.asarray(existing), arr
+            ):
+                return path
+        except Exception:  # noqa: BLE001
+            pass
+
+    np.save(path, arr)
     return path
 
 
@@ -1235,6 +1300,18 @@ def _build_directory(
         for path in sorted(root.rglob(f"*{suffix}"))
         if path.name != "manifest.json" and not path.name.startswith(".")
     ]
+    if dataset == "merl-rav":
+        before_count = len(landmark_paths)
+        landmark_paths = [
+            path for path in landmark_paths if _merl_rav_landmark_candidate(path)
+        ]
+        skipped_non_landmark_count = before_count - len(landmark_paths)
+        if skipped_non_landmark_count:
+            logger.info(
+                "MERL-RAV skipped %s non-landmark candidate files before parsing",
+                skipped_non_landmark_count,
+            )
+
     for landmark_path in track(
         landmark_paths, desc=f"Build {dataset}", total=len(landmark_paths), unit="file"
     ):
@@ -1530,6 +1607,18 @@ def _candidate_300w_cache_roots(root: Path, image_root: str | None) -> tuple[Pat
                 / "data"
                 / "300w"
                 / "300w",
+                ROOT
+                / "data"
+                / "datasets"
+                / "300w"
+                / "extracted"
+                / "data"
+                / "300w"
+                / "300w",
+                ROOT / "data" / "datasets" / "300w" / "extracted" / "300w",
+                ROOT / "data" / "datasets" / "300w" / "extracted",
+                ROOT / "data" / "300w" / "300w",
+                ROOT / "data" / "300w",
             )
         )
 
@@ -1624,9 +1713,83 @@ def _resolve_unique_image(
     return matches[0]
 
 
+def _download_300w_cache_if_missing() -> tuple[Path, ...]:
+    """Download/reuse the default 300W cache for annotation-layer datasets.
+
+    HELEN dense annotations are an overlay on 300W Helen images. Standalone
+    build_quality_dataset.py invocations do not go through prepare_landmark_dataset.py,
+    so lazily populate data/datasets/300w when no cache is already discoverable.
+    """
+
+    data_root = ROOT / "data" / "datasets"
+    try:
+        from tools.landmarks import download_landmark_datasets as downloader
+    except Exception as err:  # noqa: BLE001
+        logger.warning("could not import downloader for 300W cache fallback: %s", err)
+        return ()
+
+    print(
+        f"300W image cache not found; downloading/reusing 300w under {data_root}",
+        file=sys.stderr,
+    )
+    try:
+        _, registry = downloader.download_datasets(
+            ["300w"],
+            output_root=data_root,
+            extract=True,
+            force=False,
+            skip_checksum=False,
+            keep_going=False,
+        )
+    except KeyboardInterrupt:
+        raise
+    except Exception as err:  # noqa: BLE001
+        logger.warning("300W cache fallback download failed: %s", err)
+        return ()
+
+    resolved = downloader.resolve_source_dir(registry or {}, "300w", data_root)
+    candidates: list[Path] = []
+    if resolved is not None:
+        candidates.extend(
+            (
+                resolved,
+                resolved / "data" / "300w" / "300w",
+                resolved / "300w",
+            )
+        )
+
+    # Also search the standard roots in case the downloader reused an existing
+    # registry or extracted marker.
+    candidates.extend(_candidate_300w_cache_roots(data_root / "300w", None))
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        if candidate.name in {"trainset", "testset"} and candidate.parent.name in {
+            "helen",
+            "lfpw",
+        }:
+            candidate = candidate.parent.parent
+        elif candidate.name in {"afw", "helen", "lfpw", "ibug"}:
+            candidate = candidate.parent
+        if not _is_300w_cache_root(candidate):
+            continue
+        resolved_candidate = candidate.resolve()
+        if resolved_candidate not in seen:
+            seen.add(resolved_candidate)
+            out.append(candidate)
+    return tuple(out)
+
+
 def _helen_300w_roots(root: Path, image_root: str | None) -> tuple[Path, ...]:
     roots = []
-    for cache_root in _candidate_300w_cache_roots(root, image_root):
+    cache_roots = _candidate_300w_cache_roots(root, image_root)
+    if not cache_roots and image_root is None:
+        cache_roots = _download_300w_cache_if_missing()
+
+    for cache_root in cache_roots:
         helen_root = cache_root / "helen"
         if helen_root.is_dir():
             roots.append(helen_root)
@@ -2320,6 +2483,12 @@ def _build_jd_landmark(
             image_root=image_root,
         )
 
+    test_data1_landmark_names = {
+        path.name
+        for landmark_dir, _, _, _, source_name in sources
+        if source_name == "test_data1"
+        for path in landmark_dir.glob("*.txt")
+    }
     corrected_by_name = {
         path.name: path
         for corrected_root in (
@@ -2337,6 +2506,17 @@ def _build_jd_landmark(
     skipped: list[dict[str, str]] = []
     for landmark_dir, image_dir, bbox_dir, source_split, source_name in sources:
         for landmark_path in sorted(landmark_dir.glob("*.txt")):
+            if (
+                source_name == "corrected_landmark"
+                and landmark_path.name in test_data1_landmark_names
+            ):
+                skipped.append(
+                    {
+                        "sample_id": landmark_path.as_posix(),
+                        "reason": "superseded by test_data1 corrected override",
+                    }
+                )
+                continue
             image_name = _image_name_from_landmark_name(landmark_path)
             corrected_path = corrected_by_name.get(landmark_path.name)
             annotation_path = (
@@ -2401,6 +2581,8 @@ def _build_jd_landmark(
             if corrected_path is not None:
                 metadata["corrected_annotation"] = str(corrected_path.resolve())
                 metadata["source_landmarks"] = str(corrected_path.resolve())
+                metadata["corrected_annotation_applied"] = True
+                metadata["corrected_annotation_source_release"] = "corrected_landmark"
             if bbox_path is not None and bbox is not None:
                 metadata["source_bbox"] = str(bbox_path.resolve())
                 metadata["bbox_xyxy"] = bbox
@@ -3867,6 +4049,65 @@ def _add_frame_landmark_index_entry(
     index.setdefault((normalized_video_id, int(frame_index)), path)
 
 
+def _frame_landmark_video_id_aliases(parts: T.Sequence[str]) -> tuple[str, ...]:
+    """Return video-id aliases for a frame-landmark file path.
+
+    Handles layouts such as:
+      WFLW_V_release/annotations/<video_id>/<frame>.pts
+      WFLW_V_release/landmarks/<video_id>/<frame>.pts
+      300VW/<seq>/annot/<frame>.pts
+
+    The extracted video id is based on the video path, usually replacing the
+    annotation directory with videos/ or vid/.
+    """
+
+    if len(parts) <= 1:
+        return ()
+
+    parent_parts = list(parts[:-1])
+    structured_roots = {
+        "annot",
+        "annotation",
+        "annotations",
+        "landmark",
+        "landmarks",
+        "label",
+        "labels",
+    }
+    aliases: list[str] = []
+
+    def add(seq: T.Sequence[str]) -> None:
+        clean = [str(item).strip("/") for item in seq if str(item).strip("/")]
+        if not clean:
+            return
+        value = "/".join(clean)
+        if value not in aliases:
+            aliases.append(value)
+
+    # Literal parent path fallback.
+    add(parent_parts)
+
+    for index, part in enumerate(parent_parts):
+        lowered = part.lower()
+        if lowered not in structured_roots:
+            continue
+
+        # Bare id after annotations/<video_id>/...
+        add(parent_parts[index + 1 :])
+
+        # Same archive path, replacing annotations/landmarks with video roots.
+        replacements = ("videos", "video", "frames", "images")
+        if lowered in {"annot", "annotation", "annotations"}:
+            replacements = ("videos", "video", "vid", "frames", "images")
+
+        for replacement in replacements:
+            replaced = parent_parts.copy()
+            replaced[index] = replacement
+            add(replaced)
+
+    return tuple(aliases)
+
+
 def _build_frame_landmark_index(root: Path) -> dict[tuple[str, int], Path]:
     """Build a video_id/frame_index -> landmark path index with one tree walk.
 
@@ -3893,6 +4134,15 @@ def _build_frame_landmark_index(root: Path) -> dict[tuple[str, int], Path]:
         frame_indices = _candidate_frame_indices_from_stem(path.stem)
         if not frame_indices:
             continue
+
+        for video_id_alias in _frame_landmark_video_id_aliases(parts):
+            for frame_index in frame_indices:
+                _add_frame_landmark_index_entry(
+                    index,
+                    video_id=video_id_alias,
+                    frame_index=frame_index,
+                    path=path,
+                )
 
         # Fast structured layouts: annotations/<video_id>/<frame>.npy and peers.
         if len(parts) > 2 and parts[0] in structured_roots:
@@ -3972,6 +4222,296 @@ def _extract_video_frames_task(
         return task.video_id, None, str(err)
 
 
+def _wflwv_npy_kind(path: Path) -> str | None:
+    lowered = path.as_posix().lower()
+    if "bbox" in lowered or "bboxes" in lowered or "box" in lowered:
+        return "bbox"
+    if (
+        "landmark" in lowered
+        or "landmarks" in lowered
+        or "point" in lowered
+        or "points" in lowered
+        or "/pts" in lowered
+        or "keypoint" in lowered
+    ):
+        return "landmarks"
+
+    try:
+        arr = np.load(path, mmap_mode="r", allow_pickle=False)
+    except Exception:  # noqa: BLE001
+        return None
+
+    shape = tuple(int(v) for v in getattr(arr, "shape", ()))
+    if len(shape) >= 3 and shape[-1] >= 2 and shape[-2] in {68, 98, 106, 194}:
+        return "landmarks"
+    if len(shape) == 2 and shape[1] in {136, 196, 212, 388}:
+        return "landmarks"
+    if len(shape) >= 2 and shape[-1] == 4:
+        return "bbox"
+    return None
+
+
+def _wflwv_sequence_video_id_aliases(root: Path, path: Path) -> tuple[str, ...]:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path
+    parts = list(rel.parts)
+    if not parts:
+        return ()
+
+    stem = path.stem
+    parent_parts = parts[:-1]
+    aliases: list[str] = []
+
+    def add(seq: T.Sequence[str]) -> None:
+        clean = [
+            str(item).replace("\\", "/").strip("/")
+            for item in seq
+            if str(item).strip("/")
+        ]
+        if not clean:
+            return
+        value = "/".join(clean)
+        if value not in aliases:
+            aliases.append(value)
+
+    add((stem,))
+    add((*parent_parts, stem))
+
+    structured_tokens = {
+        "bbox",
+        "bboxes",
+        "box",
+        "boxes",
+        "landmark",
+        "landmarks",
+        "point",
+        "points",
+        "pts",
+        "annotation",
+        "annotations",
+        "label",
+        "labels",
+    }
+
+    for index, part in enumerate(parent_parts):
+        if part.lower() not in structured_tokens:
+            continue
+
+        for replacement in ("videos", "video"):
+            replaced = parent_parts.copy()
+            replaced[index] = replacement
+            add((*replaced, stem))
+
+        add((*parent_parts[index + 1 :], stem))
+
+    return tuple(aliases)
+
+
+def _build_wflwv_sequence_index(root: Path) -> dict[str, dict[str, Path]]:
+    index: dict[str, dict[str, Path]] = {"landmarks": {}, "bbox": {}}
+    if not root.is_dir():
+        return index
+
+    for npy_path in sorted(root.rglob("*.npy"), key=lambda item: item.as_posix()):
+        if not npy_path.is_file():
+            continue
+        kind = _wflwv_npy_kind(npy_path)
+        if kind not in index:
+            continue
+        for alias in _wflwv_sequence_video_id_aliases(root, npy_path):
+            index[kind].setdefault(alias, npy_path)
+    return index
+
+
+def _wflwv_payload_array(payload: T.Any, *, kind: str) -> np.ndarray:
+    if (
+        isinstance(payload, np.ndarray)
+        and payload.dtype == object
+        and payload.shape == ()
+    ):
+        payload = payload.item()
+
+    if isinstance(payload, dict):
+        keys = (
+            ("landmarks", "landmark", "points", "pts", "keypoints")
+            if kind == "landmarks"
+            else ("bbox", "bboxes", "boxes", "face_bbox")
+        )
+        for key in keys:
+            if key in payload:
+                return np.asarray(payload[key])
+        raise ValueError(f"WFLW-V {kind} npy dict does not contain expected keys")
+
+    return np.asarray(payload)
+
+
+def _wflwv_load_npy_array(path: Path, *, kind: str) -> np.ndarray:
+    payload = np.load(path, allow_pickle=True)
+    return _wflwv_payload_array(payload, kind=kind)
+
+
+def _wflwv_frame_row(path: Path, frame_index: int, *, kind: str) -> np.ndarray:
+    arr = _wflwv_load_npy_array(path, kind=kind)
+    if arr.ndim == 0:
+        raise ValueError(f"WFLW-V {kind} array is scalar: {path}")
+
+    frame_index = int(frame_index)
+    if frame_index < 0 or frame_index >= int(arr.shape[0]):
+        raise IndexError(
+            f"WFLW-V {kind} frame {frame_index} out of range for {path} "
+            f"with shape {arr.shape}"
+        )
+    return np.asarray(arr[frame_index])
+
+
+def _wflwv_sequence_frame(
+    index: T.Mapping[str, T.Mapping[str, Path]],
+    video_id: str,
+    frame_index: int,
+) -> tuple[np.ndarray, str, Path, Path | None, list[float] | None] | None:
+    keys = tuple(
+        dict.fromkeys(
+            (
+                str(video_id).replace("\\", "/").strip("/"),
+                Path(str(video_id)).stem,
+                Path(str(video_id)).name,
+            )
+        )
+    )
+
+    landmark_path = None
+    for key in keys:
+        landmark_path = index.get("landmarks", {}).get(key)
+        if landmark_path is not None:
+            break
+    if landmark_path is None:
+        return None
+
+    raw_points = _wflwv_frame_row(landmark_path, frame_index, kind="landmarks")
+    points, source_schema = _canonical_points(raw_points, source_schema=None)
+
+    bbox_path = None
+    bbox_xyxy = None
+    for key in keys:
+        bbox_path = index.get("bbox", {}).get(key)
+        if bbox_path is not None:
+            break
+    if bbox_path is not None:
+        raw_bbox = np.asarray(
+            _wflwv_frame_row(bbox_path, frame_index, kind="bbox"),
+            dtype=np.float32,
+        ).reshape(-1)
+        if raw_bbox.size >= 4 and np.all(np.isfinite(raw_bbox[:4])):
+            bbox_xyxy = [float(value) for value in raw_bbox[:4]]
+
+    return points, source_schema, landmark_path, bbox_path, bbox_xyxy
+
+
+def _merl_rav_landmark_files(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob("*.pts")
+        if path.is_file() and not path.name.startswith(".")
+    )
+
+
+def _build_merl_rav(
+    root: Path,
+    output_dir: Path,
+    *,
+    scenario: str,
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+    mode: str,
+    allow_overlap: bool,
+    image_root: str | None,
+) -> Path:
+    landmark_paths = _merl_rav_landmark_files(root)
+    if not landmark_paths:
+        raise ValueError(f"no MERL-RAV .pts files found below {root}")
+
+    image_roots = (Path(image_root),) if image_root else (root,)
+    image_index = _build_combined_image_index(image_roots)
+
+    samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    for landmark_path in track(
+        landmark_paths,
+        desc="Build merl-rav",
+        total=len(landmark_paths),
+        unit="file",
+    ):
+        sample_stem = landmark_path.stem
+        sample_id = f"merl-rav/{sample_stem}"
+        try:
+            raw_points = _parse_pts(landmark_path)
+            points, detected_schema = _canonical_points(
+                raw_points,
+                source_schema=f"2d_{raw_points.shape[0]}",
+            )
+            image = _find_named_image(
+                image_roots,
+                sample_stem,
+                image_index=image_index,
+            )
+            if image is None:
+                raise FileNotFoundError(f"AFLW image not found for {sample_stem}")
+        except Exception as err:  # noqa: BLE001
+            skipped.append({"sample_id": sample_id, "reason": str(err)})
+            continue
+
+        split = _deterministic_split("merl-rav", sample_stem)
+        condition, conds = _native_conditions_for_split(scenario, split)
+        metadata = _path_identity_metadata(landmark_path, root=root, dataset="merl-rav")
+        metadata.update(
+            {
+                "dataset_parser": "merl_rav_pts",
+                "parser_type": "dataset_specific",
+                "source_schema": detected_schema,
+                "source_image": str(image.resolve()),
+                "source_image_name": image.name,
+                "image_id": sample_stem,
+            }
+        )
+
+        samples.append(
+            _with_split(
+                _sample(
+                    output_dir=output_dir,
+                    dataset="merl-rav",
+                    sample_id=sample_id,
+                    image=image,
+                    points68=points,
+                    condition=condition,
+                    conditions=conds,
+                    source_schema=detected_schema,
+                    source_id=sample_id,
+                    metadata=metadata,
+                ),
+                split,
+            )
+        )
+
+        if limit and scenarios is None and len(samples) >= limit:
+            break
+
+    if not samples:
+        raise ValueError(f"no MERL-RAV samples built; skipped={skipped[:10]}")
+
+    return _write_manifest(
+        output_dir,
+        "merl-rav",
+        scenario,
+        _filter(samples, scenarios, limit),
+        mode=mode,
+        allow_overlap=allow_overlap,
+        scenarios=scenarios,
+        skipped=skipped,
+    )
+
+
 def _build_video_dataset(
     root: Path,
     output_dir: Path,
@@ -4024,6 +4564,9 @@ def _build_video_dataset(
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     frame_landmark_index = _build_frame_landmark_index(root)
+    wflwv_sequence_index = (
+        _build_wflwv_sequence_index(root) if dataset == "wflw-v" else None
+    )
 
     # Decode every video in parallel (OpenCV releases the GIL); the per-frame
     # sample assembly below stays sequential to keep manifest ordering and
@@ -4058,22 +4601,43 @@ def _build_video_dataset(
         for record in frame_records:
             frame_index = int(record["frame_index"])
             sample_id = f"{dataset}/{video_id}/frame_{frame_index:06d}"
-            landmark_path = _find_frame_landmark_file(
-                frame_landmark_index, video_id, frame_index
-            )
-            if landmark_path is None:
-                skipped.append(
-                    {
-                        "sample_id": sample_id,
-                        "reason": "matching frame landmarks not found",
-                    }
+            bbox_path = None
+            bbox_xyxy = None
+            sequence_record = None
+            if wflwv_sequence_index is not None:
+                try:
+                    sequence_record = _wflwv_sequence_frame(
+                        wflwv_sequence_index,
+                        video_id,
+                        frame_index,
+                    )
+                except Exception as err:  # noqa: BLE001
+                    skipped.append({"sample_id": sample_id, "reason": str(err)})
+                    continue
+
+            if sequence_record is not None:
+                points, source_schema, landmark_path, bbox_path, bbox_xyxy = (
+                    sequence_record
                 )
-                continue
-            try:
-                points, source_schema = _load_landmark_file(landmark_path)
-            except Exception as err:  # noqa: BLE001
-                skipped.append({"sample_id": sample_id, "reason": str(err)})
-                continue
+            else:
+                landmark_path = _find_frame_landmark_file(
+                    frame_landmark_index,
+                    video_id,
+                    frame_index,
+                )
+                if landmark_path is None:
+                    skipped.append(
+                        {
+                            "sample_id": sample_id,
+                            "reason": "matching frame landmarks not found",
+                        }
+                    )
+                    continue
+                try:
+                    points, source_schema = _load_landmark_file(landmark_path)
+                except Exception as err:  # noqa: BLE001
+                    skipped.append({"sample_id": sample_id, "reason": str(err)})
+                    continue
 
             metadata = {
                 "dataset": dataset,
@@ -4085,6 +4649,10 @@ def _build_video_dataset(
                 "source_video": str(video_path.resolve()),
                 "source_landmarks": str(landmark_path.resolve()),
             }
+            if bbox_path is not None and bbox_xyxy is not None:
+                metadata["source_bbox"] = str(bbox_path.resolve())
+                metadata["bbox_xyxy"] = bbox_xyxy
+                metadata["bbox_source"] = "wflw_v_bbox_npy"
             conditions = ("video_frame", f"{split}set")
             samples.append(
                 _with_split(
@@ -4283,6 +4851,21 @@ def build(args: argparse.Namespace) -> Path:
                 root,
                 output_dir,
                 dataset=dataset,
+                scenario=args.scenario,
+                scenarios=scenarios,
+                limit=limit,
+                mode=args.manifest_mode,
+                allow_overlap=args.allow_overlap,
+                image_root=args.image_root,
+            )
+        elif dataset == "merl-rav":
+            if root is None:
+                raise ValueError(
+                    "--source-dir or --source-zip is required for MERL-RAV"
+                )
+            manifest_path = _build_merl_rav(
+                root,
+                output_dir,
                 scenario=args.scenario,
                 scenarios=scenarios,
                 limit=limit,

@@ -21,9 +21,9 @@ import re
 import shutil
 import sys
 import typing as T
-from collections import Counter
 import zipfile
 import zlib
+from collections import Counter
 from pathlib import Path, PurePosixPath
 
 import numpy as np
