@@ -889,26 +889,67 @@ def _multipie_label_yaw(metadata: T.Mapping[str, T.Any]) -> float | None:
     if "profile" in text:
         return 65.0
     if "semifrontal" in text or "semi_frontal" in text:
-        return 35.0
+        return 20.0
     return None
 
 
 def _pose_fields(
-    yaw: T.Any, pitch: T.Any, roll: T.Any, source: str
+    *,
+    source: str,
+    yaw_signed: T.Any = None,
+    yaw_abs: T.Any = None,
+    side: str | None = None,
+    pitch: T.Any = None,
+    roll: T.Any = None,
 ) -> dict[str, T.Any]:
+    """Assemble pose metadata for one sample.
+
+    When the yaw sign (side) is known, emit signed ``pose_yaw_deg`` and a
+    ``left_``/``right_`` bucket. When only a magnitude is known (a profile label
+    with no side evidence), emit ``pose_abs_yaw_deg`` with a side-agnostic bucket
+    and ``pose_side="unknown"`` instead of guessing a direction. Missing pitch is
+    recorded as ``"unknown"`` rather than ``"neutral"``.
+    """
     fields: dict[str, T.Any] = {"pose_source": source}
-    yaw_val = float(yaw) if _is_finite_number(yaw) else None
-    if yaw_val is not None:
-        fields["pose_yaw_deg"] = round(yaw_val, 2)
-    fields["pose_bucket"] = pose.yaw_bucket(yaw_val)
+
+    if _is_finite_number(yaw_signed):
+        yaw = float(yaw_signed)
+        fields["pose_yaw_deg"] = round(yaw, 2)
+        fields["pose_abs_yaw_deg"] = round(abs(yaw), 2)
+        fields["pose_bucket"] = pose.yaw_bucket(yaw)
+        fields["pose_side"] = pose.yaw_side(yaw)
+    elif _is_finite_number(yaw_abs):
+        magnitude = abs(float(yaw_abs))
+        fields["pose_abs_yaw_deg"] = round(magnitude, 2)
+        fields["pose_bucket"] = pose.yaw_tier(magnitude)
+        fields["pose_side"] = side or "unknown"
+    else:
+        fields["pose_bucket"] = "unknown"
+        fields["pose_side"] = "unknown"
+
     if _is_finite_number(pitch):
         fields["pose_pitch_deg"] = round(float(pitch), 2)
-    fields["pitch_bucket"] = pose.pitch_bucket(
-        float(pitch) if _is_finite_number(pitch) else None
-    )
+        fields["pitch_bucket"] = pose.pitch_bucket(float(pitch))
+    else:
+        fields["pitch_bucket"] = "unknown"
+
     if _is_finite_number(roll):
         fields["pose_roll_deg"] = round(float(roll), 2)
     return fields
+
+
+def _geometry_yaw_side(pts68: np.ndarray | None) -> str:
+    """Resolve left/right from 68-point geometry, only when confidently off-center.
+
+    A near-frontal geometry estimate cannot disambiguate the side of a profile
+    capture, so anything below the slight-yaw threshold returns ``"unknown"``.
+    """
+    if pts68 is None:
+        return "unknown"
+    est = pose.estimate_pose_from_68(pts68)
+    if est is None or abs(est[0]) < pose.YAW_BUCKET_THRESHOLDS[0]:
+        return "unknown"
+    return "right" if est[0] > 0 else "left"
 
 
 def _pose_metadata(
@@ -926,10 +967,10 @@ def _pose_metadata(
     """
     if _is_finite_number(metadata.get("pose_yaw_deg")):
         return _pose_fields(
-            metadata.get("pose_yaw_deg"),
-            metadata.get("pose_pitch_deg"),
-            metadata.get("pose_roll_deg"),
-            "annotation",
+            source="annotation",
+            yaw_signed=metadata.get("pose_yaw_deg"),
+            pitch=metadata.get("pose_pitch_deg"),
+            roll=metadata.get("pose_roll_deg"),
         )
 
     pts68 = _pose_points_68(points, source_schema)
@@ -937,14 +978,25 @@ def _pose_metadata(
     if _dataset(dataset) == "multipie":
         magnitude = _multipie_label_yaw(metadata)
         if magnitude is not None:
-            est = pose.estimate_pose_from_68(pts68) if pts68 is not None else None
-            sign = -1.0 if (est is not None and est[0] < 0) else 1.0
-            return _pose_fields(sign * magnitude, None, None, "dataset_label")
+            side = _geometry_yaw_side(pts68)
+            if side in ("left", "right"):
+                signed = magnitude if side == "right" else -magnitude
+                return _pose_fields(
+                    source="dataset_label", yaw_signed=signed, side=side
+                )
+            return _pose_fields(
+                source="dataset_label", yaw_abs=magnitude, side="unknown"
+            )
 
     if pts68 is not None:
         est = pose.estimate_pose_from_68(pts68)
         if est is not None:
-            return _pose_fields(est[0], est[1], est[2], "landmark_geometry")
+            return _pose_fields(
+                source="landmark_geometry",
+                yaw_signed=est[0],
+                pitch=est[1],
+                roll=est[2],
+            )
     return {}
 
 
@@ -1744,11 +1796,6 @@ def _build_directory(
             )
             sample_metadata.update(crop_metadata)
 
-        if dataset == "aflw2000-3d" and aflw2000_pose_metadata:
-            condition, pose_conds = _aflw2000_pose_conditions(
-                scenario, aflw2000_pose_metadata
-            )
-            conds = tuple(dict.fromkeys((*pose_conds, *conds)))
         if dataset == "aflw2000-3d" and aflw2000_pose_metadata:
             condition, pose_conds = _aflw2000_pose_conditions(
                 scenario, aflw2000_pose_metadata

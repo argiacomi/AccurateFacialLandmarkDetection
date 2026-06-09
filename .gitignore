@@ -10,6 +10,7 @@ runs/
 *.pre_*.bak
 *.pre_modularization.bak
 *.pre_stage_signatures.bak
+.DS_Store
 
 /datasets/
 /data/

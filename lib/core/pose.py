@@ -32,9 +32,13 @@ def _finite(value: T.Any) -> bool:
 
 
 def yaw_bucket(yaw_deg: float | None) -> str:
-    """Bucket a yaw angle into frontal / *_slight / *_profile / *_extreme."""
+    """Bucket a signed yaw angle into frontal / *_slight / *_profile / *_extreme.
+
+    Returns ``"unknown"`` for missing/non-finite input so callers never turn an
+    absence of evidence into a real ``frontal`` bucket.
+    """
     if not _finite(yaw_deg):
-        return "frontal"
+        return "unknown"
     yaw = float(yaw_deg)
     magnitude = abs(yaw)
     slight, profile, extreme = YAW_BUCKET_THRESHOLDS
@@ -48,10 +52,41 @@ def yaw_bucket(yaw_deg: float | None) -> str:
     return f"{side}_extreme"
 
 
+def yaw_tier(yaw_deg: float | None) -> str:
+    """Side-agnostic yaw magnitude tier: frontal / slight / profile / extreme.
+
+    Used when a yaw magnitude is known but its left/right side is not (e.g. a
+    profile capture label with no geometry to disambiguate).
+    """
+    if not _finite(yaw_deg):
+        return "unknown"
+    magnitude = abs(float(yaw_deg))
+    slight, profile, extreme = YAW_BUCKET_THRESHOLDS
+    if magnitude < slight:
+        return "frontal"
+    if magnitude < profile:
+        return "slight"
+    if magnitude < extreme:
+        return "profile"
+    return "extreme"
+
+
+def yaw_side(yaw_deg: float | None) -> str:
+    """Resolve the turn direction: frontal / left / right / unknown."""
+    if not _finite(yaw_deg):
+        return "unknown"
+    if abs(float(yaw_deg)) < YAW_BUCKET_THRESHOLDS[0]:
+        return "frontal"
+    return "right" if float(yaw_deg) > 0 else "left"
+
+
 def pitch_bucket(pitch_deg: float | None) -> str:
-    """Bucket a pitch angle into neutral / up|down / up|down_extreme."""
+    """Bucket a pitch angle into neutral / up|down / up|down_extreme.
+
+    Returns ``"unknown"`` for missing/non-finite input rather than ``neutral``.
+    """
     if not _finite(pitch_deg):
-        return "neutral"
+        return "unknown"
     pitch = float(pitch_deg)
     magnitude = abs(pitch)
     moderate, extreme = PITCH_BUCKET_THRESHOLDS

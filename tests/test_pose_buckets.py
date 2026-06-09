@@ -23,8 +23,8 @@ from tools import build_quality_dataset as builder
         (59.9, "right_profile"),
         (60.0, "right_extreme"),
         (-90.0, "left_extreme"),
-        (None, "frontal"),
-        (float("nan"), "frontal"),
+        (None, "unknown"),
+        (float("nan"), "unknown"),
     ],
 )
 def test_yaw_bucket(yaw, expected):
@@ -41,11 +41,27 @@ def test_yaw_bucket(yaw, expected):
         (29.9, "up"),
         (30.0, "up_extreme"),
         (-40.0, "down_extreme"),
-        (None, "neutral"),
+        (None, "unknown"),
     ],
 )
 def test_pitch_bucket(pitch, expected):
     assert pose.pitch_bucket(pitch) == expected
+
+
+@pytest.mark.parametrize(
+    ("yaw", "tier", "side"),
+    [
+        (0.0, "frontal", "frontal"),
+        (10.0, "frontal", "frontal"),
+        (20.0, "slight", "right"),
+        (-45.0, "profile", "left"),
+        (70.0, "extreme", "right"),
+        (None, "unknown", "unknown"),
+    ],
+)
+def test_yaw_tier_and_side(yaw, tier, side):
+    assert pose.yaw_tier(yaw) == tier
+    assert pose.yaw_side(yaw) == side
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +116,16 @@ def test_pose_metadata_prefers_annotation_angles():
     )
     assert fields["pose_source"] == "annotation"
     assert fields["pose_yaw_deg"] == 40.0
+    assert fields["pose_abs_yaw_deg"] == 40.0
+    assert fields["pose_side"] == "right"
     assert fields["pose_bucket"] == "right_profile"
     assert fields["pitch_bucket"] == "down"
     assert fields["pose_roll_deg"] == 5.0
 
 
-def test_pose_metadata_multipie_uses_dataset_label():
+def test_pose_metadata_multipie_label_without_side_is_unknown():
+    # _base68() is near-frontal, so geometry cannot resolve a profile's side:
+    # emit a side-agnostic magnitude bucket, not a guessed left/right.
     fields = builder._pose_metadata(
         "multipie",
         _base68(),
@@ -116,14 +136,33 @@ def test_pose_metadata_multipie_uses_dataset_label():
         },
     )
     assert fields["pose_source"] == "dataset_label"
-    assert fields["pose_bucket"] in {"left_extreme", "right_extreme"}
-    assert abs(fields["pose_yaw_deg"]) == 65.0
+    assert fields["pose_side"] == "unknown"
+    assert fields["pose_bucket"] == "extreme"
+    assert fields["pose_abs_yaw_deg"] == 65.0
+    assert "pose_yaw_deg" not in fields  # never guess a direction
+    assert fields["pitch_bucket"] == "unknown"  # label has no pitch evidence
+
+
+def test_pose_metadata_multipie_label_side_from_strong_geometry():
+    turned = _base68()
+    turned[30] = [0.6, 0.4]  # nose strongly toward the right jaw
+    fields = builder._pose_metadata(
+        "multipie",
+        turned,
+        "2d_68",
+        {"image_id": "x/profile/img.png", "annotation_file": "profile.txt"},
+    )
+    assert fields["pose_source"] == "dataset_label"
+    assert fields["pose_side"] == "right"
+    assert fields["pose_yaw_deg"] == 65.0
+    assert fields["pose_bucket"] == "right_extreme"
 
 
 def test_pose_metadata_falls_back_to_geometry():
     fields = builder._pose_metadata("300w", _base68(), "2d_68", {})
     assert fields["pose_source"] == "landmark_geometry"
     assert "pose_bucket" in fields and "pitch_bucket" in fields
+    assert fields["pose_side"] in {"frontal", "left", "right"}
     assert "pose_roll_deg" in fields
 
 
@@ -184,4 +223,5 @@ def test_wflw_build_attaches_landmark_geometry_pose(tmp_path):
         "right_extreme",
     }
     assert meta["pitch_bucket"].startswith(("neutral", "up", "down"))
+    assert meta["pose_side"] in {"frontal", "left", "right"}
     assert "pose_yaw_deg" in meta and "pose_roll_deg" in meta
