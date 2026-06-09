@@ -359,19 +359,23 @@ def prepare(args: argparse.Namespace) -> int:
 
     results: list[dict[str, T.Any]] = []
     built_any = False
+    # A multi-dataset run continues past a single dataset's failure so one bad
+    # source cannot abort the rest; a single-dataset run has nothing else to build,
+    # so it fails fast unless --keep-going is requested explicitly.
+    keep_going = args.keep_going or len(datasets) > 1
     dataset_bar = track(datasets, desc="Prepare", total=len(datasets), unit="dataset")
     for dataset in dataset_bar:
         dataset_bar.set_description(f"Prepare {dataset}")
         # First built dataset honors the requested mode; later ones merge into it.
         mode = args.manifest_mode if not built_any else "merge"
-        source, image_root = _resolve_inputs(
-            dataset, registry, data_root, args.image_root
-        )
-        record: dict[str, T.Any] = {
-            "dataset": dataset,
-            "source_dir": str(source) if source else None,
-        }
+        record: dict[str, T.Any] = {"dataset": dataset, "source_dir": None}
         try:
+            # Resolution/staging runs inside the try so a single dataset's missing
+            # source or staging error is contained rather than aborting the run.
+            source, image_root = _resolve_inputs(
+                dataset, registry, data_root, args.image_root
+            )
+            record["source_dir"] = str(source) if source else None
             manifest_path = _build_dataset(
                 dataset, source, image_root, output_root, mode=mode, args=args
             )
@@ -382,7 +386,7 @@ def prepare(args: argparse.Namespace) -> int:
             record["status"] = "error"
             record["error"] = str(err)
             print(f"ERROR: {dataset}: {err}", file=sys.stderr)
-            if not args.keep_going:
+            if not keep_going:
                 results.append(record)
                 _print_summary(results, None, output_root, datasets)
                 return 1
@@ -550,7 +554,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keep-going",
         action="store_true",
-        help="Continue after a dataset build fails.",
+        help=(
+            "Continue after a dataset build fails. Multi-dataset runs already "
+            "continue past a single failure; this also keeps single-dataset runs going."
+        ),
     )
     return parser
 
