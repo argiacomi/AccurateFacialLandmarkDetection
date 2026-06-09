@@ -206,6 +206,27 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         help="Optional small STARLoss_v2 regularizer for active supervised schema heads; try 0.005, 0.01, 0.02, or 0.05 on hard-case slices.",
     )
     parser.add_argument(
+        "--star-loss-check-finite",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Guard against NaN/Inf in the STARLoss_v2 covariance before "
+            "eigendecomposition. Off by default because the check forces a CUDA "
+            "host-device sync every step; enable for debugging/CI/smoke runs."
+        ),
+    )
+    parser.add_argument(
+        "--star-loss-check-finite-interval",
+        type=int,
+        default=0,
+        help=(
+            "When --star-loss-check-finite is set, run the NaN/Inf guard only "
+            "every N STAR forwards (e.g. 100) instead of every step, so long "
+            "runs keep protection without paying the sync each step. 0 (default) "
+            "checks every step."
+        ),
+    )
+    parser.add_argument(
         "--domain-balanced-sampling",
         action="store_true",
         help=(

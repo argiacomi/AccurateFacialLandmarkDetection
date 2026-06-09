@@ -363,10 +363,37 @@ def main():
                 )
             else:
                 _load_resume_model_state(net, resume_checkpoint, args)
+        ddp_find_unused = args.find_unused_parameters or schema_aware_training
+        # Visibility modules are instantiated on every stage but, unless
+        # auxiliary_loss_stage == "all", only the final stage runs. The
+        # non-final visibility parameters are then unused in the backward pass,
+        # so DDP must use find_unused_parameters=True. This is guaranteed today
+        # because visibility heads require schema-aware training (see
+        # model_factory), which forces the flag above; assert it so a future
+        # change to that clause fails loudly instead of hanging DDP.
+        visibility_heads_active = schema_aware_training and bool(
+            getattr(args, "visibility_heads", True)
+        )
+        visibility_all_stages = (
+            str(getattr(args, "auxiliary_loss_stage", "final")) == "all"
+        )
+        if visibility_heads_active and not visibility_all_stages:
+            assert ddp_find_unused, (
+                "Schema-aware visibility heads run only on the final stage "
+                "(auxiliary_loss_stage != 'all'), leaving non-final visibility "
+                "parameters unused; DDP requires find_unused_parameters=True. "
+                "Pass --find_unused_parameters or --auxiliary-loss-stage all."
+            )
+            if is_rank_zero():
+                print(
+                    "[ddp] visibility heads on final stage only; "
+                    "find_unused_parameters=True (required for unused "
+                    "non-final visibility parameters)."
+                )
         net = torch.nn.parallel.DistributedDataParallel(
             net,
             device_ids=[args.local_rank],
-            find_unused_parameters=args.find_unused_parameters or schema_aware_training,
+            find_unused_parameters=ddp_find_unused,
         )
 
         optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
@@ -379,7 +406,16 @@ def main():
 
         # heatmap_loss_func = HeatMapLoss2
         heatmap_loss_func = AWingLoss()
-        vertex_loss_func = STARLoss_v2() if args.star_loss_weight > 0 else None
+        vertex_loss_func = (
+            STARLoss_v2(
+                check_finite=bool(getattr(args, "star_loss_check_finite", False)),
+                check_finite_interval=int(
+                    getattr(args, "star_loss_check_finite_interval", 0)
+                ),
+            )
+            if args.star_loss_weight > 0
+            else None
+        )
         ema = EMA(net.module, 0.99, 100, 10) if is_rank_zero() else None
         scaler = torch.amp.GradScaler("cuda")
         if isinstance(resume_checkpoint, dict) and "model" in resume_checkpoint:

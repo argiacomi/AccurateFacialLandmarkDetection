@@ -26,12 +26,21 @@ class STARLoss_v2(nn.Module):
         num_dim_image=2,
         EPSILON=1e-5,
         softmax_normalized=True,
+        check_finite=False,
+        check_finite_interval=0,
     ):
         super(STARLoss_v2, self).__init__()
         self.w = w
         self.num_dim_image = num_dim_image
         self.EPSILON = EPSILON
         self.dist = dist
+        # NaN/Inf guard on the covariance before eigh. Off by default because
+        # `torch.isfinite(...).all()` consumed in a Python `if` forces a CUDA
+        # host-device sync every forward. Enable for debugging/CI/smoke runs.
+        # check_finite_interval > 0 runs the guard only every N eigh calls.
+        self.check_finite = bool(check_finite)
+        self.check_finite_interval = int(check_finite_interval)
+        self._eigh_step = 0
         if self.dist == "smoothl1":
             self.dist_func = SmoothL1Loss()
         elif self.dist == "l1":
@@ -169,6 +178,26 @@ class STARLoss_v2(nn.Module):
         covariance = 0.5 * (covariance + covariance.transpose(-1, -2))
         return covariance
 
+    def _maybe_check_finite(self, covars_flat: torch.Tensor) -> None:
+        """Optional NaN/Inf guard on the covariance prior to eigh.
+
+        Disabled by default: reading ``torch.isfinite(...).all()`` in a Python
+        ``if`` forces a CUDA host-device sync every step. When
+        ``check_finite_interval > 0`` the guard runs only every N calls so long
+        runs keep protection without paying the sync each forward.
+        """
+
+        self._eigh_step += 1
+        if not self.check_finite:
+            return
+        interval = self.check_finite_interval
+        if interval > 0 and (self._eigh_step % interval) != 0:
+            return
+        if not torch.isfinite(covars_flat).all().item():
+            raise ValueError(
+                "STARLoss_v2 covariance contains NaN/Inf before eigendecomposition"
+            )
+
     def covariance_eigh(
         self, covars: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -182,10 +211,7 @@ class STARLoss_v2(nn.Module):
         covars_flat = covars.reshape(batch_size * num_points, 2, 2)
         covars_flat = 0.5 * (covars_flat + covars_flat.transpose(-1, -2))
 
-        if not torch.isfinite(covars_flat).all():
-            raise ValueError(
-                "STARLoss_v2 covariance contains NaN/Inf before eigendecomposition"
-            )
+        self._maybe_check_finite(covars_flat)
 
         try:
             evalues, evectors = torch.linalg.eigh(covars_flat, UPLO="U")

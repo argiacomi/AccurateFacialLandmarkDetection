@@ -95,10 +95,11 @@ def _star_loss_v2_per_point(star_loss_func, pred_heatmap, target):
     covars_flat = covars.reshape(bs * npoints, 2, 2)
     covars_flat = 0.5 * (covars_flat + covars_flat.transpose(-1, -2))
 
-    if not torch.isfinite(covars_flat).all():
-        raise ValueError(
-            "STARLoss_v2 covariance contains NaN/Inf before eigendecomposition"
-        )
+    # Honor the loss object's opt-in finite guard when available; older
+    # STARLoss_v2-like objects without it skip the (sync-inducing) check.
+    maybe_check = getattr(star_loss_func, "_maybe_check_finite", None)
+    if callable(maybe_check):
+        maybe_check(covars_flat)
 
     try:
         evalues, evectors = torch.linalg.eigh(covars_flat, UPLO="U")
@@ -253,7 +254,14 @@ def schema_head_loss(
         # skips fully masked heads before expensive STAR math.
         if float(getattr(args, "star_loss_weight", 0.0)) > 0.0:
             if star_loss_func is None:
-                star_loss_func = STARLoss_v2()
+                star_loss_func = STARLoss_v2(
+                    check_finite=bool(
+                        getattr(args, "star_loss_check_finite", False)
+                    ),
+                    check_finite_interval=int(
+                        getattr(args, "star_loss_check_finite_interval", 0)
+                    ),
+                )
             head_star = _weighted_star_loss_v2(
                 star_loss_func,
                 pred_heatmap,
