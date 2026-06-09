@@ -2,7 +2,7 @@ import csv
 
 import pytest
 
-from lib.landmarks.evaluation.split_safe import (
+from lib.evaluation.split_safe import (
     build_slice_report,
     entry_in_eval_split,
     metrics_for_nmes,

@@ -1,7 +1,7 @@
 import torch
 
-from lib.landmarks.training.data import batch_mix, legacy_domain_balanced_collate
-from lib.landmarks.training.domain_balanced_sampler import (
+from lib.training.data import batch_mix, legacy_domain_balanced_collate
+from lib.training.domain_balanced_sampler import (
     DomainBalancedBatchSampler,
     parse_target_spec,
     parse_target_spec_for_kind,

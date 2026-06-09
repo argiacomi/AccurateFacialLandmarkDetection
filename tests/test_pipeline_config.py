@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from lib.landmarks.pipeline.config import _extract_config_path, _merge_config_argv
-from tools.landmarks import run_cdvit_manifest_training_pipeline as pipeline
+from lib.pipeline.config import _extract_config_path, _merge_config_argv
+from tools import run_cdvit_manifest_training_pipeline as pipeline
 
 
 def test_config_dry_run_merges_cli_overrides_and_writes_resolved_config(

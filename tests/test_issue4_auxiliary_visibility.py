@@ -6,16 +6,16 @@ import numpy as np
 import pytest
 import torch
 
-from lib.landmarks.training.auxiliary import (
+from lib.models.cdvit import VitAttnStage
+from lib.training.auxiliary import (
     masked_visibility_bce_loss,
     parse_auxiliary_loss_weights,
     resolve_auxiliary_label,
     synthetic_visibility_from_occluder_mask,
     visibility_loss_weight_for_epoch,
 )
-from lib.landmarks.training.data import _schema_aware_collate
-from lib.landmarks.training.losses import schema_head_loss
-from lib.landmarks.models.cdvit import VitAttnStage
+from lib.training.data import _schema_aware_collate
+from lib.training.losses import schema_head_loss
 
 
 def test_auxiliary_label_resolution_prefers_explicit_labels_and_keeps_provenance():

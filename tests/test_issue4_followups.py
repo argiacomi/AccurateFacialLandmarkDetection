@@ -15,9 +15,9 @@ sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 cv2 = pytest.importorskip("cv2")
 
-from lib.landmarks.core.schema import flip_map_for_schema
-from lib.landmarks.datasets.manifest import LandmarkDataset
-from lib.landmarks.training.losses import schema_head_loss
+from lib.core.schema import flip_map_for_schema
+from lib.datasets.manifest import LandmarkDataset
+from lib.training.losses import schema_head_loss
 
 
 def _args(**overrides):
@@ -120,7 +120,7 @@ def test_synthetic_visibility_targets_are_weighted_separately_from_explicit_targ
 def test_visibility_target_is_reindexed_when_schema_sample_is_flipped(
     tmp_path, monkeypatch
 ):
-    import lib.landmarks.datasets.manifest as manifest_module
+    import lib.datasets.manifest as manifest_module
 
     class IdentityAug:
         def __call__(self, *, image, keypoints):
@@ -225,7 +225,7 @@ def test_manifest_occluder_mask_generates_synthetic_visibility_targets(tmp_path)
 
 
 def test_manifest_occluder_mask_follows_geometric_augmentation(tmp_path, monkeypatch):
-    import lib.landmarks.datasets.manifest as manifest_module
+    import lib.datasets.manifest as manifest_module
 
     class ShiftRightAug:
         def __call__(self, *, image, keypoints, mask=None):

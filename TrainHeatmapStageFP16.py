@@ -14,9 +14,9 @@ from __future__ import annotations
 # surface for older tests/tools and object-identity checks such as
 # train._dataloader_kwargs(...)["worker_init_fn"] is train._seed_worker.
 # END LEGACY_PRIVATE_HELPER_EXPORTS
-from lib.landmarks.training import checkpoint_compat as _checkpoint_compat
-from lib.landmarks.training import heatmap_stage as _heatmap_stage_impl
-from lib.landmarks.training import runtime as _runtime
+from lib.training import checkpoint_compat as _checkpoint_compat
+from lib.training import heatmap_stage as _heatmap_stage_impl
+from lib.training import runtime as _runtime
 
 # BEGIN LEGACY_PRIVATE_HELPER_EXPORTS
 # Preserve the historical TrainHeatmapStageFP16.py private-helper surface.

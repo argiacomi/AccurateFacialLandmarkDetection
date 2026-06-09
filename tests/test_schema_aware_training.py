@@ -12,19 +12,19 @@ augmentation_stub = types.ModuleType("ImageAugmentation")
 augmentation_stub.GetAugTransform = lambda: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
-from lib.landmarks.core.schema import (
+from lib.core.schema import (
     DEFAULT_SCHEMA_HEADS,
     MAP_98_TO_68,
     flip_map_for_schema,
     head_name_for_schema,
 )
-from lib.landmarks.datasets.manifest import LandmarkDataset
-from lib.landmarks.training.data import _schema_aware_collate
-from lib.landmarks.training.evaluator import _eval_collate, _evaluate_landmark_model
-from lib.landmarks.training.losses import _weighted_star_loss_v2, schema_head_loss
+from lib.datasets.manifest import LandmarkDataset
+from lib.training.data import _schema_aware_collate
+from lib.training.evaluator import _eval_collate, _evaluate_landmark_model
+from lib.training.losses import _weighted_star_loss_v2, schema_head_loss
 from loss import STARLoss_v2
-from tools.landmarks.build_quality_dataset import _load_landmark_file, _sample
-from tools.landmarks.evaluate_cdvit_manifest import _dataset as standalone_eval_dataset
+from tools.build_quality_dataset import _load_landmark_file, _sample
+from tools.evaluate_cdvit_manifest import _dataset as standalone_eval_dataset
 
 
 def _write_manifest(tmp_path, points, *, schema, extra_sample=None):
@@ -73,7 +73,7 @@ def test_profile39_schema_aware_augmentation_skips_horizontal_flip_without_audit
         def __call__(self, *, image, keypoints):
             return {"image": image, "keypoints": keypoints}
 
-    import lib.landmarks.datasets.manifest as manifest_module
+    import lib.datasets.manifest as manifest_module
 
     monkeypatch.setattr(manifest_module, "GetAugTransform", lambda: IdentityAug())
     monkeypatch.setattr(np.random, "random", lambda: 0.0)

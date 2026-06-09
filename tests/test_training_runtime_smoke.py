@@ -9,14 +9,14 @@ import pytest
 import torch
 
 import TrainHeatmapStageFP16 as train
-from lib.landmarks.training.cli import build_heatmap_stage_arg_parser
-from lib.landmarks.training.config import (
+from lib.training.cli import build_heatmap_stage_arg_parser
+from lib.training.config import (
     DatasetBuildConfig,
     EvalConfig,
     TrainingRuntimeConfig,
     config_dict,
 )
-from tools.landmarks import run_cdvit_manifest_training_pipeline as pipeline
+from tools import run_cdvit_manifest_training_pipeline as pipeline
 
 
 def _trainer_args(tmp_path: Path, **overrides):

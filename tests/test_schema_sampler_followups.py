@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.landmarks.training.losses import _schema_head_weight_map
+from lib.training.losses import _schema_head_weight_map
 
 
 def test_schema_head_weight_map_accepts_valid_weights():
@@ -30,7 +30,7 @@ def test_schema_head_weight_map_rejects_malformed_weights(spec, message):
 
 
 def test_aggregate_sampler_diagnostics_sums_across_ddp_ranks(monkeypatch):
-    import lib.landmarks.training.heatmap_stage as heatmap_stage
+    import lib.training.heatmap_stage as heatmap_stage
 
     rank0 = {
         "requested_targets": {
@@ -103,7 +103,7 @@ def test_aggregate_sampler_diagnostics_sums_across_ddp_ranks(monkeypatch):
 
 
 def test_aggregate_sampler_diagnostics_returns_local_on_nonzero_rank(monkeypatch):
-    import lib.landmarks.training.heatmap_stage as heatmap_stage
+    import lib.training.heatmap_stage as heatmap_stage
 
     local = {
         "actual_mix": {"bucket": {"profile": 1}, "dataset": {}, "schema": {}},

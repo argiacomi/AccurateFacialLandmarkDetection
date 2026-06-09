@@ -10,9 +10,9 @@ import cv2
 import numpy as np
 import pytest
 
-from tools.landmarks import build_quality_dataset as builder
-from tools.landmarks import download_landmark_datasets as downloader
-from tools.landmarks import prepare_landmark_dataset as prepare
+from tools import build_quality_dataset as builder
+from tools import download_landmark_datasets as downloader
+from tools import prepare_landmark_dataset as prepare
 
 
 # ---------------------------------------------------------------------------

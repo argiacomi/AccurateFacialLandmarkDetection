@@ -12,9 +12,9 @@ import cv2
 import numpy as np
 import pytest
 
-from lib.landmarks.datasets.progress import track
-from tools.landmarks import download_landmark_datasets as downloader
-from tools.landmarks import prepare_landmark_dataset as prepare
+from lib.datasets.progress import track
+from tools import download_landmark_datasets as downloader
+from tools import prepare_landmark_dataset as prepare
 
 
 # ---------------------------------------------------------------------------

@@ -8,8 +8,8 @@ import cv2
 import numpy as np
 import pytest
 
-from lib.landmarks.datasets.parallel import parallel_map, resolve_worker_count
-from tools.landmarks import build_quality_dataset as builder
+from lib.datasets.parallel import parallel_map, resolve_worker_count
+from tools import build_quality_dataset as builder
 
 
 # ---------------------------------------------------------------------------

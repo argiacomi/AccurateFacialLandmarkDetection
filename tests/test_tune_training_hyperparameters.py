@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import types
+from pathlib import Path
 
 import pytest
 
-
 SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "tools"
-    / "landmarks"
-    / "tune_training_hyperparameters.py"
+    Path(__file__).resolve().parents[1] / "tools" / "tune_training_hyperparameters.py"
 )
 spec = importlib.util.spec_from_file_location("tune_training_hyperparameters", SCRIPT)
 tuner = importlib.util.module_from_spec(spec)

@@ -7,9 +7,9 @@ import cv2
 import numpy as np
 import pytest
 
-from lib.landmarks.core.schema import projection_audit_for_schema
-from lib.landmarks.datasets.video_frames import selected_frame_indices
-from tools.landmarks import build_quality_dataset as builder
+from lib.core.schema import projection_audit_for_schema
+from lib.datasets.video_frames import selected_frame_indices
+from tools import build_quality_dataset as builder
 
 
 def _points(count: int) -> np.ndarray:
