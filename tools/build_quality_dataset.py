@@ -545,11 +545,87 @@ def _crop_image_and_remap_points(
     )
 
 
+def _artifact_stem(dataset: str, sample_id: str) -> str:
+    """Stable filename stem for prepared image/landmark artifacts.
+
+    Artifacts are grouped by dataset directory, so remove leading dataset aliases
+    and extraction/archive wrapper components before flattening. Keep enough
+    semantic path to avoid collisions: sequence ids, video ids, image ids, and
+    frame ids remain.
+    """
+
+    dataset_key = _dataset(dataset)
+    raw = str(sample_id or "sample").replace("\\", "/").strip("/")
+    prefixes = (
+        f"{dataset}/",
+        f"{dataset_key}/",
+        f"{dataset.replace('_', '-')}/",
+        f"{dataset.replace('-', '_')}/",
+    )
+    for prefix in dict.fromkeys(prefixes):
+        if raw.lower().startswith(prefix.lower()):
+            raw = raw[len(prefix) :]
+            break
+
+    parts = [part for part in raw.split("/") if part and part not in {".", "extracted"}]
+    cleaned: list[str] = []
+    skip_next_duplicate_archive_root = None
+
+    archive_suffixes = (
+        ".zip",
+        ".tar",
+        ".tar.gz",
+        ".tgz",
+        ".rar",
+        ".7z",
+    )
+
+    for part in parts:
+        lowered = part.lower()
+
+        # Drop archive filename components such as AFLW2000-3D.zip or WFLW-V.zip.
+        if lowered.endswith(archive_suffixes):
+            base = part
+            for suffix in archive_suffixes:
+                if lowered.endswith(suffix):
+                    base = part[: -len(suffix)]
+                    break
+            skip_next_duplicate_archive_root = _label(base)
+            continue
+
+        # Drop the common duplicated extraction root immediately after an archive:
+        # 300VW_Dataset_2015_12_14.zip/300VW_Dataset_2015_12_14/...
+        if skip_next_duplicate_archive_root is not None:
+            if _label(part) == skip_next_duplicate_archive_root:
+                skip_next_duplicate_archive_root = None
+                continue
+            skip_next_duplicate_archive_root = None
+
+        # Drop noisy structural wrappers while retaining actual ids.
+        if _label(part) in {
+            "labels",
+            "landmarks",
+            "annotations",
+            "images",
+            "frames",
+            "extracted",
+        }:
+            continue
+
+        cleaned.append(part)
+
+    if not cleaned:
+        cleaned = parts or [raw or "sample"]
+
+    safe = "_".join(cleaned)
+    return safe_id(safe).replace("#", "_").replace("/", "_")
+
+
 def _write_crop_image(
     output_dir: Path, dataset: str, sample_id: str, crop_rgb: np.ndarray
 ) -> Path:
-    safe = safe_id(sample_id).replace("#", "_").replace("/", "_")
-    out = output_dir / "images" / dataset / f"{safe}.jpg"
+    safe = _artifact_stem(dataset, sample_id)
+    out = output_dir / "images" / _dataset(dataset) / f"{safe}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(
         str(out), crop_rgb[:, :, [2, 1, 0]], [int(cv2.IMWRITE_JPEG_QUALITY), 95]
@@ -746,9 +822,14 @@ def _split_from_entry_or_identity(
     return _deterministic_split(dataset, str(split_identity))
 
 
-def _save_landmarks(output_dir: Path, sample_id: str, points68: np.ndarray) -> Path:
-    safe = safe_id(sample_id).replace("#", "_").replace("/", "_")
-    path = output_dir / "landmarks" / f"{safe}.npy"
+def _save_landmarks(
+    output_dir: Path,
+    dataset: str,
+    sample_id: str,
+    points68: np.ndarray,
+) -> Path:
+    safe = _artifact_stem(dataset, sample_id)
+    path = output_dir / "landmarks" / _dataset(dataset) / f"{safe}.npy"
     path.parent.mkdir(parents=True, exist_ok=True)
 
     arr = np.asarray(points68, dtype=np.float32)
@@ -785,7 +866,7 @@ def _sample(
     source_schema = canonicalize_schema(source_schema)
     target_schema = source_schema
     head_name = head_name_for_schema(target_schema)
-    landmarks = _save_landmarks(output_dir, sample_id, points68)
+    landmarks = _save_landmarks(output_dir, dataset, sample_id, points68)
     meta = dict(metadata or {})
 
     normalizer_value = float("nan")
@@ -870,6 +951,37 @@ def _with_split(sample: dict[str, T.Any], split: str) -> dict[str, T.Any]:
     if isinstance(metadata, dict):
         metadata["split"] = split
     return sample
+
+
+def _limit_reached_for_build(
+    samples: list[dict[str, T.Any]],
+    scenarios: tuple[str, ...] | None,
+    limit: int | None,
+) -> bool:
+    """Return True when enough samples have been built for a smoke/capped run.
+
+    With explicit --scenarios, stop once every requested scenario has at least
+    limit matching samples. Without --scenarios, stop once the primary emitted
+    condition has reached limit. This makes --samples-per-scenario useful for
+    fast smoke runs instead of only trimming the manifest after all files were
+    parsed.
+    """
+
+    if not limit or limit <= 0 or not samples:
+        return False
+
+    if scenarios:
+        requested = {_label(item) for item in scenarios}
+        counts: Counter[str] = Counter()
+        for sample in samples:
+            for condition in sample.get("conditions", ()) or ():
+                label = _label(condition)
+                if label in requested:
+                    counts[label] += 1
+        return all(counts.get(label, 0) >= limit for label in requested)
+
+    counts = Counter(_label(sample.get("condition") or "default") for sample in samples)
+    return bool(counts) and all(count >= limit for count in counts.values())
 
 
 def _filter(
@@ -1262,6 +1374,75 @@ def _condition_for_landmark_file(
     return labels[0], tuple(labels)
 
 
+def _aflw2000_pose_metadata(path: Path) -> dict[str, T.Any]:
+    """Read AFLW2000-3D pose metadata from .mat files."""
+
+    try:
+        import scipy.io as sio
+    except ImportError:
+        return {}
+
+    try:
+        payload = sio.loadmat(path)
+    except Exception:  # noqa: BLE001
+        return {}
+
+    raw_pose = None
+    for key in ("Pose_Para", "pose_para", "Pose", "pose"):
+        if key in payload:
+            raw_pose = payload[key]
+            break
+    if raw_pose is None:
+        return {}
+
+    pose = np.asarray(raw_pose, dtype=np.float32).reshape(-1)
+    if pose.size < 3:
+        return {}
+
+    angles = pose[:3].astype(np.float32)
+    if float(np.nanmax(np.abs(angles))) <= float(2.0 * np.pi + 1e-3):
+        angles = np.degrees(angles)
+
+    pitch, yaw, roll = [float(value) for value in angles[:3]]
+    if not all(np.isfinite([pitch, yaw, roll])):
+        return {}
+
+    return {
+        "pose_pitch_deg": pitch,
+        "pose_yaw_deg": yaw,
+        "pose_roll_deg": roll,
+        "pose_abs_yaw_deg": abs(yaw),
+        "pose_source": "aflw2000_3d_pose_para",
+    }
+
+
+def _aflw2000_pose_conditions(
+    scenario: str,
+    metadata: T.Mapping[str, T.Any],
+) -> tuple[str, tuple[str, ...]]:
+    try:
+        yaw = float(metadata["pose_yaw_deg"])
+    except (KeyError, TypeError, ValueError):
+        label = _label(scenario)
+        return label, (label,)
+
+    abs_yaw = abs(yaw)
+    if abs_yaw >= 45.0:
+        direction = "large_yaw_right" if yaw > 0 else "large_yaw_left"
+        conditions = ("profile", "large_yaw", direction)
+    elif abs_yaw >= 25.0:
+        direction = "yaw_right" if yaw > 0 else "yaw_left"
+        conditions = ("pose", direction)
+    else:
+        conditions = ("frontal",)
+
+    label = _label(scenario)
+    if label != "default":
+        conditions = (*conditions, label)
+
+    return conditions[0], tuple(dict.fromkeys(_label(item) for item in conditions))
+
+
 def _build_directory(
     root: Path,
     output_dir: Path,
@@ -1319,7 +1500,10 @@ def _build_directory(
         ):
             continue
         try:
+            aflw2000_pose_metadata: dict[str, T.Any] = {}
             points68, source_schema = _load_landmark_file(landmark_path)
+            if dataset == "aflw2000-3d" and landmark_path.suffix.lower() == ".mat":
+                aflw2000_pose_metadata = _aflw2000_pose_metadata(landmark_path)
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": landmark_path.as_posix(), "reason": str(err)})
             continue
@@ -1341,6 +1525,8 @@ def _build_directory(
         sample_metadata = _path_identity_metadata(
             landmark_path, root=root, dataset=dataset
         )
+        if dataset == "aflw2000-3d" and aflw2000_pose_metadata:
+            sample_metadata.update(aflw2000_pose_metadata)
         entry_for_split: dict[str, T.Any] = {}
         if "trainset" in conds:
             entry_for_split["split"] = "train"
@@ -1367,6 +1553,16 @@ def _build_directory(
             )
             sample_metadata.update(crop_metadata)
 
+        if dataset == "aflw2000-3d" and aflw2000_pose_metadata:
+            condition, pose_conds = _aflw2000_pose_conditions(
+                scenario, aflw2000_pose_metadata
+            )
+            conds = tuple(dict.fromkeys((*pose_conds, *conds)))
+        if dataset == "aflw2000-3d" and aflw2000_pose_metadata:
+            condition, pose_conds = _aflw2000_pose_conditions(
+                scenario, aflw2000_pose_metadata
+            )
+            conds = tuple(dict.fromkeys((*pose_conds, *conds)))
         samples.append(
             _with_split(
                 _sample(
@@ -1384,6 +1580,8 @@ def _build_directory(
                 split,
             )
         )
+        if _limit_reached_for_build(samples, scenarios, limit):
+            break
     if not samples:
         raise ValueError(
             f"no usable schema-aware landmark samples found under {root}; skipped={skipped[:5]}"
@@ -2032,8 +2230,6 @@ def _build_expected_schema_dataset(
                 split,
             )
         )
-        if limit and scenarios is None and len(samples) >= limit:
-            break
 
     if not samples:
         raise ValueError(
@@ -2624,8 +2820,6 @@ def _build_jd_landmark(
                     split,
                 )
             )
-            if limit and scenarios is None and len(samples) >= limit:
-                break
         if limit and scenarios is None and len(samples) >= limit:
             break
 
@@ -4533,6 +4727,37 @@ def _merl_rav_conditions(
     return conditions[0] if conditions else base_condition, conditions
 
 
+def _merl_rav_path_conditions(landmark_path: Path) -> tuple[str, ...]:
+    labels = [_label(part) for part in landmark_path.parts]
+    out: list[str] = []
+
+    for token in (
+        "frontal",
+        "profile",
+        "semiprofile",
+        "semi_profile",
+        "occlusion",
+        "occluded",
+        "expression",
+        "illumination",
+        "blur",
+    ):
+        if token in labels and token not in out:
+            out.append("occlusion" if token == "occluded" else token)
+
+    return tuple(out)
+
+
+def _merge_condition_labels(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    out: list[str] = []
+    for group in groups:
+        for item in group:
+            label = _label(item)
+            if label and label not in out:
+                out.append(label)
+    return tuple(out or ("default",))
+
+
 def _build_merl_rav(
     root: Path,
     output_dir: Path,
@@ -4593,6 +4818,9 @@ def _build_merl_rav(
         # AFLW image cannot leak across train/test.
         split = _deterministic_split("merl-rav", image_id)
         condition, conds = _merl_rav_conditions(scenario, split, visibility)
+        path_conds = _merl_rav_path_conditions(landmark_path)
+        conds = _merge_condition_labels(path_conds, conds)
+        condition = conds[0]
         metadata = _path_identity_metadata(landmark_path, root=root, dataset="merl-rav")
         metadata.update(
             {
@@ -4601,6 +4829,8 @@ def _build_merl_rav(
                 "source_schema": detected_schema,
                 "source_image": str(image.resolve()),
                 "source_image_name": image.name,
+                "source_condition": path_conds[0] if path_conds else None,
+                "source_conditions": list(path_conds),
                 "image_id": image_id,
                 "merl_rav_label_id": sample_stem,
                 "visibility_target_source": visibility_source,
@@ -4633,8 +4863,7 @@ def _build_merl_rav(
                 split,
             )
         )
-
-        if limit and scenarios is None and len(samples) >= limit:
+        if _limit_reached_for_build(samples, scenarios, limit):
             break
 
     if not samples:
