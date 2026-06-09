@@ -152,9 +152,8 @@ def _coerce_optional_int(value):
 def _schemas_share_trainable_head_and_count(left_schema, right_schema):
     """Return True when two canonical schemas are shape/head-compatible.
 
-    Semantic profile schemas such as ``multipie_profile_39`` and the generic
-    inferred ``2d_39`` are both valid for the same loaded (39, 2) array and map
-    to the same trainable ``profile39`` head. This helper keeps that aliasing
+    Some eemantic profile schemas are valid for the same array and map
+    to the same trainable head. This helper keeps their aliasing
     narrow: both schemas must have the same point count and trainable head.
     """
     if left_schema == right_schema:

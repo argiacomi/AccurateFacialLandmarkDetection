@@ -4179,7 +4179,7 @@ def _multipie_parse_line(
         bbox = [float(item) for item in values[:4]]
         raw = values[header_values:]
         points = np.asarray(raw, dtype=np.float32).reshape(39, 2)
-        return image_rel, points, bbox, "multipie_profile_39"
+        return image_rel, points, bbox, "2d_39"
 
     if dense_count != 136:
         raise ValueError(

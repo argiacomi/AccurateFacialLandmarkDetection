@@ -179,8 +179,6 @@ SCHEMAS_WITHOUT_VERIFIED_68_PROJECTION = frozenset(
         "2d_29",
         "2d_39",
         "2d_194",
-        "menpo2d_profile_39",
-        "multipie_profile_39",
     }
 )
 
@@ -208,8 +206,6 @@ SUPPORTED_SCHEMAS: dict[str, LandmarkSchema] = {
     "2d_106": LandmarkSchema("2d_106", 106, 2),
     "2d_194": LandmarkSchema("2d_194", 194, 2),
     "3d_26": LandmarkSchema("3d_26", 26, 3),
-    "menpo2d_profile_39": LandmarkSchema("menpo2d_profile_39", 39, 2),
-    "multipie_profile_39": LandmarkSchema("multipie_profile_39", 39, 2),
 }
 
 DEFAULT_SCHEMA_HEADS: dict[str, int] = {
@@ -233,10 +229,6 @@ _SCHEMA_ALIASES = {
     "profile39": "2d_39",
     "profile_39": "2d_39",
     "lm_2d_39": "2d_39",
-    "menpo2d_39": "menpo2d_profile_39",
-    "menpo2d_profile39": "menpo2d_profile_39",
-    "multipie_39": "multipie_profile_39",
-    "multipie_profile39": "multipie_profile_39",
     "51": "2d_51",
     "51pt": "2d_51",
     "lm_2d_51": "2d_51",
@@ -362,9 +354,7 @@ WFLW_98_FLIP = np.array(
     dtype=np.int64,
 )
 
-SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS = frozenset(
-    {"2d_39", "menpo2d_profile_39", "multipie_profile_39"}
-)
+SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS = frozenset({"2d_39"})
 
 SCHEMA_FLIP_MAPS: dict[str, np.ndarray] = {
     "2d_68": np.array(
@@ -610,7 +600,7 @@ def head_name_for_schema(schema: str | object) -> str:
         return "landmarks_194"
     if schema_name == "2d_29":
         return "landmarks_29"
-    if schema_name in {"2d_39", "menpo2d_profile_39", "multipie_profile_39"}:
+    if schema_name == "2d_39":
         return "profile39"
     raise ValueError(
         f"Schema '{schema_name}' is not trainable by the CD-ViT multi-head path"

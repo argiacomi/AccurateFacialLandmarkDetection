@@ -70,7 +70,7 @@ def test_domain_balanced_sampler_is_reproducible():
         _sample("wflw", "2d_98", "profile"),
         _sample("cofw68", "2d_68", "occlusion"),
         _sample("300w", "2d_68", "anchor"),
-        _sample("multipie", "multipie_profile_39", "profile_occlusion"),
+        _sample("multipie", "2d_39", "profile_occlusion"),
     ]
     kwargs = dict(
         samples=samples,

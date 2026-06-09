@@ -21,8 +21,6 @@ TRAINING_MANIFEST_VERSION = 2
 TRAINABLE_SCHEMA_HEADS: dict[str, str] = {
     "2d_29": "landmarks_29",
     "2d_39": "profile39",
-    "menpo2d_profile_39": "profile39",
-    "multipie_profile_39": "profile39",
     "2d_68": "landmarks_68",
     "2d_98": "landmarks_98",
     "2d_106": "landmarks_106",

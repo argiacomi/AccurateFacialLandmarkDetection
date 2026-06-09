@@ -8,7 +8,7 @@ The builder keeps native point schemas and routes them to native training heads:
 - `2d_98` -> `landmarks_98`
 - `2d_68` -> `landmarks_68`
 - `2d_29` -> `landmarks_29`
-- `2d_39`, `menpo2d_profile_39`, `multipie_profile_39` -> `profile39`
+- `2d_39` -> `profile39`
 
 `2d_98` (`MAP_98_TO_68`) and `2d_106` (`MAP_106_TO_68`) have audited projections
 to canonical 68. The 106-point map is a semantic subsampling of the standard

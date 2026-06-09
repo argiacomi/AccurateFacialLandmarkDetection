@@ -56,14 +56,14 @@ def test_schema_registry_has_required_training_heads_and_flip_maps():
     assert head_name_for_schema("2d_106") == "landmarks_106"
     assert head_name_for_schema("2d_194") == "landmarks_194"
     assert head_name_for_schema("2d_29") == "landmarks_29"
-    assert head_name_for_schema("multipie_profile_39") == "profile39"
+    assert head_name_for_schema("2d_39") == "profile39"
     assert DEFAULT_SCHEMA_HEADS["landmarks_106"] == 106
     assert DEFAULT_SCHEMA_HEADS["landmarks_194"] == 194
     assert DEFAULT_SCHEMA_HEADS["landmarks_29"] == 29
     assert flip_map_for_schema("2d_68").shape == (68,)
     assert flip_map_for_schema("2d_98").shape == (98,)
     with pytest.raises(ValueError, match="No flip map registered"):
-        flip_map_for_schema("multipie_profile_39")
+        flip_map_for_schema("2d_39")
 
 
 def test_profile39_schema_aware_augmentation_skips_horizontal_flip_without_audited_map(
@@ -79,7 +79,7 @@ def test_profile39_schema_aware_augmentation_skips_horizontal_flip_without_audit
     monkeypatch.setattr(np.random, "random", lambda: 0.0)
 
     points = np.stack([np.linspace(32, 224, 39), np.linspace(40, 216, 39)], axis=1)
-    manifest_path = _write_manifest(tmp_path, points, schema="multipie_profile_39")
+    manifest_path = _write_manifest(tmp_path, points, schema="2d_39")
 
     dataset = LandmarkDataset(
         manifest_path=str(manifest_path),
@@ -97,7 +97,7 @@ def test_profile39_schema_aware_augmentation_skips_horizontal_flip_without_audit
 
 def test_fs68_schema_aware_loader_accepts_profile39(tmp_path):
     points = np.stack([np.linspace(32, 224, 39), np.linspace(40, 216, 39)], axis=1)
-    manifest_path = _write_manifest(tmp_path, points, schema="multipie_profile_39")
+    manifest_path = _write_manifest(tmp_path, points, schema="2d_39")
 
     dataset = LandmarkDataset(
         manifest_path=str(manifest_path),
@@ -117,7 +117,7 @@ def test_fs68_schema_aware_loader_accepts_profile39(tmp_path):
 
 def test_fs68_legacy_loader_skips_profile39(tmp_path):
     points = np.stack([np.linspace(32, 224, 39), np.linspace(40, 216, 39)], axis=1)
-    manifest_path = _write_manifest(tmp_path, points, schema="multipie_profile_39")
+    manifest_path = _write_manifest(tmp_path, points, schema="2d_39")
 
     try:
         LandmarkDataset(
@@ -141,13 +141,13 @@ def test_schema_aware_collate_extracts_optional_auxiliary_labels():
         "heatmap": torch.zeros(39, 8, 8),
         "landmark_mask": torch.ones(39),
         "sample_weight": torch.tensor(3.0),
-        "schema": "multipie_profile_39",
+        "schema": "2d_39",
         "head_name": "profile39",
         "metadata": {
             "dataset": "multipie",
             "condition": "profile",
             "conditions": ["profile", "left"],
-            "source_schema": "multipie_profile_39",
+            "source_schema": "2d_39",
             "hard_negative_bucket": "profile",
             "attributes": {"occlusion": 1, "blur": 0},
         },

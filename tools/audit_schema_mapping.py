@@ -18,12 +18,15 @@ import cv2
 import numpy as np
 
 from lib.core.schema import (
-    MAP_98_TO_68,
+    PROJECTION_MAPS_TO_68,
     SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS,
     canonicalize_schema,
     has_verified_flip_map,
     projection_audit_for_schema,
+    to_canonical_68,
 )
+
+PROJECTABLE_STATUSES = ("native", "audited")
 
 
 def _load_manifest(path: Path) -> list[dict[str, T.Any]]:
@@ -50,6 +53,31 @@ def _schema(entry: T.Mapping[str, T.Any], points: np.ndarray) -> str:
         return canonicalize_schema(raw)
     except ValueError:
         return str(raw)
+
+
+def _stored_projection_audit(entry: T.Mapping[str, T.Any]) -> dict[str, T.Any] | None:
+    """Return the projection_to_68 block the manifest stored for this sample."""
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    for container in (entry, metadata):
+        mapping_audit = container.get("mapping_audit")
+        if isinstance(mapping_audit, dict):
+            projection = mapping_audit.get("projection_to_68")
+            if isinstance(projection, dict):
+                return projection
+    return None
+
+
+def _project_to_68(
+    points: np.ndarray, schema: str
+) -> tuple[np.ndarray | None, str | None]:
+    """Project source points to canonical 68 for any native/audited schema."""
+    if schema not in PROJECTION_MAPS_TO_68:
+        return None, None
+    try:
+        projected = to_canonical_68(points, source_schema=schema)
+    except Exception:  # noqa: BLE001 - bad point count etc. are reported elsewhere
+        return None, None
+    return projected, PROJECTION_MAPS_TO_68[schema]
 
 
 def _draw_points(
@@ -80,7 +108,11 @@ def _draw_points(
 
 
 def audit_schema_mapping(
-    manifest: Path, output_dir: Path, *, limit: int = 25, write_overlays: bool = False
+    manifest: Path,
+    output_dir: Path,
+    *,
+    limit_per_schema: int = 10,
+    write_overlays: bool = False,
 ) -> Path:
     entries = _load_manifest(manifest)
     base = manifest.parent
@@ -89,8 +121,10 @@ def audit_schema_mapping(
         "manifest": str(manifest.resolve()),
         "counts": Counter(),
         "samples": [],
-        "map_98_to_68_size": int(MAP_98_TO_68.size),
+        "projection_maps": dict(PROJECTION_MAPS_TO_68),
         "projection_to_68": {},
+        "mapping_audit_mismatch_count": 0,
+        "mapping_audit_mismatches": [],
         "flip_map_audit": {
             "schemas_without_verified_flip_maps": sorted(
                 SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS
@@ -100,7 +134,7 @@ def audit_schema_mapping(
         },
     }
 
-    emitted = 0
+    emitted_per_schema: Counter[str] = Counter()
     for index, entry in enumerate(entries):
         landmark_value = entry.get("landmarks") or entry.get("ground_truth")
         image_value = entry.get("image")
@@ -117,12 +151,9 @@ def audit_schema_mapping(
                 "source_schema": schema,
                 "target_schema": "2d_68",
             }
-        projection_status_counts = report["projection_to_68"].setdefault(
-            projection_audit["status"],
-            0,
-        )
-        report["projection_to_68"][projection_audit["status"]] = (
-            int(projection_status_counts) + 1
+        status = projection_audit["status"]
+        report["projection_to_68"][status] = (
+            int(report["projection_to_68"].get(status, 0)) + 1
         )
         try:
             verified_flip_map = has_verified_flip_map(schema)
@@ -141,19 +172,52 @@ def audit_schema_mapping(
             "point_count": int(points.shape[0]),
             "projection_to_68": projection_audit,
         }
+
+        # Flag stale manifests: the stored mapping_audit must match a fresh audit.
+        stored_projection = _stored_projection_audit(entry)
+        if stored_projection is None:
+            item["mapping_audit_consistent"] = None
+        else:
+            consistent = stored_projection == projection_audit
+            item["mapping_audit_consistent"] = consistent
+            if not consistent:
+                report["mapping_audit_mismatch_count"] += 1
+                if len(report["mapping_audit_mismatches"]) < 50:
+                    report["mapping_audit_mismatches"].append(
+                        {
+                            "sample_id": sample_id,
+                            "schema": schema,
+                            "stored": stored_projection,
+                            "expected": projection_audit,
+                        }
+                    )
+
         projected = None
-        if schema == "2d_98":
-            projected = points[MAP_98_TO_68, :2]
-            item["projected_68_count"] = int(projected.shape[0])
-        if write_overlays and image_value and emitted < limit:
-            overlay_path = output_dir / "overlays" / f"{schema}_{emitted:04d}.jpg"
+        if status in PROJECTABLE_STATUSES:
+            projected, projection_map = _project_to_68(points, schema)
+            if projected is not None:
+                item["projected_68_count"] = int(projected.shape[0])
+                item["projection_map"] = projection_map
+
+        if (
+            write_overlays
+            and image_value
+            and emitted_per_schema[schema] < limit_per_schema
+        ):
+            overlay_path = (
+                output_dir
+                / "overlays"
+                / schema
+                / f"{emitted_per_schema[schema]:04d}.jpg"
+            )
             _draw_points(
                 _resolve(base, image_value), points, overlay_path, projected=projected
             )
             item["overlay"] = str(overlay_path)
-            emitted += 1
+            emitted_per_schema[schema] += 1
         report["samples"].append(item)
 
+    report["overlay_counts"] = dict(emitted_per_schema)
     output_path = output_dir / "schema_mapping_audit.json"
     output_path.write_text(
         json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
@@ -165,7 +229,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--limit", type=int, default=25)
+    parser.add_argument(
+        "--limit-per-schema",
+        type=int,
+        default=10,
+        help="Maximum overlays to emit per source schema (stratified sampling).",
+    )
     parser.add_argument("--write-overlays", action="store_true")
     return parser
 
@@ -175,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     output_path = audit_schema_mapping(
         args.manifest,
         args.output_dir,
-        limit=args.limit,
+        limit_per_schema=args.limit_per_schema,
         write_overlays=args.write_overlays,
     )
     print(f"Wrote schema mapping audit: {output_path}")
