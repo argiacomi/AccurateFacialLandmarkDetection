@@ -28,7 +28,6 @@ import torch.distributed as dist
 # from Attention import  SA2SA1_twins
 # from UNet2 import UNet
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.optim.lr_scheduler import StepLR
 
 from lib.core.manifest_aliases import (
@@ -69,11 +68,14 @@ from lib.training.data import (
     unpack_train_batch,
 )
 from lib.training.ddp import (
+    LocalModelWrapper,
+    distributed_is_active,
     distributed_rank,
     distributed_world_size,
     is_rank_zero,
     setup_distributed_from_env,
 )
+from lib.training.device import attention_kernel, autocast, make_grad_scaler
 from lib.training.ema import EMA
 from lib.training.eval_schedule import build_eval_schedule
 from lib.training.evaluator import (
@@ -292,7 +294,7 @@ def main():
     eval_config = EvalConfig.from_args(args)
     dataset_build_config = DatasetBuildConfig.from_args(args)
 
-    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+    with attention_kernel(device):
         # if True:
 
         schema_aware_training = (
@@ -328,7 +330,7 @@ def main():
             lmk_num,
             schema_aware_training=schema_aware_training,
             auxiliary_class_names=AUXILIARY_CLASS_NAMES,
-        ).cuda()
+        ).to(device)
         # net = VitAttnStage(
         #     nstack=args.nstack,
         #     Attn=lambda: SA2SA1_2(args.heatmap_size, args.max_depth),
@@ -390,11 +392,16 @@ def main():
                     "find_unused_parameters=True (required for unused "
                     "non-final visibility parameters)."
                 )
-        net = torch.nn.parallel.DistributedDataParallel(
-            net,
-            device_ids=[args.local_rank],
-            find_unused_parameters=ddp_find_unused,
-        )
+        if distributed_is_active():
+            net = torch.nn.parallel.DistributedDataParallel(
+                net,
+                device_ids=[args.local_rank],
+                find_unused_parameters=ddp_find_unused,
+            )
+        else:
+            # Single-process (MPS/CPU or single-GPU without torchrun): expose the
+            # same ``.module`` / call surface DDP would, without a process group.
+            net = LocalModelWrapper(net)
 
         optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
         scheduler = StepLR(optimizer, args.sched_step, gamma=0.5)
@@ -417,7 +424,7 @@ def main():
             else None
         )
         ema = EMA(net.module, 0.99, 100, 10) if is_rank_zero() else None
-        scaler = torch.amp.GradScaler("cuda")
+        scaler = make_grad_scaler(device)
         if isinstance(resume_checkpoint, dict) and "model" in resume_checkpoint:
             start_epoch, best_nme, best_record = _restore_training_checkpoint(
                 resume_checkpoint,
@@ -523,7 +530,7 @@ def main():
                 loss_visibility = torch.tensor(0.0, device=device)
                 loss_details = None
                 # if True:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                with autocast(device):
                     pred_info = net(data)
                     for i in range(len(pred_info)):
                         if schema_batch:
@@ -642,7 +649,7 @@ def main():
                 #                 loss.backward()
                 #                 optimizer.step()
 
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     ema.update_parameters(net.module)
                 n += data.shape[0]
                 if (

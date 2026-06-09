@@ -2214,7 +2214,15 @@ def count_parameters(model):
 if __name__ == "__main__":
     # import torchsummary
 
-    x = torch.randn((2, 3, 256, 256)).cuda()
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+
+    x = torch.randn((2, 3, 256, 256)).to(device)
 
     max_depth = 160
     net = VitAttnStage(
@@ -2229,6 +2237,6 @@ if __name__ == "__main__":
         heatmap_size=32,
         max_depth=max_depth,
         backbone_net=lambda max_depth: HeadingNet([32, 64, max_depth]),
-    ).cuda()
+    ).to(device)
 
     print(count_parameters(net) / 1024 / 1024)

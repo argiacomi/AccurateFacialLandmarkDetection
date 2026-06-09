@@ -124,7 +124,13 @@ def build_training_loaders(
             **dataloader_kwargs(args),
         )
     else:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        # Pass num_replicas/rank explicitly so the sampler is constructed without
+        # an initialized process group (single-process MPS/CPU or single-GPU runs).
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+        )
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=args.batch_size,

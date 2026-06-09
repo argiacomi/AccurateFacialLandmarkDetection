@@ -307,6 +307,17 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--data_name", type=str, default="WFLW")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cuda", "mps", "cpu"],
+        help=(
+            "Accelerator to train on. 'auto' prefers CUDA, then Apple Silicon "
+            "(MPS), then CPU. CUDA enables NCCL DDP (under torchrun), fp16 AMP, "
+            "and FlashAttention; MPS/CPU run single-process in fp32."
+        ),
+    )
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument(
         "--deterministic",

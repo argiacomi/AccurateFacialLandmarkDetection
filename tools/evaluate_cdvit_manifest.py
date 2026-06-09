@@ -28,6 +28,7 @@ from lib.evaluation.split_safe import (
 )
 from lib.models.attention import SA2SA1_2
 from lib.models.cdvit import HeadingNet, VitAttnStage
+from lib.training.device import default_device_str, resolve_device
 from lib.training.evaluator import (
     _eval_collate,
     _evaluate_landmark_model,
@@ -205,7 +206,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Evaluate manifest samples through native schema heads. Defaults to --schema-aware-model.",
     )
     parser.add_argument(
-        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+        "--device",
+        default=default_device_str(),
+        help=(
+            "Accelerator for evaluation. Defaults to the best available: CUDA, "
+            "then Apple Silicon (MPS), then CPU."
+        ),
     )
     parser.add_argument(
         "--visibility-detach-heatmaps",
@@ -230,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         args.split_policy = "declared"
     if args.ignore_declared_splits:
         args.split_policy = "random_hash"
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     checkpoint_state_dict = _load_state_dict(args.checkpoint, device)
     _resolve_checkpoint_model_features(args, checkpoint_state_dict)
 
