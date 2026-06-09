@@ -95,6 +95,11 @@ def _star_loss_v2_per_point(star_loss_func, pred_heatmap, target):
     covars_flat = covars.reshape(bs * npoints, 2, 2)
     covars_flat = 0.5 * (covars_flat + covars_flat.transpose(-1, -2))
 
+    if not torch.isfinite(covars_flat).all():
+        raise ValueError(
+            "STARLoss_v2 covariance contains NaN/Inf before eigendecomposition"
+        )
+
     try:
         evalues, evectors = torch.linalg.eigh(covars_flat, UPLO="U")
     except RuntimeError:
@@ -296,12 +301,16 @@ def schema_head_loss(
 
     if args.schema_consistency_weight > 0 and "landmarks_68" in stage_pred:
         consistency_terms = []
+        consistency_weights = []
         for source_head, map_to_68 in CONSISTENCY_MAPS_TO_68.items():
             if source_head not in heads or source_head not in stage_pred:
                 continue
 
             payload = heads[source_head]
             indices = payload["indices"]
+            head_sample_count = int(indices.numel())
+            if head_sample_count <= 0:
+                continue
 
             pred_source = stage_pred[source_head][0].index_select(0, indices)
             pred_68 = stage_pred["landmarks_68"][0].index_select(0, indices)
@@ -312,11 +321,20 @@ def schema_head_loss(
             consistency_terms.append(
                 F.smooth_l1_loss(pred_68, projected.detach(), beta=0.001)
             )
+            consistency_weights.append(
+                torch.tensor(
+                    float(head_sample_count),
+                    device=pred_source.device,
+                    dtype=pred_source.dtype,
+                )
+            )
 
         if consistency_terms:
+            stacked_weights = torch.stack(consistency_weights)
             loss_consistency = (
                 float(args.schema_consistency_weight)
-                * torch.stack(consistency_terms).mean()
+                * (torch.stack(consistency_terms) * stacked_weights).sum()
+                / stacked_weights.sum().clamp_min(1.0)
             )
             loss = loss + loss_consistency
 

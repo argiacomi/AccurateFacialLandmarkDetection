@@ -43,6 +43,9 @@ def build_cdvit_model(
         else None,
         visibility_heads=schema_aware_training
         and bool(getattr(args, "visibility_heads", True)),
+        visibility_detach_heatmaps=bool(
+            getattr(args, "visibility_detach_heatmaps", True)
+        ),
         # Compute the visibility head on every stage only when all stages are
         # supervised; otherwise it runs on the final stage alone, which is the
         # only stage the loss and evaluator read by default.

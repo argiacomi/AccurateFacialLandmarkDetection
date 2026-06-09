@@ -182,6 +182,11 @@ class STARLoss_v2(nn.Module):
         covars_flat = covars.reshape(batch_size * num_points, 2, 2)
         covars_flat = 0.5 * (covars_flat + covars_flat.transpose(-1, -2))
 
+        if not torch.isfinite(covars_flat).all():
+            raise ValueError(
+                "STARLoss_v2 covariance contains NaN/Inf before eigendecomposition"
+            )
+
         try:
             evalues, evectors = torch.linalg.eigh(covars_flat, UPLO="U")
         except RuntimeError:

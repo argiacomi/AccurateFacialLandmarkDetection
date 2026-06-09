@@ -1615,6 +1615,7 @@ class VitAttnStage(nn.Module):
         schema_heads=None,
         auxiliary_heads=None,
         visibility_heads=False,
+        visibility_detach_heatmaps=True,
         visibility_all_stages=False,
     ):
         super(VitAttnStage, self).__init__()
@@ -1628,6 +1629,7 @@ class VitAttnStage(nn.Module):
             self.schema_heads.setdefault("landmarks_68", lmk_num)
         self.auxiliary_heads = dict(auxiliary_heads or {})
         self.visibility_heads_enabled = bool(visibility_heads and self.multi_schema)
+        self.visibility_detach_heatmaps = bool(visibility_detach_heatmaps)
         # When False (default), the landmark-conditioned visibility head only
         # runs on the final stage, since the loss and evaluator consume only
         # the final stage's visibility output unless all-stage supervision is
@@ -1761,6 +1763,8 @@ class VitAttnStage(nn.Module):
                 else "visibility_" + name.split("_", 1)[1]
             )
             landmark_heatmap = out[name][1]
+            if self.visibility_detach_heatmaps:
+                landmark_heatmap = landmark_heatmap.detach()
             out[visibility_key] = layers[stage_index](feature, landmark_heatmap)
 
     def forward_res(self, img):

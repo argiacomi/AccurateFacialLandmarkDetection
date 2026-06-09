@@ -126,6 +126,9 @@ def _build_model(
         backbone_net=backbone_net,
         schema_heads=DEFAULT_SCHEMA_HEADS if args.schema_aware_model else None,
         visibility_heads=bool(getattr(args, "visibility_heads", False)),
+        visibility_detach_heatmaps=bool(
+            getattr(args, "visibility_detach_heatmaps", True)
+        ),
     ).to(device)
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -203,6 +206,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    parser.add_argument(
+        "--visibility-detach-heatmaps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Detach landmark heatmaps before visibility-head pooling. This is "
+            "mostly relevant for debugging/tracing because eval runs under no_grad."
+        ),
     )
     return parser
 

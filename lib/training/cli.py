@@ -266,6 +266,17 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visibility-loss-ramp-epochs", type=int, default=0)
     parser.add_argument("--visibility-pseudo-loss-weight", type=float, default=0.0)
     parser.add_argument(
+        "--visibility-detach-heatmaps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Detach schema-head landmark heatmaps before landmark-conditioned "
+            "visibility pooling. Default keeps noisy visibility gradients from "
+            "updating landmark localization heads; pass --no-visibility-detach-heatmaps "
+            "to ablate joint visibility/localization gradients."
+        ),
+    )
+    parser.add_argument(
         "--synchronize-runtime-timing",
         action=argparse.BooleanOptionalAction,
         default=True,
