@@ -354,6 +354,143 @@ WFLW_98_FLIP = np.array(
     dtype=np.int64,
 )
 
+
+def _validate_flip_map(name: str, flip: np.ndarray, expected_size: int) -> None:
+    """Fail fast if a flip map is not an involutive index permutation."""
+    if flip.shape != (expected_size,):
+        raise ValueError(f"{name} shape {flip.shape}, expected {(expected_size,)}")
+    if int(flip.min()) < 0 or int(flip.max()) >= expected_size:
+        raise ValueError(f"{name} has out-of-range indices")
+    if len({int(x) for x in flip}) != expected_size:
+        raise ValueError(f"{name} is not a permutation")
+    if not np.array_equal(flip[flip], np.arange(expected_size)):
+        raise ValueError(f"{name} is not involutive")
+
+
+# 0-based horizontal flip maps. Entry i gives the landmark index that i maps to
+# after a horizontal flip (an involutive permutation of the schema's indices).
+FLIP_MAP_29 = np.asarray(
+    [
+        1,
+        0,
+        3,
+        2,
+        6,
+        7,
+        4,
+        5,
+        9,
+        8,
+        11,
+        10,
+        14,
+        15,
+        12,
+        13,
+        17,
+        16,
+        19,
+        18,
+        20,
+        21,
+        23,
+        22,
+        24,
+        25,
+        26,
+        27,
+        28,
+    ],
+    dtype=np.int64,
+)
+
+FLIP_MAP_106 = np.asarray(
+    [
+        *range(32, -1, -1),  # 0..32
+        46,
+        45,
+        44,
+        43,
+        42,  # 33..37
+        50,
+        49,
+        48,
+        47,  # 38..41
+        37,
+        36,
+        35,
+        34,
+        33,  # 42..46
+        41,
+        40,
+        39,
+        38,  # 47..50
+        51,
+        52,
+        53,
+        54,  # 51..54 fixed
+        *range(65, 54, -1),  # 55..65
+        79,
+        78,
+        77,
+        76,
+        75,  # 66..70
+        82,
+        81,
+        80,  # 71..73
+        83,  # 74
+        70,
+        69,
+        68,
+        67,
+        66,  # 75..79
+        73,
+        72,
+        71,  # 80..82
+        74,  # 83
+        90,
+        89,
+        88,
+        87,
+        86,
+        85,
+        84,  # 84..90
+        95,
+        94,
+        93,
+        92,
+        91,  # 91..95
+        100,
+        99,
+        98,
+        97,
+        96,  # 96..100
+        103,
+        102,
+        101,  # 101..103
+        105,
+        104,  # 104..105
+    ],
+    dtype=np.int64,
+)
+
+FLIP_MAP_194 = np.asarray(
+    [
+        *range(40, -1, -1),  # 0..40
+        *range(57, 40, -1),  # 41..57
+        *range(72, 57, -1),  # 58..72
+        *range(86, 72, -1),  # 73..86
+        *range(100, 86, -1),  # 87..100
+        *range(113, 100, -1),  # 101..113
+        *range(134, 154),  # 114..133 -> 134..153
+        *range(114, 134),  # 134..153 -> 114..133
+        *range(174, 194),  # 154..173 -> 174..193
+        *range(154, 174),  # 174..193 -> 154..173
+    ],
+    dtype=np.int64,
+)
+
+
 SCHEMAS_WITHOUT_VERIFIED_FLIP_MAPS = frozenset({"2d_39"})
 
 SCHEMA_FLIP_MAPS: dict[str, np.ndarray] = {
@@ -430,8 +567,16 @@ SCHEMA_FLIP_MAPS: dict[str, np.ndarray] = {
         ],
         dtype=np.int64,
     ),
+    "2d_29": FLIP_MAP_29,
     "2d_98": WFLW_98_FLIP,
+    "2d_106": FLIP_MAP_106,
+    "2d_194": FLIP_MAP_194,
 }
+
+
+# Validate every registered flip map at import so a malformed map fails fast.
+for _flip_schema, _flip_map in SCHEMA_FLIP_MAPS.items():
+    _validate_flip_map(_flip_schema, _flip_map, SUPPORTED_SCHEMAS[_flip_schema].points)
 
 
 @dataclass(frozen=True, init=False)
