@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 
 from .smoothL1Loss import SmoothL1Loss
 from .wingLoss import WingLoss
@@ -45,158 +44,236 @@ class STARLoss_v2(nn.Module):
             raise NotImplementedError
         self.softmax_normalized = softmax_normalized
 
-    def __repr__(self):
-        return "STARLoss()"
+        # Runtime-only cache. Not a buffer because it is keyed by dynamic
+        # (height, width, device, dtype) and should not appear in state_dict.
+        self._grid_cache = {}
 
-    def _make_grid(self, h, w):
+    def __repr__(self):
+        return "STARLoss_v2()"
+
+    def _work_dtype(self, tensor: torch.Tensor) -> torch.dtype:
+        # Keep STAR statistics/eigensolve in fp32 under AMP. Many CUDA builds do
+        # not support stable eigh for fp16/bfloat16.
+        if tensor.dtype in (torch.float16, torch.bfloat16):
+            return torch.float32
+        return tensor.dtype
+
+    def _grid_cache_key(self, h, w, *, device, dtype):
+        device = torch.device(device)
+        return (
+            int(h),
+            int(w),
+            device.type,
+            device.index,
+            str(dtype),
+        )
+
+    def _make_grid(self, h, w, *, device=None, dtype=None):
+        """Return cached normalized yy/xx grids on the requested device/dtype."""
+
+        device = torch.device("cpu" if device is None else device)
+        dtype = torch.float32 if dtype is None else dtype
+        key = self._grid_cache_key(h, w, device=device, dtype=dtype)
+
+        cached = self._grid_cache.get(key)
+        if cached is not None:
+            yy, xx = cached
+            if yy.device == device and xx.device == device and yy.dtype == dtype:
+                return yy, xx
+
         yy, xx = torch.meshgrid(
-            torch.arange(h).float() / (h - 1),
-            torch.arange(w).float() / (w - 1),
+            torch.arange(h, device=device, dtype=dtype) / max(int(h) - 1, 1),
+            torch.arange(w, device=device, dtype=dtype) / max(int(w) - 1, 1),
             indexing="ij",
         )
+        self._grid_cache[key] = (yy, xx)
         return yy, xx
+
+    def clear_grid_cache(self):
+        self._grid_cache.clear()
+
+    def _normalize_heatmap(self, heatmap: torch.Tensor) -> torch.Tensor:
+        bs, npoints, h, w = heatmap.shape
+        heatmap = heatmap.to(dtype=self._work_dtype(heatmap))
+
+        if self.softmax_normalized:
+            return torch.softmax(
+                heatmap.reshape(bs, npoints, -1),
+                dim=-1,
+            ).reshape(bs, npoints, h, w)
+
+        heatmap_sum = torch.clamp(heatmap.sum([2, 3]), min=1e-6)
+        return heatmap / heatmap_sum.view(bs, npoints, 1, 1)
 
     def weighted_mean(self, heatmap):
         batch, npoints, h, w = heatmap.shape
 
-        yy, xx = self._make_grid(h, w)
-        yy = yy.view(1, 1, h, w).to(heatmap)
-        xx = xx.view(1, 1, h, w).to(heatmap)
+        yy, xx = self._make_grid(
+            h,
+            w,
+            device=heatmap.device,
+            dtype=heatmap.dtype,
+        )
+        yy = yy.view(1, 1, h, w)
+        xx = xx.view(1, 1, h, w)
 
-        yy_coord = (yy * heatmap).sum([2, 3])  # batch x npoints
-        xx_coord = (xx * heatmap).sum([2, 3])  # batch x npoints
-        coords = torch.stack([xx_coord, yy_coord], dim=-1)
-        return coords
+        yy_coord = (yy * heatmap).sum([2, 3])
+        xx_coord = (xx * heatmap).sum([2, 3])
+        return torch.stack([xx_coord, yy_coord], dim=-1)
 
-    def unbiased_weighted_covariance(self, htp, means, num_dim_image=2, EPSILON=1e-5):
+    def unbiased_weighted_covariance(self, htp, means, num_dim_image=2, EPSILON=None):
+        if EPSILON is None:
+            EPSILON = self.EPSILON
+
+        htp = htp.to(dtype=self._work_dtype(htp))
+        means = means.to(device=htp.device, dtype=htp.dtype)
+
         batch_size, num_points, height, width = htp.shape
-
-        yv, xv = self._make_grid(height, width)
-        xv = Variable(xv)
-        yv = Variable(yv)
-
-        if htp.is_cuda:
-            xv = xv.to(htp.device)
-            yv = yv.to(htp.device)
-
-        xmean = means[:, :, 0]
-        xv_minus_mean = xv.expand(
-            batch_size, num_points, -1, -1
-        ) - expand_two_dimensions_at_end(
-            xmean, height, width
-        )  # [batch_size, 68, 64, 64]
-        ymean = means[:, :, 1]
-        yv_minus_mean = yv.expand(
-            batch_size, num_points, -1, -1
-        ) - expand_two_dimensions_at_end(
-            ymean, height, width
-        )  # [batch_size, 68, 64, 64]
-        wt_xv_minus_mean = xv_minus_mean
-        wt_yv_minus_mean = yv_minus_mean
-
-        wt_xv_minus_mean = wt_xv_minus_mean.view(
-            batch_size * num_points, height * width
-        )  # [batch_size*68, 4096]
-        wt_xv_minus_mean = wt_xv_minus_mean.view(
-            batch_size * num_points, 1, height * width
-        )  # [batch_size*68, 1, 4096]
-        wt_yv_minus_mean = wt_yv_minus_mean.view(
-            batch_size * num_points, height * width
-        )  # [batch_size*68, 4096]
-        wt_yv_minus_mean = wt_yv_minus_mean.view(
-            batch_size * num_points, 1, height * width
-        )  # [batch_size*68, 1, 4096]
-        vec_concat = torch.cat(
-            (wt_xv_minus_mean, wt_yv_minus_mean), 1
-        )  # [batch_size*68, 2, 4096]
-
-        htp_vec = htp.view(batch_size * num_points, 1, height * width)
-        htp_vec = htp_vec.expand(-1, 2, -1)
-
-        covariance = torch.bmm(
-            htp_vec * vec_concat, vec_concat.transpose(1, 2)
-        )  # [batch_size*68, 2, 2]
-        covariance = covariance.view(
-            batch_size, num_points, num_dim_image, num_dim_image
-        )  # [batch_size, 68, 2, 2]
-
-        V_1 = htp.sum([2, 3]) + EPSILON  # [batch_size, 68]
-        V_2 = torch.pow(htp, 2).sum([2, 3]) + EPSILON  # [batch_size, 68]
-
-        denominator = V_1 - (V_2 / V_1)
-        covariance = covariance / expand_two_dimensions_at_end(
-            denominator, num_dim_image, num_dim_image
+        yv, xv = self._make_grid(
+            height,
+            width,
+            device=htp.device,
+            dtype=htp.dtype,
         )
 
+        xmean = means[:, :, 0]
+        ymean = means[:, :, 1]
+
+        xv_minus_mean = xv.view(1, 1, height, width) - xmean.view(
+            batch_size, num_points, 1, 1
+        )
+        yv_minus_mean = yv.view(1, 1, height, width) - ymean.view(
+            batch_size, num_points, 1, 1
+        )
+
+        vec = torch.stack((xv_minus_mean, yv_minus_mean), dim=2)
+        vec = vec.reshape(batch_size * num_points, num_dim_image, height * width)
+
+        weights = htp.reshape(batch_size * num_points, 1, height * width)
+        covariance = torch.bmm(weights * vec, vec.transpose(1, 2))
+        covariance = covariance.view(
+            batch_size,
+            num_points,
+            num_dim_image,
+            num_dim_image,
+        )
+
+        V_1 = htp.sum([2, 3]) + EPSILON
+        V_2 = torch.pow(htp, 2).sum([2, 3]) + EPSILON
+        denominator = (V_1 - (V_2 / V_1)).clamp_min(EPSILON)
+
+        covariance = covariance / denominator.view(batch_size, num_points, 1, 1)
+
+        # eigh expects symmetric matrices; this also reduces small AMP/kernel
+        # asymmetries before decomposition.
+        covariance = 0.5 * (covariance + covariance.transpose(-1, -2))
         return covariance
+
+    def covariance_eigh(
+        self, covars: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Eigen-decompose 2x2 covariance matrices on tensor device.
+
+        CUDA tensors stay CUDA. CPU fallback is only for unusual backends/builds
+        where torch.linalg.eigh fails.
+        """
+
+        batch_size, num_points = covars.shape[:2]
+        covars_flat = covars.reshape(batch_size * num_points, 2, 2)
+        covars_flat = 0.5 * (covars_flat + covars_flat.transpose(-1, -2))
+
+        try:
+            evalues, evectors = torch.linalg.eigh(covars_flat, UPLO="U")
+        except RuntimeError:
+            evalues, evectors = torch.linalg.eigh(covars_flat.cpu(), UPLO="U")
+            evalues = evalues.to(covars_flat.device)
+            evectors = evectors.to(covars_flat.device)
+
+        evalues = evalues.view(batch_size, num_points, 2).to(
+            device=covars.device,
+            dtype=covars.dtype,
+        )
+        evectors = evectors.view(batch_size, num_points, 2, 2).to(
+            device=covars.device,
+            dtype=covars.dtype,
+        )
+        evalues = evalues.clamp_min(float(self.EPSILON))
+        return evalues, evectors
 
     def ambiguity_guided_decompose(self, error, evalues, evectors):
         bs, npoints = error.shape[:2]
+        error = error.to(device=evalues.device, dtype=evalues.dtype)
+
         normal_vector = evectors[:, :, 0]
         tangent_vector = evectors[:, :, 1]
+
         normal_error = torch.matmul(normal_vector.unsqueeze(-2), error.unsqueeze(-1))
         tangent_error = torch.matmul(tangent_vector.unsqueeze(-2), error.unsqueeze(-1))
+
         normal_error = normal_error.squeeze(dim=-1)
         tangent_error = tangent_error.squeeze(dim=-1)
+
         normal_dist = self.dist_func(
             normal_error,
-            torch.zeros_like(normal_error).to(normal_error),
+            torch.zeros_like(normal_error),
             reduction="none",
         )
         tangent_dist = self.dist_func(
             tangent_error,
-            torch.zeros_like(tangent_error).to(tangent_error),
+            torch.zeros_like(tangent_error),
             reduction="none",
         )
+
         normal_dist = normal_dist.reshape(bs, npoints, 1)
         tangent_dist = tangent_dist.reshape(bs, npoints, 1)
         dist = torch.cat((normal_dist, tangent_dist), dim=-1)
+
         scale_dist = dist / torch.sqrt(evalues + self.EPSILON)
-        scale_dist = scale_dist.sum(-1)
-        return scale_dist
+        return scale_dist.sum(-1)
 
     def eigenvalue_restriction(self, evalues, batch, npoints):
-        eigen_loss = torch.abs(evalues.view(batch, npoints, 2)).sum(-1)
-        return eigen_loss
+        return torch.abs(evalues.view(batch, npoints, 2)).sum(-1)
+
+    def per_point_loss_from_normalized_heatmap(self, heatmap, groundtruth):
+        """Return STAR per-point loss from an already normalized heatmap.
+
+        This is the safe reuse path: callers should only use it when `heatmap`
+        is exactly the normalized probability map STARLoss_v2 would otherwise
+        compute internally.
+        """
+
+        bs, npoints, h, w = heatmap.shape
+        heatmap = heatmap.to(dtype=self._work_dtype(heatmap))
+        groundtruth = groundtruth.to(device=heatmap.device, dtype=heatmap.dtype)
+
+        means = self.weighted_mean(heatmap)
+        covars = self.unbiased_weighted_covariance(heatmap, means)
+        evalues, evectors = self.covariance_eigh(covars)
+
+        loss_trans = self.ambiguity_guided_decompose(
+            groundtruth - means,
+            evalues,
+            evectors,
+        )
+        loss_eigen = self.eigenvalue_restriction(evalues, bs, npoints)
+        return loss_trans + self.w * loss_eigen
+
+    def per_point_loss(self, heatmap, groundtruth, *, normalized_heatmap=False):
+        """Return STARLoss_v2 per landmark with shape [B, N]."""
+
+        if normalized_heatmap:
+            return self.per_point_loss_from_normalized_heatmap(heatmap, groundtruth)
+
+        return self.per_point_loss_from_normalized_heatmap(
+            self._normalize_heatmap(heatmap),
+            groundtruth,
+        )
 
     def forward(self, heatmap, groundtruth):
         """
-        heatmap:     b x n x 64 x 64
-        groundtruth: b x n x 2
-        output:      b x n x 1 => 1
+        heatmap:     B x N x H x W
+        groundtruth: B x N x 2
+        output:      scalar mean STAR loss
         """
-        # normalize
 
-        bs, npoints, h, w = heatmap.shape
-        if self.softmax_normalized:
-            heatmap = torch.softmax(heatmap.reshape((bs, npoints, -1)), dim=-1).reshape(
-                (bs, npoints, h, w)
-            )
-        else:
-            heatmap_sum = torch.clamp(heatmap.sum([2, 3]), min=1e-6)
-            heatmap = heatmap / heatmap_sum.view(bs, npoints, 1, 1)
-
-        means = self.weighted_mean(heatmap)  # [bs, 68, 2]
-        covars = self.unbiased_weighted_covariance(
-            heatmap, means
-        )  # covars [bs, 68, 2, 2]
-
-        # TODO: GPU-based eigen-decomposition
-        # https://github.com/pytorch/pytorch/issues/60537
-        _covars = covars.view(bs * npoints, 2, 2).cpu()
-        # evalues, evectors = _covars.symeig(eigenvectors=True)  # evalues [bs * 68, 2], evectors [bs * 68, 2, 2]
-        evalues, evectors = torch.linalg.eigh(_covars, UPLO="U")
-
-        evalues = evalues.view(bs, npoints, 2).to(heatmap)
-        evectors = evectors.view(bs, npoints, 2, 2).to(heatmap)
-
-        # STAR Loss
-        # Ambiguity-guided Decomposition
-        loss_trans = self.ambiguity_guided_decompose(
-            groundtruth - means, evalues, evectors
-        )
-        # Eigenvalue Restriction
-        loss_eigen = self.eigenvalue_restriction(evalues, bs, npoints)
-        star_loss = loss_trans + self.w * loss_eigen
-
-        return star_loss.mean()
+        return self.per_point_loss(heatmap, groundtruth).mean()

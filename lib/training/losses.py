@@ -76,22 +76,43 @@ def _schema_head_weight_map(raw):
 
 
 def _star_loss_v2_per_point(star_loss_func, pred_heatmap, target):
+    # Prefer the optimized STARLoss_v2 implementation. It keeps covariance and
+    # eigendecomposition on GPU when pred_heatmap is CUDA, and computes STAR
+    # statistics in fp32 under AMP/autocast.
+    if hasattr(star_loss_func, "per_point_loss"):
+        return star_loss_func.per_point_loss(pred_heatmap, target)
+
+    # Compatibility fallback for older STARLoss_v2-like objects.
     bs, npoints, h, w = pred_heatmap.shape
-    heatmap = torch.softmax(pred_heatmap.reshape((bs, npoints, -1)), dim=-1).reshape(
-        (bs, npoints, h, w)
-    )
+    heatmap = torch.softmax(
+        pred_heatmap.float().reshape((bs, npoints, -1)),
+        dim=-1,
+    ).reshape((bs, npoints, h, w))
+    target = target.to(device=heatmap.device, dtype=heatmap.dtype)
+
     means = star_loss_func.weighted_mean(heatmap)
     covars = star_loss_func.unbiased_weighted_covariance(heatmap, means)
-    covars_cpu = covars.reshape(bs * npoints, 2, 2).cpu()
-    evalues, evectors = torch.linalg.eigh(covars_cpu, UPLO="U")
+    covars_flat = covars.reshape(bs * npoints, 2, 2)
+    covars_flat = 0.5 * (covars_flat + covars_flat.transpose(-1, -2))
+
+    try:
+        evalues, evectors = torch.linalg.eigh(covars_flat, UPLO="U")
+    except RuntimeError:
+        evalues, evectors = torch.linalg.eigh(covars_flat.cpu(), UPLO="U")
+        evalues = evalues.to(covars_flat.device)
+        evectors = evectors.to(covars_flat.device)
+
     evalues = (
         evalues.reshape(bs, npoints, 2)
         .to(heatmap)
         .clamp_min(float(getattr(star_loss_func, "EPSILON", 1e-5)))
     )
     evectors = evectors.reshape(bs, npoints, 2, 2).to(heatmap)
+
     loss_trans = star_loss_func.ambiguity_guided_decompose(
-        target - means, evalues, evectors
+        target - means,
+        evalues,
+        evectors,
     )
     loss_eigen = star_loss_func.eigenvalue_restriction(evalues, bs, npoints)
     return loss_trans + star_loss_func.w * loss_eigen
@@ -100,13 +121,30 @@ def _star_loss_v2_per_point(star_loss_func, pred_heatmap, target):
 def _weighted_star_loss_v2(
     star_loss_func, pred_heatmap, target, sample_weight, landmark_mask
 ):
-    per_point = _star_loss_v2_per_point(star_loss_func, pred_heatmap, target)
-    point_weights = landmark_mask.to(per_point.device).to(per_point.dtype)
+    # STAR is only useful for valid landmarks. Avoid the expensive
+    # softmax/covariance/eigh path when the active head/batch has no valid
+    # landmark supervision.
+    if landmark_mask is None:
+        point_weights = torch.ones(
+            (pred_heatmap.shape[0], pred_heatmap.shape[1]),
+            device=pred_heatmap.device,
+            dtype=pred_heatmap.dtype,
+        )
+    else:
+        point_weights = landmark_mask.to(pred_heatmap.device).to(pred_heatmap.dtype)
+
     if sample_weight is not None:
-        point_weights = point_weights * sample_weight.to(per_point.device).to(
-            per_point.dtype
+        point_weights = point_weights * sample_weight.to(pred_heatmap.device).to(
+            pred_heatmap.dtype
         ).reshape(-1, 1)
-    return (per_point * point_weights).sum() / point_weights.sum().clamp_min(1.0)
+
+    if bool((point_weights > 0).any().item()) is False:
+        return pred_heatmap.sum() * 0.0
+
+    per_point = _star_loss_v2_per_point(star_loss_func, pred_heatmap, target)
+    return (
+        per_point * point_weights.to(per_point.dtype)
+    ).sum() / point_weights.sum().clamp_min(1.0)
 
 
 def _visibility_target_weight_for_payload(payload, args, *, device):
@@ -205,6 +243,9 @@ def schema_head_loss(
         )
         head_star = torch.tensor(0.0, device=loss.device)
         head_visibility = torch.tensor(0.0, device=loss.device)
+        # STAR is already active-head scoped because this loop iterates only
+        # supervised heads present in `heads`. _weighted_star_loss_v2() also
+        # skips fully masked heads before expensive STAR math.
         if float(getattr(args, "star_loss_weight", 0.0)) > 0.0:
             if star_loss_func is None:
                 star_loss_func = STARLoss_v2()
