@@ -75,7 +75,13 @@ from lib.training.ddp import (
     is_rank_zero,
     setup_distributed_from_env,
 )
-from lib.training.device import attention_kernel, autocast, make_grad_scaler
+from lib.training.device import (
+    attention_kernel,
+    autocast,
+    compile_model,
+    make_grad_scaler,
+    select_compile_backend,
+)
 from lib.training.ema import EMA
 from lib.training.eval_schedule import build_eval_schedule
 from lib.training.evaluator import (
@@ -402,6 +408,28 @@ def main():
             # Single-process (MPS/CPU or single-GPU without torchrun): expose the
             # same ``.module`` / call surface DDP would, without a process group.
             net = LocalModelWrapper(net)
+
+        if getattr(args, "compile", False):
+            # Compile outermost (after DDP) so net.module.state_dict() stays
+            # prefix-free for checkpoints and Dynamo can split DDP graphs. The
+            # uncompiled base model remains reachable via net.module, so EMA and
+            # eval keep running in eager mode.
+            compile_backend = select_compile_backend(
+                device, getattr(args, "compile_backend", "auto")
+            )
+            net = compile_model(
+                net,
+                mode=getattr(args, "compile_mode", "default"),
+                backend=getattr(args, "compile_backend", "auto"),
+                device=device,
+            )
+            if is_rank_zero():
+                print(
+                    f"torch.compile enabled (backend={compile_backend}, "
+                    f"mode={getattr(args, 'compile_mode', 'default')}); "
+                    "expect extra warmup compilation on the first steps",
+                    flush=True,
+                )
 
         optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
         scheduler = StepLR(optimizer, args.sched_step, gamma=0.5)
