@@ -60,7 +60,59 @@ def _load_state_dict(path: Path, device: torch.device) -> dict[str, torch.Tensor
     return {key.removeprefix("module."): value for key, value in state.items()}
 
 
-def _build_model(args: argparse.Namespace, device: torch.device) -> VitAttnStage:
+def _checkpoint_has_prefix(
+    state_dict: dict[str, torch.Tensor],
+    prefix: str,
+) -> bool:
+    return any(str(key).startswith(prefix) for key in state_dict)
+
+
+def _checkpoint_has_schema_heads(state_dict: dict[str, torch.Tensor]) -> bool:
+    return _checkpoint_has_prefix(state_dict, "schema_output_layers.")
+
+
+def _checkpoint_has_visibility_heads(state_dict: dict[str, torch.Tensor]) -> bool:
+    return _checkpoint_has_prefix(state_dict, "visibility_output_layers.")
+
+
+def _resolve_checkpoint_model_features(
+    args: argparse.Namespace,
+    state_dict: dict[str, torch.Tensor],
+) -> None:
+    """Enable schema/visibility model features needed by the checkpoint.
+
+    Standalone eval historically instantiated schema heads only when the user
+    passed --schema-aware-model. Visibility-capable checkpoints add
+    visibility_output_layers.* keys, so eval must instantiate those modules
+    before loading the checkpoint.
+
+    CLI behavior:
+      --visibility-heads     force visibility heads on
+      --no-visibility-heads  force visibility heads off
+      omitted                auto-enable if checkpoint has visibility heads
+    """
+
+    checkpoint_has_schema = _checkpoint_has_schema_heads(state_dict)
+    checkpoint_has_visibility = _checkpoint_has_visibility_heads(state_dict)
+
+    if getattr(args, "visibility_heads", None) is None:
+        args.visibility_heads = checkpoint_has_visibility
+
+    # Visibility heads are schema-specific, so a visibility-capable checkpoint
+    # requires schema-aware construction too.
+    if checkpoint_has_schema or bool(args.visibility_heads):
+        args.schema_aware_model = True
+
+
+def _build_model(
+    args: argparse.Namespace,
+    device: torch.device,
+    state_dict: dict[str, torch.Tensor] | None = None,
+) -> VitAttnStage:
+    if state_dict is None:
+        state_dict = _load_state_dict(args.checkpoint, device)
+        _resolve_checkpoint_model_features(args, state_dict)
+
     backbone_net, win_size = _backbone_for_heatmap_size(
         args.heatmap_size, args.max_depth
     )
@@ -72,14 +124,21 @@ def _build_model(args: argparse.Namespace, device: torch.device) -> VitAttnStage
         max_depth=args.max_depth,
         backbone_net=backbone_net,
         schema_heads=DEFAULT_SCHEMA_HEADS if args.schema_aware_model else None,
+        visibility_heads=bool(getattr(args, "visibility_heads", False)),
     ).to(device)
-    missing, unexpected = model.load_state_dict(
-        _load_state_dict(args.checkpoint, device), strict=False
-    )
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         print(f"checkpoint missing keys ignored: {len(missing)}")
     if unexpected:
         print(f"checkpoint unexpected keys ignored: {len(unexpected)}")
+
+    print(
+        "standalone eval model features: "
+        f"schema_aware_model={bool(args.schema_aware_model)} "
+        f"schema_aware_eval={bool(args.schema_aware_eval)} "
+        f"visibility_heads={bool(getattr(args, 'visibility_heads', False))}"
+    )
     return model
 
 
@@ -158,10 +217,13 @@ def main(argv: list[str] | None = None) -> int:
         args.split_policy = "declared"
     if args.ignore_declared_splits:
         args.split_policy = "random_hash"
+    device = torch.device(args.device)
+    checkpoint_state_dict = _load_state_dict(args.checkpoint, device)
+    _resolve_checkpoint_model_features(args, checkpoint_state_dict)
+
     if args.schema_aware_eval is None:
         args.schema_aware_eval = bool(args.schema_aware_model)
 
-    device = torch.device(args.device)
     train_dataset = _dataset(args, "train")
     test_dataset = _dataset(args, "test")
     validate_no_train_test_leakage(train_dataset.samples, test_dataset.samples)
@@ -172,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
         collate_fn=_eval_collate,
     )
 
-    model = _build_model(args, device)
+    model = _build_model(args, device, checkpoint_state_dict)
     with torch.no_grad():
         report = _evaluate_landmark_model(
             model,
