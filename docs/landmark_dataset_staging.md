@@ -118,13 +118,28 @@ video/landmark paths for leakage-safe evaluation and auditing.
 
 ## Head Pose Metadata
 
-Each sample carries head-pose fields in its `metadata` when they can be
-resolved: `pose_yaw_deg`, `pose_pitch_deg`, `pose_roll_deg`, `pose_bucket`
-(`frontal`, `left_slight`/`right_slight`, `left_profile`/`right_profile`,
-`left_extreme`/`right_extreme` at yaw thresholds 15/30/60 degrees),
-`pitch_bucket` (`neutral`, `up`/`down`, `up_extreme`/`down_extreme`), and
-`pose_source`. Sign convention: yaw > 0 turns toward image-right, pitch > 0 is
-up, roll > 0 is clockwise.
+Each sample carries head-pose fields in its `metadata` when they can be resolved.
+Signed yaw values emit `pose_yaw_deg`, `pose_abs_yaw_deg`, `pose_side`, and a
+side-specific `pose_bucket`. Magnitude-only yaw labels emit `pose_abs_yaw_deg`,
+`pose_side="unknown"`, and a side-agnostic `pose_bucket` rather than guessing
+left or right. Missing yaw or pitch evidence is recorded as `unknown`, not as
+`frontal` or `neutral`.
+
+Pose fields:
+
+- `pose_yaw_deg` -- signed yaw angle when side is known. Yaw > 0 turns toward
+  image-right.
+- `pose_abs_yaw_deg` -- absolute yaw magnitude when signed yaw or label-only yaw
+  magnitude is known.
+- `pose_side` -- `unknown`, `frontal`, `left`, or `right`.
+- `pose_bucket` -- one of `unknown`, `frontal`, `left_slight`/`right_slight`,
+  `left_profile`/`right_profile`, `left_extreme`/`right_extreme`, or the
+  side-agnostic magnitude tiers `slight`, `profile`, and `extreme`.
+- `pose_pitch_deg` -- signed pitch angle when available. Pitch > 0 is up.
+- `pitch_bucket` -- one of `unknown`, `neutral`, `up`/`down`, or
+  `up_extreme`/`down_extreme`.
+- `pose_roll_deg` -- roll angle when available. Roll > 0 is clockwise.
+- `pose_source` -- source used to resolve pose metadata.
 
 `pose_source` is one of:
 
