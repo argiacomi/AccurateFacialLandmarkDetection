@@ -190,16 +190,32 @@ def _source_values(sample: T.Mapping[str, T.Any], keys: T.Sequence[str]) -> set[
         sample.get("metadata") if isinstance(sample.get("metadata"), T.Mapping) else {}
     )
     source = sample.get("source") if isinstance(sample.get("source"), T.Mapping) else {}
+    dataset = sample_dataset(sample) or "unknown"
+
     values: set[str] = set()
     for key in keys:
         values.update(_flatten_sources(sample.get(key)))
         values.update(_flatten_sources(metadata.get(key)))
         values.update(_flatten_sources(source.get(key)))
-    return {
-        str(Path(value).expanduser()) if "/" in value else value
-        for value in values
-        if value
-    }
+
+    normalized: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+
+        # Real paths should remain global across datasets. If two train/test
+        # samples point at the same native file, that is true source leakage.
+        if "/" in text or "\\" in text or Path(text).is_absolute():
+            normalized.add(str(Path(text).expanduser()))
+            continue
+
+        # Bare IDs such as sequence_id="212" or subject_id="001" are usually
+        # dataset-local. Namespace them to avoid false positives across unrelated
+        # datasets while still catching train/test reuse within the same dataset.
+        normalized.add(f"{dataset}|{text}")
+
+    return normalized
 
 
 def image_source_ids(sample: T.Mapping[str, T.Any]) -> set[str]:

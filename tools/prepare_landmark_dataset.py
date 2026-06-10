@@ -368,27 +368,51 @@ def _dataset_summary(payload: T.Mapping[str, T.Any]) -> dict[str, dict[str, T.An
     return per_dataset
 
 
-def _sample_image_group_key(sample: T.Mapping[str, T.Any]) -> str | None:
-    """Return the source-image grouping key used to prevent same-file split leaks."""
+def _is_pathlike(text: str) -> bool:
+    """True when a source value looks like a file path rather than a bare id."""
 
-    dataset = str(
-        sample.get("dataset") or sample.get("source", {}).get("dataset") or ""
-    )
-    image_id = sample.get("image_id")
-    if image_id not in (None, ""):
-        return f"{dataset}|image_id|{image_id}"
+    return "/" in text or "\\" in text or Path(text).is_absolute()
+
+
+def _sample_image_group_key(sample: T.Mapping[str, T.Any]) -> str | None:
+    """Return the source-image grouping key used to prevent same-file split leaks.
+
+    Mirrors ``lib.evaluation.split_safe._source_values``: a real file path is a
+    *global* identity with no dataset prefix, because different datasets can
+    legitimately reference the same native file (e.g. the 300W image cache shared
+    by helen/jd-landmark, or MERL-RAV labels over native AFLW frames). The leakage
+    validator keys those shared paths globally, so the cleanup must group them
+    globally too -- otherwise it cannot collapse the very same-file split that
+    validation then flags. Only bare ids (e.g. ``image_id="212"``) stay namespaced
+    to the dataset, to avoid false cross-dataset merges.
+    """
 
     metadata = sample.get("metadata")
-    if isinstance(metadata, dict):
-        image_id = metadata.get("image_id")
-        if image_id not in (None, ""):
-            return f"{dataset}|image_id|{image_id}"
+    metadata = metadata if isinstance(metadata, dict) else {}
+    source = sample.get("source")
+    source = source if isinstance(source, dict) else {}
+    dataset = str(sample.get("dataset") or source.get("dataset") or "")
 
-    image = sample.get("image")
-    if image not in (None, ""):
-        # Last-resort fallback mirrors validator behavior: if image_id is absent,
-        # the image path itself is the source-image identity.
-        return f"{dataset}|image|{image}"
+    # Prefer a resolved native-image path: it identifies the source file across
+    # datasets. ``original_image`` is the native source recorded by crop builders;
+    # ``image`` is the native file itself for native-image datasets.
+    for key in ("original_image", "source_image", "image", "image_path", "path"):
+        for container in (metadata, source, sample):
+            text = str(container.get(key) or "").strip()
+            if text and _is_pathlike(text):
+                return str(Path(text).expanduser())
+
+    # No path available: fall back to an image id. Path-like ids stay global; bare
+    # ids are dataset-local, matching the validator's namespacing rule.
+    for key in ("image_id", "merl_image_id", "frame_name"):
+        for container in (sample, metadata, source):
+            text = str(container.get(key) or "").strip()
+            if text:
+                return (
+                    str(Path(text).expanduser())
+                    if _is_pathlike(text)
+                    else f"{dataset}|{text}"
+                )
 
     return None
 
