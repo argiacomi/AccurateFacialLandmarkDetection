@@ -958,6 +958,7 @@ def _stage_combined_crops(
         images_subdir=getattr(args, "stage_crops_subdir", "images"),
         force=getattr(args, "force_stage_crops", False),
         strict=False,
+        workers=getattr(args, "workers", 1),
     )
     elapsed = time.time() - started_at
     identical = stats["staged"] + stats["reused"]

@@ -48,8 +48,26 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.datasets.progress import track
+from lib.datasets.parallel import parallel_map
 from lib.logging_utils import Verbosity, log_event
+
+
+class _StageJob(T.NamedTuple):
+    """One unique native image to stage (the parallelism unit)."""
+
+    image_path: str
+    landmarks_path: str
+    dataset: str
+    image_id: str
+
+
+class _StageResult(T.NamedTuple):
+    """A worker's outcome for one native image; the parent applies it."""
+
+    image_path: str
+    rel: str | None
+    orig_hw: tuple[int, int] | None
+    status: str  # "staged" | "skipped_already_256" | "skipped_no_image" | "mismatch"
 
 
 def _resolve(base_dir: Path, value: str) -> str:
@@ -118,6 +136,7 @@ def stage_crops(
     force: bool = False,
     strict: bool = False,
     keep_mismatched_crops: bool = False,
+    workers: int | None = 1,
 ) -> dict:
     """Write 256x256 crops and record prepared references on a manifest.
 
@@ -160,18 +179,20 @@ def stage_crops(
         else None
     )
 
-    crop_for_native: dict[str, tuple[str, tuple[int, int]]] = {}
     staged = skipped_already_256 = skipped_no_image = reused = 0
     mismatches: list[str] = []
 
-    for entry in track(
-        entries,
-        desc="Stage crops",
-        total=_stage_total,
-        unit="sample",
-        leave=True,
-        disable=False,
-    ):
+    # Group samples by their resolved native image path. Several samples can
+    # share one native image (multiple faces, or MERL-RAV over a single AFLW
+    # frame); the loader rescales each sample's own landmarks from the shared
+    # crop, so exactly one crop is staged per unique native image and then
+    # applied to every sample in the group. The group is the unit of
+    # parallelism: it gives one writer per crop path and removes the duplicate
+    # decode/resize/validate the per-sample ``crop_for_native`` cache used to
+    # avoid serially.
+    groups: dict[str, list[dict]] = {}
+    jobs: list[_StageJob] = []
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         dataset = str(entry.get("dataset") or "").strip()
@@ -184,41 +205,55 @@ def stage_crops(
             continue
         image_path = _resolve(base_dir, image_value)
         landmarks_path = _resolve(base_dir, landmarks_value)
+        group = groups.get(image_path)
+        if group is None:
+            groups[image_path] = [entry]
+            # The first sample for an image defines the crop's dataset/id and the
+            # landmarks used for the bit-identity check -- matching the serial
+            # code, which staged the first occurrence and reused it for the rest.
+            jobs.append(
+                _StageJob(
+                    image_path=image_path,
+                    landmarks_path=landmarks_path,
+                    dataset=dataset,
+                    image_id=str(entry.get("image_id") or Path(image_path).stem),
+                )
+            )
+        else:
+            group.append(entry)
 
-        cached = crop_for_native.get(image_path)
-        if cached is not None:
-            rel, orig_hw = cached
-            entry["prepared_image"] = rel
-            entry["prepared_image_orig_hw"] = [int(orig_hw[0]), int(orig_hw[1])]
-            reused += 1
-            continue
+    def _stage_one(job: _StageJob) -> _StageResult:
+        """Stage one unique native image (thread-safe; mutates no shared state).
+
+        Returns the prepared-crop reference and status; the parent applies it to
+        every sample in the image's group. The crop filename is derived from the
+        image path's digest, so each unique image owns a distinct output file --
+        guaranteeing one writer per crop path under the thread pool.
+        """
 
         try:
             native_img, native_lmk, (orig_h, orig_w) = _native_image_and_landmarks(
-                image_path, landmarks_path
+                job.image_path, job.landmarks_path
             )
         except FileNotFoundError:
-            skipped_no_image += 1
-            continue
+            return _StageResult(job.image_path, None, None, "skipped_no_image")
 
         if orig_h == 256 and orig_w == 256:
             # Native path performs no resize; a crop would add cost without
             # benefit and a 256->256 resize is not guaranteed to be identity.
-            skipped_already_256 += 1
-            continue
+            return _StageResult(job.image_path, None, None, "skipped_already_256")
 
         crop_bgr = cv2.resize(
-            cv2.imread(image_path, cv2.IMREAD_COLOR),
+            cv2.imread(job.image_path, cv2.IMREAD_COLOR),
             (256, 256),
             interpolation=cv2.INTER_LINEAR,
         )
 
-        image_id = entry.get("image_id") or Path(image_path).stem
-        digest = hashlib.sha1(image_path.encode("utf-8")).hexdigest()[:8]
+        digest = hashlib.sha1(job.image_path.encode("utf-8")).hexdigest()[:8]
         rel = str(
             Path(images_subdir)
-            / _sanitize(dataset or "dataset")
-            / f"{_sanitize(image_id)}_{digest}.png"
+            / _sanitize(job.dataset or "dataset")
+            / f"{_sanitize(job.image_id)}_{digest}.png"
         )
         crop_path = out_base / rel
         crop_path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,7 +262,7 @@ def stage_crops(
                 raise RuntimeError(f"failed to write crop {crop_path}")
 
         prepared = _prepared_image_and_landmarks(
-            str(crop_path), landmarks_path, (orig_h, orig_w)
+            str(crop_path), job.landmarks_path, (orig_h, orig_w)
         )
         identical = (
             prepared is not None
@@ -235,20 +270,46 @@ def stage_crops(
             and np.array_equal(prepared[1], native_lmk)
         )
         if not identical:
-            mismatches.append(image_path)
-            if strict:
-                raise ValueError(
-                    f"crop for {image_path} did not reproduce native pixels/landmarks"
-                )
-            # Leave the sample on the native path; remove the unusable crop.
+            # Leave the samples on the native path; remove the unusable crop.
             if crop_path.exists() and not keep_mismatched_crops:
                 crop_path.unlink()
-            continue
+            if strict:
+                raise ValueError(
+                    f"crop for {job.image_path} did not reproduce native pixels/landmarks"
+                )
+            return _StageResult(job.image_path, None, None, "mismatch")
 
-        entry["prepared_image"] = rel
-        entry["prepared_image_orig_hw"] = [int(orig_h), int(orig_w)]
-        crop_for_native[image_path] = (rel, (orig_h, orig_w))
-        staged += 1
+        return _StageResult(job.image_path, rel, (orig_h, orig_w), "staged")
+
+    # One crop per unique native image, in parallel; results come back in input
+    # order. cv2 decode/resize/encode release the GIL, so threads scale this
+    # IO+codec work. workers=1 (default) runs sequentially with identical output.
+    results = parallel_map(
+        _stage_one,
+        jobs,
+        workers=workers,
+        desc="Stage crops",
+        unit="image",
+    )
+
+    # Parent applies each result to every sample in the image's group and writes
+    # the manifest once. Per-sample counters (skips, reuse, mismatches) match the
+    # serial code; only the now-deduped work differs.
+    for result in results:
+        group = groups[result.image_path]
+        if result.status == "staged":
+            orig_hw = [int(result.orig_hw[0]), int(result.orig_hw[1])]
+            for entry in group:
+                entry["prepared_image"] = result.rel
+                entry["prepared_image_orig_hw"] = orig_hw
+            staged += 1
+            reused += len(group) - 1
+        elif result.status == "skipped_already_256":
+            skipped_already_256 += len(group)
+        elif result.status == "skipped_no_image":
+            skipped_no_image += len(group)
+        else:  # "mismatch"; strict mode already raised inside the worker
+            mismatches.extend([result.image_path] * len(group))
 
     out_manifest.parent.mkdir(parents=True, exist_ok=True)
     out_manifest.write_text(
@@ -297,6 +358,7 @@ def stage_manifest(args: argparse.Namespace) -> int:
         force=args.force,
         strict=args.strict,
         keep_mismatched_crops=args.keep_mismatched_crops,
+        workers=args.workers,
     )
 
     staged, reused = stats["staged"], stats["reused"]
@@ -350,6 +412,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--keep-mismatched-crops",
         action="store_true",
         help="Keep (rather than delete) crop files that failed bit-identity.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel workers for staging crops (one worker per unique native "
+            "image). 1 (default) stages serially; <=0 uses all CPUs."
+        ),
     )
     return parser
 
