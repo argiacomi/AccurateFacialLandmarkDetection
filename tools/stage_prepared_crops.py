@@ -37,6 +37,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 import typing as T
 from pathlib import Path
 
@@ -46,6 +47,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from lib.datasets.progress import track
+from lib.logging_utils import Verbosity, log_event
 
 
 def _resolve(base_dir: Path, value: str) -> str:
@@ -138,6 +142,18 @@ def stage_crops(
     if not isinstance(entries, list):
         raise ValueError(f"manifest {manifest_path} has no samples list")
 
+    _stage_started_at = time.time()
+    _stage_total = len(entries)
+    log_event(
+        "prepare",
+        f"stage crops start | samples {_stage_total} | manifest {manifest_path}",
+        level=Verbosity.INFO,
+        samples=_stage_total,
+        manifest=str(manifest_path),
+        out_manifest=str(out_manifest),
+        images_root=str(images_root),
+    )
+
     dataset_filter = (
         {str(d).strip().lower() for d in datasets if str(d).strip()}
         if datasets
@@ -148,7 +164,14 @@ def stage_crops(
     staged = skipped_already_256 = skipped_no_image = reused = 0
     mismatches: list[str] = []
 
-    for entry in entries:
+    for entry in track(
+        entries,
+        desc="Stage crops",
+        total=_stage_total,
+        unit="sample",
+        leave=True,
+        disable=False,
+    ):
         if not isinstance(entry, dict):
             continue
         dataset = str(entry.get("dataset") or "").strip()
@@ -230,6 +253,27 @@ def stage_crops(
     out_manifest.parent.mkdir(parents=True, exist_ok=True)
     out_manifest.write_text(
         json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8"
+    )
+
+    _stage_elapsed = time.time() - _stage_started_at
+    log_event(
+        "prepare",
+        (
+            f"stage crops done | crops {staged} unique | reused {reused} | "
+            f"skipped 256x256 {skipped_already_256} | "
+            f"skipped missing {skipped_no_image} | mismatches {len(mismatches)} | "
+            f"{_stage_elapsed:.1f}s"
+        ),
+        level=Verbosity.INFO,
+        staged=staged,
+        reused=reused,
+        skipped_already_256=skipped_already_256,
+        skipped_no_image=skipped_no_image,
+        mismatches=len(mismatches),
+        duration_seconds=_stage_elapsed,
+        manifest=str(manifest_path),
+        out_manifest=str(out_manifest),
+        images_root=str(images_root),
     )
 
     return {

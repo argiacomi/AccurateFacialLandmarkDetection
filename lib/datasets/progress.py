@@ -214,9 +214,9 @@ class _RichTrack(T.Generic[_T]):
         self._progress = Progress(
             TextColumn(
                 "[bold blue]{task.description}[/bold blue]",
-                table_column=Column(width=44, no_wrap=True, overflow="ellipsis"),
+                table_column=Column(width=34, no_wrap=True, overflow="ellipsis"),
             ),
-            BarColumn(bar_width=32),
+            BarColumn(bar_width=24),
             TaskProgressColumn(),
             _ScaledCompleteColumn(),
             TimeElapsedColumn(),
@@ -224,7 +224,7 @@ class _RichTrack(T.Generic[_T]):
             console=Console(
                 file=sys.stderr,
                 highlight=False,
-                soft_wrap=True,
+                soft_wrap=False,
                 force_terminal=self._force_terminal,
             ),
             transient=not self._leave,
@@ -394,14 +394,14 @@ def progress_group(*, transient: bool = True) -> T.Iterator[T.Any]:
     progress = Progress(
         TextColumn(
             "[bold blue]{task.description}[/bold blue]",
-            table_column=Column(width=44, no_wrap=True, overflow="ellipsis"),
+            table_column=Column(width=34, no_wrap=True, overflow="ellipsis"),
         ),
-        BarColumn(bar_width=32),
+        BarColumn(bar_width=24),
         TaskProgressColumn(),
         _ScaledCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
-        console=Console(file=sys.stderr, highlight=False, soft_wrap=True),
+        console=Console(file=sys.stderr, highlight=False, soft_wrap=False),
         transient=transient,
         expand=False,
     )

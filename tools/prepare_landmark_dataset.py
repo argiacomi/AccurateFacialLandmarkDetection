@@ -936,6 +936,21 @@ def _stage_combined_crops(
 
     if not combined_manifest.is_file():
         return manifest_payload
+    sample_count = 0
+    if isinstance(manifest_payload, dict) and isinstance(
+        manifest_payload.get("samples"), list
+    ):
+        sample_count = len(manifest_payload["samples"])
+    log_event(
+        "prepare",
+        (
+            f"stage-crops begin | manifest {combined_manifest} | "
+            f"samples {fmt_count(sample_count)}"
+        ),
+        level=Verbosity.INFO,
+        manifest=str(combined_manifest),
+        samples=sample_count,
+    )
     started_at = time.time()
     stats = stage_crops(
         combined_manifest,
@@ -1138,6 +1153,12 @@ def prepare(args: argparse.Namespace) -> int:
         )
     report: dict[str, T.Any] | None = None
     if built_any and not args.skip_validate:
+        log_event(
+            "prepare",
+            f"validate combined manifest begin | manifest {combined_manifest}",
+            level=Verbosity.INFO,
+            manifest=str(combined_manifest),
+        )
         report = _validate(
             combined_manifest,
             require_images=not args.skip_image_exists_check,
