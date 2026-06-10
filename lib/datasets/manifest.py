@@ -948,11 +948,17 @@ class LandmarkDataset(Dataset):
             if valid.shape[0] != lmk.shape[0] or not valid.any():
                 valid = np.ones((lmk.shape[0],), dtype=bool)
 
+        finite = np.isfinite(lmk).all(axis=1)
+        valid = valid & finite
+        if not valid.any():
+            raise ValueError("no finite valid landmarks")
+
         valid_lmk = lmk[valid]
         lt = np.min(valid_lmk, axis=0)
         rb = np.max(valid_lmk, axis=0)
-        padding = 0
-        margin = 5
+
+        padding = 0.0
+        margin = 5.0
         if lt[0] < margin:
             padding = margin - lt[0]
         if lt[1] < margin:
@@ -961,6 +967,17 @@ class LandmarkDataset(Dataset):
             padding = max(padding, rb[0] - img.shape[1] + margin)
         if rb[1] > img.shape[0] - margin:
             padding = max(padding, rb[1] - img.shape[0] + margin)
+
+        if not np.isfinite(padding):
+            raise ValueError(f"non-finite landmark padding: {padding}")
+
+        max_padding = max(int(img.shape[0]), int(img.shape[1]))
+        if padding > max_padding:
+            raise ValueError(
+                f"unreasonable landmark padding: {padding:.2f} > {max_padding}; "
+                f"lt={lt.tolist()} rb={rb.tolist()} image_shape={img.shape[:2]}"
+            )
+
         if padding > 0:
             padding = int(round(padding))
             new_img = cv2.copyMakeBorder(
