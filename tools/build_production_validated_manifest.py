@@ -16,7 +16,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import logging
 import pickle
 import re
 import shutil
@@ -35,8 +34,14 @@ if str(ROOT) not in sys.path:
 
 from lib.core.schema import normalize_landmarks
 from lib.io_utils import jsonable, write_json
-
-logger = logging.getLogger(__name__)
+from lib.logging_utils import (
+    Verbosity,
+    configure_console_logging,
+    fmt_count,
+    log_error,
+    log_event,
+    verbosity_from_name,
+)
 
 DEFAULT_DATASET = "production_validated"
 DEFAULT_SOURCE = "faceswap_fsa_production_source"
@@ -371,11 +376,13 @@ def build_manifest(
                 }
             except Exception as err:  # noqa: BLE001
                 skipped_invalid_face += 1
-                logger.debug(
-                    "Skipping invalid production face %s[%d]: %s",
-                    frame_name,
-                    face_index,
-                    err,
+                log_event(
+                    "manifest",
+                    f"skipped invalid production face {frame_name}[{face_index}]: {err}",
+                    level=Verbosity.DEBUG,
+                    frame=str(frame_name),
+                    face_index=face_index,
+                    error=str(err),
                 )
                 continue
             samples.append(sample)
@@ -403,6 +410,19 @@ def build_manifest(
     return metadata
 
 
+def _production_log_level_name(value: str | None) -> str:
+    """Map legacy stdlib log-level names to shared console verbosity names."""
+
+    key = str(value or "info").lower()
+    if key == "normal":
+        return "info"
+    if key in {"warning", "error", "critical"}:
+        return "quiet"
+    if key in {"quiet", "info", "verbose", "debug"}:
+        return key
+    return "info"
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -416,30 +436,67 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-name", default=DEFAULT_DATASET)
     parser.add_argument(
-        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+        "--log-level",
+        default="info",
+        choices=(
+            "quiet",
+            "info",
+            "normal",
+            "verbose",
+            "debug",
+            "warning",
+            "error",
+            "critical",
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ),
+        help=(
+            "Console verbosity. Lowercase values use the shared human-first logger; "
+            "legacy stdlib names are accepted for compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--log-format",
+        default="human",
+        choices=("human", "json"),
+        help="Console output format: tagged human lines or JSONL events.",
     )
     return parser
 
 
 def main(argv: T.Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(levelname)s:%(name)s:%(message)s",
+    configure_console_logging(
+        verbosity_from_name(_production_log_level_name(args.log_level)),
+        args.log_format,
     )
     try:
         metadata = build_manifest(
             args.prod_dir, args.output_dir, dataset_name=args.dataset_name
         )
     except Exception as err:  # noqa: BLE001
-        logger.error("production manifest build failed: %s", err)
+        log_error("manifest", f"production manifest build failed: {err}")
         return 1
-    logger.info(
-        "Wrote %d production_validated samples to %s",
-        metadata["sample_count"],
-        args.output_dir / "manifest.json",
+
+    manifest_path = args.output_dir / "manifest.json"
+    skipped_missing = int(metadata.get("skipped_missing_image", 0))
+    skipped_invalid = int(metadata.get("skipped_invalid_face", 0))
+    log_event(
+        "manifest",
+        (
+            f"wrote {manifest_path} | "
+            f"samples {fmt_count(int(metadata['sample_count']))} | "
+            f"skipped missing_image={fmt_count(skipped_missing)} "
+            f"invalid_face={fmt_count(skipped_invalid)}"
+        ),
+        sample_count=int(metadata["sample_count"]),
+        manifest=str(manifest_path),
+        skipped_missing_image=skipped_missing,
+        skipped_invalid_face=skipped_invalid,
     )
-    print(f"Wrote production_validated manifest: {args.output_dir / 'manifest.json'}")
     return 0
 
 

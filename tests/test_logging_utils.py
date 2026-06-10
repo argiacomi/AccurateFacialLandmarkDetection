@@ -127,6 +127,9 @@ def test_log_table_aligns_columns(capsys):
     # Second column is left-aligned under a shared width.
     assert "  frontal  3.21" in out
     assert "  profile  5.0" in out
+    # Guard against accidentally using pprint(), which quotes table rows.
+    assert "'  frontal" not in out
+    assert "'  profile" not in out
 
 
 # --------------------------------------------------------------------------- #
@@ -197,3 +200,48 @@ def test_pipeline_normal_log_level_maps_to_trainer_info():
     assert _trainer_log_level_for_pipeline("normal") == "info"
     assert _trainer_log_level_for_pipeline("quiet") == "quiet"
     assert _trainer_log_level_for_pipeline("verbose") == "verbose"
+
+
+def test_pipeline_production_command_forwards_logging_flags():
+    from argparse import Namespace
+    from pathlib import Path
+
+    from tools.run_cdvit_manifest_training_pipeline import (
+        PipelinePaths,
+        _production_build_command,
+    )
+
+    args = Namespace(
+        python_executable="python",
+        prod_dir=Path("prod"),
+        log_format="json",
+        log_level="normal",
+        production_build_arg=[],
+    )
+    paths = PipelinePaths(output_root=Path("runs"), run_name="demo")
+
+    command = _production_build_command(args, paths)
+
+    assert command is not None
+    assert command[command.index("--log-format") + 1] == "json"
+    assert command[command.index("--log-level") + 1] == "info"
+
+
+def test_production_manifest_parser_accepts_shared_logging_flags():
+    from tools.build_production_validated_manifest import _parser
+
+    args = _parser().parse_args(
+        [
+            "--prod-dir",
+            "prod",
+            "--output-dir",
+            "out",
+            "--log-format",
+            "json",
+            "--log-level",
+            "quiet",
+        ]
+    )
+
+    assert args.log_format == "json"
+    assert args.log_level == "quiet"

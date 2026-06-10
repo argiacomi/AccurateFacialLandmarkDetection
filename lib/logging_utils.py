@@ -23,7 +23,6 @@ import logging
 import math
 import sys
 import typing as T
-from pprint import pprint
 
 
 class Verbosity(enum.IntEnum):
@@ -186,9 +185,15 @@ def log_table(
                 widths[col] = max(widths[col], len(cell))
     print(f"[{tag}] {title}", flush=True)
     if headers:
-        pprint("  " + "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+        print(
+            "  " + "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)),
+            flush=True,
+        )
     for row in str_rows:
-        pprint("  " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+        print(
+            "  " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)),
+            flush=True,
+        )
 
 
 # --------------------------------------------------------------------------- #

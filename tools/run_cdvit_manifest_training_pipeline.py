@@ -1042,6 +1042,10 @@ def _production_build_command(
             str(args.prod_dir),
             "--output-dir",
             str(paths.dataset_root / PRODUCTION_DATASET),
+            "--log-format",
+            str(args.log_format),
+            "--log-level",
+            _trainer_log_level_for_pipeline(args.log_level),
         ],
         args.production_build_arg or [],
     )
@@ -1860,7 +1864,7 @@ def main(argv: list[str] | None = None) -> int:
             level=Verbosity.QUIET,
             **result.to_json(),
         )
-        if is_debug():
+        if is_debug() and getattr(args, "log_format", "human") != "json":
             print(json.dumps(result.to_json(), indent=2), flush=True)
         if result.status == "error":
             return 1
