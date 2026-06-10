@@ -1056,7 +1056,22 @@ class LandmarkDataset(Dataset):
                 dtype=np.float32,
             )
 
-        img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
+        try:
+            img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
+        except Exception as exc:
+            meta = sample.get("metadata", {}) if isinstance(sample.get("metadata"), dict) else {}
+            raise RuntimeError(
+                "MakeLMKInsideImage failed for "
+                f"item={item} "
+                f"sample_id={sample.get('sample_id', '')!r} "
+                f"dataset={sample.get('dataset', meta.get('dataset', ''))!r} "
+                f"image={sample.get('image', sample.get('image_path', sample.get('path', '')))!r} "
+                f"landmarks={sample.get('landmarks', sample.get('points', ''))!r} "
+                f"source_schema={sample.get('source_schema', '')!r} "
+                f"target_schema={sample.get('target_schema', '')!r} "
+                f"lmk_min={np.nanmin(lmk, axis=0).tolist() if np.size(lmk) else None} "
+                f"lmk_max={np.nanmax(lmk, axis=0).tolist() if np.size(lmk) else None}"
+            ) from exc
         img = self.transform(img)
         lmk = torch.from_numpy(lmk / 255.0).float()
         landmark_mask_t = torch.from_numpy(
