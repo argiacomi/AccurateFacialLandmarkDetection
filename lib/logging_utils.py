@@ -23,6 +23,7 @@ import logging
 import math
 import sys
 import typing as T
+from pprint import pprint
 
 
 class Verbosity(enum.IntEnum):
@@ -64,7 +65,9 @@ def configure_console_logging(
     _STATE["log_format"] = "json" if str(log_format).lower() == "json" else "human"
     if configure_stdlib:
         std_level = (
-            logging.DEBUG if _STATE["verbosity"] >= Verbosity.DEBUG else logging.QUIET
+            logging.DEBUG
+            if _STATE["verbosity"] >= Verbosity.DEBUG
+            else logging.CRITICAL + 1
         )
         logging.basicConfig(level=std_level, format="%(message)s", force=True)
 
@@ -183,9 +186,9 @@ def log_table(
                 widths[col] = max(widths[col], len(cell))
     print(f"[{tag}] {title}", flush=True)
     if headers:
-        print("  " + "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+        pprint("  " + "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
     for row in str_rows:
-        print("  " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+        pprint("  " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
 
 
 # --------------------------------------------------------------------------- #

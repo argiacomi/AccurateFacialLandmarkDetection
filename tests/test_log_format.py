@@ -47,9 +47,7 @@ def test_fmt_progress_reports_percentage():
 
 
 def test_fmt_mapping_mixed_types():
-    assert (
-        fmt_mapping({"loc": 0.1234, "heat": 1.842}) == "loc=0.1234 heat=1.8420"
-    )
+    assert fmt_mapping({"loc": 0.1234, "heat": 1.842}) == "loc=0.1234 heat=1.8420"
     # Integer values keep grouping; floats use precision.
     assert fmt_mapping({"head_68": 1200, "head_98": 6}) == "head_68=1,200 head_98=6"
     assert fmt_mapping({}) == "-"

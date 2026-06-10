@@ -378,7 +378,7 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         default="info",
         choices=["quiet", "info", "verbose", "debug"],
         help=(
-            "Console verbosity. 'info' shows only epoch/eval summaries and "
+            "Console verbosity. 'quiet' shows only epoch/eval summaries and "
             "errors; 'info' adds per-batch train lines; 'verbose' adds head "
             "diagnostics, sampler detail, and checkpoint writes; 'debug' adds "
             "full structures."

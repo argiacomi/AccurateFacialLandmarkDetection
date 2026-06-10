@@ -255,9 +255,7 @@ def schema_head_loss(
         if float(getattr(args, "star_loss_weight", 0.0)) > 0.0:
             if star_loss_func is None:
                 star_loss_func = STARLoss_v2(
-                    check_finite=bool(
-                        getattr(args, "star_loss_check_finite", False)
-                    ),
+                    check_finite=bool(getattr(args, "star_loss_check_finite", False)),
                     check_finite_interval=int(
                         getattr(args, "star_loss_check_finite_interval", 0)
                     ),

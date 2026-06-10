@@ -979,7 +979,11 @@ class LandmarkDataset(Dataset):
         # that would ask OpenCV to allocate huge temporary images.
         max_padded_side = 2048
         max_padded_pixels = 2048 * 2048
-        if padded_h > max_padded_side or padded_w > max_padded_side or padded_h * padded_w > max_padded_pixels:
+        if (
+            padded_h > max_padded_side
+            or padded_w > max_padded_side
+            or padded_h * padded_w > max_padded_pixels
+        ):
             raise ValueError(
                 f"unreasonable landmark padding: padding={padding:.2f}, "
                 f"padded_shape=({padded_h}, {padded_w}), "
@@ -1084,7 +1088,11 @@ class LandmarkDataset(Dataset):
         try:
             img, lmk = self.MakeLMKInsideImage(img, lmk, landmark_mask)
         except Exception as exc:
-            meta = sample.get("metadata", {}) if isinstance(sample.get("metadata"), dict) else {}
+            meta = (
+                sample.get("metadata", {})
+                if isinstance(sample.get("metadata"), dict)
+                else {}
+            )
             raise RuntimeError(
                 "MakeLMKInsideImage failed for "
                 f"item={item} "

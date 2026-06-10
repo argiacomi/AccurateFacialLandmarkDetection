@@ -714,6 +714,13 @@ def _pipeline_train_bool_arg(
     return bool(default)
 
 
+def _trainer_log_level_for_pipeline(value: str | None) -> str:
+    """Map pipeline verbosity aliases to TrainHeatmapStageFP16.py choices."""
+
+    key = str(value or "info").lower()
+    return "info" if key == "normal" else key
+
+
 def _pipeline_effective_runtime_metrics_path(
     args: argparse.Namespace, paths: PipelinePaths
 ) -> Path:
@@ -1063,6 +1070,10 @@ def _dataset_build_commands(
             str(output_dir),
             "--manifest-mode",
             "replace",
+            "--log-format",
+            str(args.log_format),
+            "--log-level",
+            _trainer_log_level_for_pipeline(args.log_level),
         ]
         if dataset in source_map:
             argv.extend(["--source-dir", str(source_map[dataset])])
@@ -1153,6 +1164,8 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
     argv.extend(["--eval-max-samples", str(args.eval_max_samples)])
     argv.extend(["--eval-slice-reports-every", str(args.eval_slice_reports_every)])
     argv.extend(["--log-every", str(args.log_every)])
+    argv.extend(["--log-format", str(args.log_format)])
+    argv.extend(["--log-level", _trainer_log_level_for_pipeline(args.log_level)])
     if args.save_last_checkpoint:
         argv.append("--save-last-checkpoint")
     else:
@@ -1784,11 +1797,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-level",
         type=str,
-        default="normal",
-        choices=["info", "normal", "verbose", "debug"],
+        default="info",
+        choices=["quiet", "info", "normal", "verbose", "debug"],
         help=(
-            "Console verbosity. 'info'/'normal' show one summary line per stage; "
-            "'debug' also prints the full StageResult JSON to the console."
+            "Console verbosity. 'quiet' shows stage summaries and errors; "
+            "'info'/'normal' also show run metadata and commands; 'verbose' is "
+            "reserved for detailed stage diagnostics; 'debug' also prints the "
+            "full StageResult JSON to the console."
         ),
     )
     return parser
@@ -1801,7 +1816,7 @@ def main(argv: list[str] | None = None) -> int:
     merged_argv = _merge_config_argv(parser, config_path, cli_argv)
     args = _normalize_runtime_args(parser.parse_args(merged_argv))
     configure_console_logging(
-        verbosity_from_name(getattr(args, "log_level", "normal")),
+        verbosity_from_name(getattr(args, "log_level", "info")),
         getattr(args, "log_format", "human"),
         configure_stdlib=False,
     )
@@ -1842,7 +1857,7 @@ def main(argv: list[str] | None = None) -> int:
         log_event(
             "pipeline",
             _stage_summary_line(result),
-            level=Verbosity.INFO,
+            level=Verbosity.QUIET,
             **result.to_json(),
         )
         if is_debug():

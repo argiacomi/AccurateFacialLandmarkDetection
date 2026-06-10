@@ -59,7 +59,15 @@ from lib.datasets.progress import track
 from lib.datasets.sources import extract_archive_to_temp
 from lib.datasets.video_frames import extract_video_frames, video_files
 from lib.io_utils import read_json, relative_or_absolute, safe_id, write_json
-from lib.logging_utils import Verbosity, fmt_count, fmt_mapping, log_event
+from lib.logging_utils import (
+    Verbosity,
+    configure_console_logging,
+    fmt_count,
+    fmt_mapping,
+    log_error,
+    log_event,
+    verbosity_from_name,
+)
 from lib.manifest.contract import (
     TRAINING_MANIFEST_CONTRACT,
     TRAINING_MANIFEST_VERSION,
@@ -5827,7 +5835,29 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-download", action="store_true")
     parser.add_argument("--no-download", action="store_true")
     parser.add_argument(
-        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+        "--log-level",
+        default="info",
+        choices=(
+            "quiet",
+            "info",
+            "verbose",
+            "debug",
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ),
+        help=(
+            "Console verbosity. Lowercase values use the shared human-first logger; "
+            "legacy stdlib names are accepted for compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--log-format",
+        default="human",
+        choices=("human", "json"),
+        help="Console output format: tagged human lines or JSONL events.",
     )
     return parser
 
@@ -5860,19 +5890,30 @@ def _manifest_completion_summary(manifest_path: Path) -> str:
     return suffix
 
 
+def _quality_log_level_name(value: str | None) -> str:
+    """Map legacy stdlib log-level names to shared console verbosity names."""
+
+    key = str(value or "info").lower()
+    if key in {"warning", "error", "critical"}:
+        return "quiet"
+    if key in {"quiet", "info", "verbose", "debug"}:
+        return key
+    return "info"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(levelname)s:%(name)s:%(message)s",
+    configure_console_logging(
+        verbosity_from_name(_quality_log_level_name(args.log_level)),
+        args.log_format,
     )
     try:
         manifest = build(args)
     except KeyboardInterrupt:
-        print("\nInterrupted by user (Ctrl-C).", file=sys.stderr)
+        log_error("manifest", "interrupted by user (Ctrl-C).")
         return 130
     except Exception as err:  # noqa: BLE001
-        logger.error("manifest build failed: %s", err)
+        log_error("manifest", f"manifest build failed: {err}")
         return 1
     log_event(
         "manifest",

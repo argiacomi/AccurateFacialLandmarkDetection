@@ -87,9 +87,7 @@ def make_grad_scaler(device: torch.device) -> torch.amp.GradScaler:
     return torch.amp.GradScaler("cuda" if enabled else "cpu", enabled=enabled)
 
 
-def select_compile_backend(
-    device: torch.device | None, backend: str = "auto"
-) -> str:
+def select_compile_backend(device: torch.device | None, backend: str = "auto") -> str:
     """Resolve the torch.compile backend for ``device``.
 
     ``"auto"`` uses Inductor on CUDA/CPU for maximum speedup. On MPS it falls

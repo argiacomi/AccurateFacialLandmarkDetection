@@ -60,7 +60,10 @@ def test_summarize_mapping_top_n_by_value_with_more():
 
 def test_summarize_mapping_as_percent():
     mapping = {"profile": 250, "anchor": 750}
-    assert summarize_mapping(mapping, top_n=2, as_percent=True) == "anchor=75.0% profile=25.0%"
+    assert (
+        summarize_mapping(mapping, top_n=2, as_percent=True)
+        == "anchor=75.0% profile=25.0%"
+    )
 
 
 def test_summarize_mapping_empty():
@@ -79,6 +82,10 @@ def test_verbosity_from_name():
     # Unknown / missing -> INFO.
     assert verbosity_from_name("nope") is Verbosity.INFO
     assert verbosity_from_name(None) is Verbosity.INFO
+
+
+def test_configure_console_logging_default_stdlib_does_not_crash():
+    configure_console_logging(Verbosity.INFO, "human")
 
 
 # --------------------------------------------------------------------------- #
@@ -172,3 +179,21 @@ def test_pipeline_stage_summary_line():
         name="train_cdvit", status="error", duration_seconds=1.0, error="boom"
     )
     assert _stage_summary_line(errored).endswith("| error boom")
+
+
+def test_pipeline_log_level_accepts_quiet_and_normal_alias():
+    from tools.run_cdvit_manifest_training_pipeline import _build_arg_parser
+
+    parser = _build_arg_parser()
+    assert parser.parse_args(["--log-level", "quiet"]).log_level == "quiet"
+    assert parser.parse_args(["--log-level", "normal"]).log_level == "normal"
+
+
+def test_pipeline_normal_log_level_maps_to_trainer_info():
+    from tools.run_cdvit_manifest_training_pipeline import (
+        _trainer_log_level_for_pipeline,
+    )
+
+    assert _trainer_log_level_for_pipeline("normal") == "info"
+    assert _trainer_log_level_for_pipeline("quiet") == "quiet"
+    assert _trainer_log_level_for_pipeline("verbose") == "verbose"
