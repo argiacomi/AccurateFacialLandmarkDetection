@@ -534,6 +534,7 @@ def _build_one_dataset_for_parallel(
     output_root: Path,
     args: argparse.Namespace,
     inner_workers: int,
+    log_status: bool = True,
 ) -> dict[str, T.Any]:
     """Build a single dataset into its own isolated output dir (mode=replace)."""
     started_at = time.time()
@@ -550,16 +551,17 @@ def _build_one_dataset_for_parallel(
     record["source_dir"] = str(source) if source else None
 
     index_label = f"{dataset_index:02d}/{dataset_total:02d}"
-    log_event(
-        "prepare",
-        f"{index_label} build {dataset} | mode replace | "
-        f"source {_short_build_path(source)}",
-        level=Verbosity.INFO,
-        dataset=dataset,
-        mode="replace",
-        source_dir=str(source) if source else None,
-        image_root=image_root,
-    )
+    if log_status:
+        log_event(
+            "prepare",
+            f"{index_label} build {dataset} | mode replace | "
+            f"source {_short_build_path(source)}",
+            level=Verbosity.INFO,
+            dataset=dataset,
+            mode="replace",
+            source_dir=str(source) if source else None,
+            image_root=image_root,
+        )
 
     # Cap the inner worker count for this build so outer * inner stays within the
     # CPU budget; only --workers is overridden, every other arg is preserved.
@@ -585,18 +587,19 @@ def _build_one_dataset_for_parallel(
         manifest_path, dataset
     )
     elapsed = time.time() - started_at
-    log_event(
-        "prepare",
-        f"{index_label} done {dataset} | samples {fmt_count(dataset_samples)} | "
-        f"skipped {fmt_count(skipped_count)} | {elapsed:.1f}s",
-        level=Verbosity.INFO,
-        dataset=dataset,
-        sample_count=dataset_samples,
-        manifest_total=total_samples,
-        skipped_count=skipped_count,
-        duration_seconds=elapsed,
-        manifest=str(manifest_path),
-    )
+    if log_status:
+        log_event(
+            "prepare",
+            f"{index_label} done {dataset} | samples {fmt_count(dataset_samples)} | "
+            f"skipped {fmt_count(skipped_count)} | {elapsed:.1f}s",
+            level=Verbosity.INFO,
+            dataset=dataset,
+            sample_count=dataset_samples,
+            manifest_total=total_samples,
+            skipped_count=skipped_count,
+            duration_seconds=elapsed,
+            manifest=str(manifest_path),
+        )
 
     record.update(
         {
@@ -694,6 +697,7 @@ def _build_datasets_parallel(
     )
 
     results: list[dict[str, T.Any]] = []
+    errors_to_log: list[tuple[str, Exception]] = []
     # One shared Progress (concurrent build rows + an overall task) when a TTY is
     # available; otherwise per-build bars are suppressed so worker threads don't
     # interleave output and the [prepare] NN/NN lines remain the indicator.
@@ -718,6 +722,7 @@ def _build_datasets_parallel(
                 output_root=output_root,
                 args=args,
                 inner_workers=inner_workers,
+                log_status=build_progress is None,
             ): dataset
             for index, dataset in enumerate(datasets, start=1)
         }
@@ -728,7 +733,7 @@ def _build_datasets_parallel(
             try:
                 results.append(future.result())
             except Exception as err:  # noqa: BLE001
-                log_error("prepare", f"{dataset}: {err}")
+                errors_to_log.append((dataset, err))
                 results.append(
                     {
                         "dataset": dataset,
@@ -737,6 +742,9 @@ def _build_datasets_parallel(
                         "error": str(err),
                     }
                 )
+
+    for dataset, err in errors_to_log:
+        log_error("prepare", f"{dataset}: {err}")
 
     # Restore the requested dataset order for a deterministic merge and summary.
     order = {dataset: index for index, dataset in enumerate(datasets)}

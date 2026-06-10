@@ -26,8 +26,10 @@ try:
         TimeElapsedColumn,
         TimeRemainingColumn,
     )
+    from rich.table import Column
 except Exception:  # noqa: BLE001
     Console = None  # type: ignore[assignment]
+    Column = None  # type: ignore[assignment]
     Progress = None  # type: ignore[assignment]
     BarColumn = None  # type: ignore[assignment]
     MofNCompleteColumn = None  # type: ignore[assignment]
@@ -200,6 +202,7 @@ class _RichTrack(T.Generic[_T]):
         if self._progress is not None:
             return
         assert Console is not None
+        assert Column is not None
         assert Progress is not None
         assert TextColumn is not None
         assert BarColumn is not None
@@ -209,8 +212,11 @@ class _RichTrack(T.Generic[_T]):
         assert MofNCompleteColumn is not None
 
         self._progress = Progress(
-            TextColumn("[bold blue]{task.description}[/bold blue]"),
-            BarColumn(bar_width=None),
+            TextColumn(
+                "[bold blue]{task.description}[/bold blue]",
+                table_column=Column(width=44, no_wrap=True, overflow="ellipsis"),
+            ),
+            BarColumn(bar_width=32),
             TaskProgressColumn(),
             _ScaledCompleteColumn(),
             TimeElapsedColumn(),
@@ -222,7 +228,7 @@ class _RichTrack(T.Generic[_T]):
                 force_terminal=self._force_terminal,
             ),
             transient=not self._leave,
-            expand=True,
+            expand=False,
         )
         self._progress.start()
         self._task_id = _add_progress_task(
@@ -384,17 +390,20 @@ def progress_group(*, transient: bool = True) -> T.Iterator[T.Any]:
         yield _SHARED_PROGRESS
         return
 
-    assert Progress is not None and Console is not None
+    assert Progress is not None and Console is not None and Column is not None
     progress = Progress(
-        TextColumn("[bold blue]{task.description}[/bold blue]"),
-        BarColumn(bar_width=None),
+        TextColumn(
+            "[bold blue]{task.description}[/bold blue]",
+            table_column=Column(width=44, no_wrap=True, overflow="ellipsis"),
+        ),
+        BarColumn(bar_width=32),
         TaskProgressColumn(),
         _ScaledCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=Console(file=sys.stderr, highlight=False, soft_wrap=True),
         transient=transient,
-        expand=True,
+        expand=False,
     )
     progress.start()
     _SHARED_PROGRESS = progress

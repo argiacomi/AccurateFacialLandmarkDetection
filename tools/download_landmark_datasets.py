@@ -579,7 +579,7 @@ def _extract_zip(path: Path, destination: Path) -> None:
         log_event(
             "extract",
             f"{path.name} | files {len(members)} | -> {destination}",
-            level=Verbosity.INFO,
+            level=Verbosity.VERBOSE,
         )
         for member in track(
             members,
@@ -614,7 +614,7 @@ def _extract_tar(path: Path, destination: Path) -> None:
         log_event(
             "extract",
             f"{path.name} | files {len(members)} | -> {destination}",
-            level=Verbosity.INFO,
+            level=Verbosity.VERBOSE,
         )
         for member in track(
             members,
@@ -651,7 +651,9 @@ def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
     if force and destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    log_event("download", f"extract {path.name} -> {destination}", level=Verbosity.INFO)
+    log_event(
+        "download", f"extract {path.name} -> {destination}", level=Verbosity.VERBOSE
+    )
     if zipfile.is_zipfile(path):
         _extract_zip(path, destination)
     elif tarfile.is_tarfile(path):
