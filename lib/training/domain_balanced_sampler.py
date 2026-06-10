@@ -197,6 +197,14 @@ class DomainBalancedBatchSampler(Sampler[list[int]]):
         self.drop_last = bool(drop_last)
         self.epoch = 0
         self._groups = self._build_groups(samples)
+        # Candidate group keys for a (bucket, dataset, schema) request depend only
+        # on self._groups, which is fixed after construction, so memoize them.
+        # Without this, _draw_index rescans every group on every drawn index
+        # (O(groups) Python work per sample, per epoch, in the main process).
+        self._candidate_cache: dict[
+            tuple[str, str | None, str | None],
+            tuple[list[tuple[str, str, str]], str],
+        ] = {}
         self.dataset_targets = _resolved_targets(
             dataset_targets,
             observed={key[1] for key in self._groups},
@@ -330,6 +338,46 @@ class DomainBalancedBatchSampler(Sampler[list[int]]):
             mix = diagnostics["actual_mix"][key]
             mix[label] = int(mix.get(label, 0)) + 1
 
+    def _candidate_keys(
+        self,
+        *,
+        bucket: str,
+        dataset: str | None,
+        schema: str | None,
+    ) -> tuple[list[tuple[str, str, str]], str]:
+        """Group keys (and fallback level) satisfying a sampling request.
+
+        Iterating self._groups yields the same keys in the same order as the
+        per-epoch ``pools`` dict because pools is rebuilt from self._groups each
+        epoch and keys are never added or removed mid-iteration. rng.choice does
+        not mutate the returned list, so caching it leaves the drawn-index
+        sequence — and thus seeded reproducibility — unchanged.
+        """
+
+        cache_key = (bucket, dataset, schema)
+        cached = self._candidate_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        candidates = [
+            key
+            for key in self._groups
+            if (bucket == "*" or key[0] == bucket)
+            and (dataset is None or dataset == "*" or key[1] == dataset)
+            and (schema is None or schema == "*" or key[2] == schema)
+        ]
+        fallback = "exact"
+        if not candidates:
+            candidates = [
+                key for key in self._groups if bucket == "*" or key[0] == bucket
+            ]
+            fallback = "exact_to_bucket"
+        if not candidates:
+            candidates = list(self._groups)
+            fallback = "bucket_to_any"
+        result = (candidates, fallback)
+        self._candidate_cache[cache_key] = result
+        return result
+
     def _draw_index(
         self,
         pools: dict[tuple[str, str, str], list[int]],
@@ -339,20 +387,9 @@ class DomainBalancedBatchSampler(Sampler[list[int]]):
         dataset: str | None,
         schema: str | None,
     ) -> tuple[int, str]:
-        candidates = [
-            key
-            for key in pools
-            if (bucket == "*" or key[0] == bucket)
-            and (dataset is None or dataset == "*" or key[1] == dataset)
-            and (schema is None or schema == "*" or key[2] == schema)
-        ]
-        fallback = "exact"
-        if not candidates:
-            candidates = [key for key in pools if bucket == "*" or key[0] == bucket]
-            fallback = "exact_to_bucket"
-        if not candidates:
-            candidates = list(pools)
-            fallback = "bucket_to_any"
+        candidates, fallback = self._candidate_keys(
+            bucket=bucket, dataset=dataset, schema=schema
+        )
         key = rng.choice(candidates)
         if not pools[key]:
             pools[key] = rng.sample(self._groups[key], len(self._groups[key]))
