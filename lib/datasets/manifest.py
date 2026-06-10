@@ -971,10 +971,18 @@ class LandmarkDataset(Dataset):
         if not np.isfinite(padding):
             raise ValueError(f"non-finite landmark padding: {padding}")
 
-        max_padding = max(int(img.shape[0]), int(img.shape[1]))
-        if padding > max_padding:
+        h, w = int(img.shape[0]), int(img.shape[1])
+        padded_h = h + 2 * int(np.ceil(padding))
+        padded_w = w + 2 * int(np.ceil(padding))
+
+        # Allow heavily cropped/translated faces, but block pathological samples
+        # that would ask OpenCV to allocate huge temporary images.
+        max_padded_side = 2048
+        max_padded_pixels = 2048 * 2048
+        if padded_h > max_padded_side or padded_w > max_padded_side or padded_h * padded_w > max_padded_pixels:
             raise ValueError(
-                f"unreasonable landmark padding: {padding:.2f} > {max_padding}; "
+                f"unreasonable landmark padding: padding={padding:.2f}, "
+                f"padded_shape=({padded_h}, {padded_w}), "
                 f"lt={lt.tolist()} rb={rb.tolist()} image_shape={img.shape[:2]}"
             )
 
