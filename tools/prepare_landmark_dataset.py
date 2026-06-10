@@ -41,7 +41,7 @@ if str(ROOT) not in sys.path:
 
 from lib.datasets.parallel import resolve_worker_count
 from lib.datasets.progress import concurrent_progress
-from lib.io_utils import read_json
+from lib.io_utils import read_json, write_json
 from lib.logging_utils import (
     Verbosity,
     configure_console_logging,
@@ -366,6 +366,121 @@ def _dataset_summary(payload: T.Mapping[str, T.Any]) -> dict[str, dict[str, T.An
         )
         entry["schemas"][schema] += 1
     return per_dataset
+
+
+def _sample_image_group_key(sample: T.Mapping[str, T.Any]) -> str | None:
+    """Return the source-image grouping key used to prevent same-file split leaks."""
+
+    dataset = str(
+        sample.get("dataset") or sample.get("source", {}).get("dataset") or ""
+    )
+    image_id = sample.get("image_id")
+    if image_id not in (None, ""):
+        return f"{dataset}|image_id|{image_id}"
+
+    metadata = sample.get("metadata")
+    if isinstance(metadata, dict):
+        image_id = metadata.get("image_id")
+        if image_id not in (None, ""):
+            return f"{dataset}|image_id|{image_id}"
+
+    image = sample.get("image")
+    if image not in (None, ""):
+        # Last-resort fallback mirrors validator behavior: if image_id is absent,
+        # the image path itself is the source-image identity.
+        return f"{dataset}|image|{image}"
+
+    return None
+
+
+def _canonical_split_for_image_group(samples: list[dict[str, T.Any]]) -> str:
+    """Choose one split for all samples from the same image/file.
+
+    Test wins so an explicitly held-out source image never gets moved into train.
+    Otherwise preserve the first concrete split in the group.
+    """
+
+    concrete: list[str] = []
+    for sample in samples:
+        split = str(sample.get("split") or "").strip().lower()
+        if split and split != "unspecified":
+            concrete.append(split)
+
+    if "test" in concrete:
+        return "test"
+    if "train" in concrete:
+        return "train"
+    return "train"
+
+
+def _clean_same_image_split_leakage(
+    manifest_path: Path,
+    payload: T.Mapping[str, T.Any] | None,
+) -> T.Mapping[str, T.Any] | None:
+    """Normalize same-image groups to one split before manifest validation.
+
+    This keeps multiple landmark sets for the same source image, but prevents
+    them from being split across train/test and tripping leakage validation.
+    """
+
+    if payload is None or not isinstance(payload, dict):
+        return payload
+
+    samples = payload.get("samples")
+    if not isinstance(samples, list):
+        return payload
+
+    groups: dict[str, list[dict[str, T.Any]]] = {}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        key = _sample_image_group_key(sample)
+        if key is not None:
+            groups.setdefault(key, []).append(sample)
+
+    changed = 0
+    affected_groups = 0
+    for group_samples in groups.values():
+        splits = {
+            str(sample.get("split") or "").strip().lower()
+            for sample in group_samples
+            if str(sample.get("split") or "").strip().lower() not in ("", "unspecified")
+        }
+        if len(splits) <= 1:
+            continue
+
+        affected_groups += 1
+        canonical = _canonical_split_for_image_group(group_samples)
+        for sample in group_samples:
+            old_split = str(sample.get("split") or "").strip().lower()
+            if old_split != canonical:
+                sample["split"] = canonical
+                metadata = sample.setdefault("metadata", {})
+                if isinstance(metadata, dict):
+                    metadata["split"] = canonical
+                    metadata["same_image_split_cleanup"] = True
+                changed += 1
+
+    if changed:
+        metadata = payload.setdefault("metadata", {})
+        if isinstance(metadata, dict):
+            metadata["same_image_split_cleanup"] = {
+                "groups": affected_groups,
+                "samples": changed,
+            }
+        write_json(manifest_path, payload)
+        log_event(
+            "prepare",
+            (
+                "cleaned same-image split leakage | "
+                f"groups {fmt_count(affected_groups)} | samples {fmt_count(changed)}"
+            ),
+            level=Verbosity.INFO,
+            same_image_groups=affected_groups,
+            samples=changed,
+        )
+
+    return payload
 
 
 def _short_build_path(value: Path | str | None, *, max_chars: int = 72) -> str:
@@ -1014,6 +1129,11 @@ def prepare(args: argparse.Namespace) -> int:
     combined_payload = (
         read_json(combined_manifest) if combined_manifest.is_file() else None
     )
+    if built_any and combined_manifest.is_file():
+        combined_payload = _clean_same_image_split_leakage(
+            combined_manifest,
+            combined_payload,
+        )
     report: dict[str, T.Any] | None = None
     if built_any and not args.skip_validate:
         report = _validate(
