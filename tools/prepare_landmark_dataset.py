@@ -291,6 +291,13 @@ def _build_dataset(
     mode: str,
     args: argparse.Namespace,
 ) -> Path:
+    # Guard before argparse: an unsupported id would otherwise hit the builder's
+    # ``--dataset`` choices, printing a usage dump and raising SystemExit (which
+    # bypasses the per-dataset error containment). Raise a clean, catchable error.
+    if dataset not in builder.SUPPORTED_DATASETS:
+        raise ValueError(
+            f"dataset {dataset!r} is not buildable by build_quality_dataset"
+        )
     arglist: list[str] = [
         "--dataset",
         dataset,
@@ -658,6 +665,35 @@ def _merge_dedupe_key(sample: dict[str, T.Any]) -> tuple[T.Any, ...]:
     )
 
 
+@contextlib.contextmanager
+def _parallel_build_progress(args: argparse.Namespace) -> T.Iterator[T.Any]:
+    """Own one live display for the concurrent build, or suppress per-build bars.
+
+    Several builds each rendering their own rich progress would clobber one
+    another in the terminal. When a TTY is available we open a single shared
+    Progress (``progress_group``): every inner ``track()`` loop becomes one row,
+    so concurrent builds render side by side without fighting over the cursor,
+    and the yielded Progress lets the caller add an overall datasets task.
+
+    When no shared display can be owned (non-TTY/captured logs, no Rich, or
+    ``--no-progress``) we instead suppress the per-build bars so worker threads
+    do not interleave progress into the logs; the ``[prepare] NN/NN build|done``
+    lines remain the indicator. The user's ``--progress`` state is restored on
+    exit so the later serial validation/crop-staging keeps its own bar.
+    """
+    from lib.datasets.progress import progress_group, set_progress_enabled
+
+    with progress_group() as group:
+        if group is not None:
+            yield group
+            return
+        set_progress_enabled(False)
+        try:
+            yield None
+        finally:
+            set_progress_enabled(bool(getattr(args, "progress", True)))
+
+
 def _build_datasets_parallel(
     datasets: list[str],
     *,
@@ -686,9 +722,16 @@ def _build_datasets_parallel(
     )
 
     results: list[dict[str, T.Any]] = []
-    with _opencv_single_threaded(), ThreadPoolExecutor(
-        max_workers=outer_workers
-    ) as executor:
+    with (
+        _parallel_build_progress(args) as build_progress,
+        _opencv_single_threaded(),
+        ThreadPoolExecutor(max_workers=outer_workers) as executor,
+    ):
+        overall_task = (
+            build_progress.add_task("Datasets", total=dataset_total)
+            if build_progress is not None
+            else None
+        )
         future_to_dataset = {
             executor.submit(
                 _build_one_dataset_for_parallel,
@@ -705,6 +748,8 @@ def _build_datasets_parallel(
         }
         for future in as_completed(future_to_dataset):
             dataset = future_to_dataset[future]
+            if overall_task is not None:
+                build_progress.advance(overall_task)
             try:
                 results.append(future.result())
             except Exception as err:  # noqa: BLE001
@@ -860,6 +905,27 @@ def prepare(args: argparse.Namespace) -> int:
         )
     else:
         registry = downloader.load_registry(data_root)
+
+    # Some requested ids (e.g. ``aflw``) are image-only base caches the builder
+    # cannot build directly -- they are downloaded above as source layers for
+    # other datasets (merl-rav over AFLW). Drop any non-buildable id from the
+    # build/merge list so it never reaches the builder's ``--dataset`` choices,
+    # where it would otherwise trigger an argparse usage dump and SystemExit.
+    non_buildable = [d for d in datasets if d not in builder.SUPPORTED_DATASETS]
+    if non_buildable:
+        log_event(
+            "prepare",
+            f"skipping non-buildable source caches | {_short_list(non_buildable)}",
+            level=Verbosity.INFO,
+            skipped_non_buildable=non_buildable,
+        )
+        datasets = [d for d in datasets if d in builder.SUPPORTED_DATASETS]
+    if not datasets:
+        log_error(
+            "prepare",
+            "no buildable datasets requested (only source-only caches were given).",
+        )
+        return 2
 
     results: list[dict[str, T.Any]] = []
     built_any = False

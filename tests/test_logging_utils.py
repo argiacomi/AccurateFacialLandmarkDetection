@@ -365,3 +365,53 @@ def test_dataset_track_disabled_under_capture():
     values = list(track([1, 2, 3], desc="Datasets", total=3))
 
     assert values == [1, 2, 3]
+
+
+def test_progress_group_noop_when_disabled(monkeypatch):
+    import lib.datasets.progress as prog
+
+    monkeypatch.setattr(prog, "_PROGRESS_ENABLED", False)
+    with prog.progress_group() as group:
+        assert group is None
+
+
+def test_track_routes_concurrent_loops_into_one_shared_progress(monkeypatch):
+    import lib.datasets.progress as prog
+
+    class FakeProgress:
+        def __init__(self):
+            self.tasks = {}
+            self._next = 0
+            self.removed = []
+
+        def add_task(self, desc, total=None):
+            tid = self._next
+            self._next += 1
+            self.tasks[tid] = {"desc": desc, "total": total, "completed": 0}
+            return tid
+
+        def advance(self, tid, n=1):
+            self.tasks[tid]["completed"] += n
+
+        def update(self, tid, **kwargs):
+            self.tasks[tid].update(kwargs)
+
+        def remove_task(self, tid):
+            self.removed.append(tid)
+
+    fake = FakeProgress()
+    monkeypatch.setattr(prog, "_PROGRESS_ENABLED", True)
+    monkeypatch.setattr(prog, "_SHARED_PROGRESS", fake)
+
+    # Two loops (as if from two worker threads) each become a distinct row in the
+    # single shared Progress instead of starting competing live displays.
+    out_a = list(prog.track([1, 2, 3], desc="Build a", total=3))
+    out_b = list(prog.track([1, 2], desc="Build b", total=2))
+
+    assert out_a == [1, 2, 3]
+    assert out_b == [1, 2]
+    assert {t["desc"] for t in fake.tasks.values()} == {"Build a", "Build b"}
+    assert fake.tasks[0]["completed"] == 3
+    assert fake.tasks[1]["completed"] == 2
+    # Each task is removed when its loop finishes so rows do not accumulate.
+    assert set(fake.removed) == {0, 1}

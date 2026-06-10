@@ -425,9 +425,7 @@ def test_prepare_dataset_workers_parallel_matches_serial(tmp_path, monkeypatch):
     def _run(out_name: str, dataset_workers: int) -> dict:
         data_root = tmp_path / f"data_{out_name}"
         output_root = tmp_path / out_name
-        _make_json_source(
-            data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2
-        )
+        _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2)
         _make_json_source(data_root / "300vw" / "extracted", dataset="300vw", count=3)
         args = _prepare_args(
             datasets=["wflw-v", "300vw"],
@@ -442,9 +440,7 @@ def test_prepare_dataset_workers_parallel_matches_serial(tmp_path, monkeypatch):
     parallel = _run("parallel", 2)
 
     assert (
-        parallel["metadata"]["sample_count"]
-        == serial["metadata"]["sample_count"]
-        == 5
+        parallel["metadata"]["sample_count"] == serial["metadata"]["sample_count"] == 5
     )
     assert (
         {s["dataset"] for s in parallel["samples"]}
@@ -494,6 +490,46 @@ def test_prepare_dataset_workers_merge_does_not_double(tmp_path, monkeypatch):
     # Repeated parallel merge must also stay stable.
     assert prepare.prepare(_args("merge", 2)) == 0
     assert _sample_count() == 5
+
+
+def test_build_dataset_rejects_non_buildable_id():
+    # aflw is an image-only base cache, not a builder --dataset choice. The guard
+    # must raise a clean ValueError instead of letting argparse SystemExit.
+    with pytest.raises(ValueError, match="not buildable"):
+        prepare._build_dataset(
+            "aflw",
+            None,
+            None,
+            Path("/tmp/unused"),
+            mode="replace",
+            args=argparse.Namespace(),
+        )
+
+
+def test_prepare_skips_non_buildable_source_cache(tmp_path, capsys):
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+    _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2)
+
+    # aflw is requested alongside a buildable dataset; it must be skipped (not fed
+    # to the builder) while wflw-v still builds and the run succeeds.
+    args = _prepare_args(
+        datasets=["aflw", "wflw-v"], data_root=data_root, output_root=output_root
+    )
+    assert prepare.prepare(args) == 0
+
+    payload = json.loads((output_root / "manifest.json").read_text("utf-8"))
+    assert {s["dataset"] for s in payload["samples"]} == {"wflw-v"}
+    assert "skipping non-buildable source caches" in capsys.readouterr().out
+
+
+def test_prepare_only_non_buildable_returns_2(tmp_path):
+    args = _prepare_args(
+        datasets=["aflw"],
+        data_root=tmp_path / "data",
+        output_root=tmp_path / "out",
+    )
+    assert prepare.prepare(args) == 2
 
 
 def test_prepare_multi_dataset_merge(tmp_path, capsys):

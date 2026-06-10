@@ -7,6 +7,7 @@ logs/non-TTY output, and preserves the old tqdm-like behavior where
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import typing as T
 
@@ -16,7 +17,9 @@ try:
     from rich.console import Console
     from rich.progress import (
         BarColumn,
+        MofNCompleteColumn,
         Progress,
+        TaskProgressColumn,
         TextColumn,
         TimeElapsedColumn,
         TimeRemainingColumn,
@@ -25,12 +28,19 @@ except Exception:  # noqa: BLE001
     Console = None  # type: ignore[assignment]
     Progress = None  # type: ignore[assignment]
     BarColumn = None  # type: ignore[assignment]
+    MofNCompleteColumn = None  # type: ignore[assignment]
+    TaskProgressColumn = None  # type: ignore[assignment]
     TextColumn = None  # type: ignore[assignment]
     TimeElapsedColumn = None  # type: ignore[assignment]
     TimeRemainingColumn = None  # type: ignore[assignment]
 
 _T = T.TypeVar("_T")
 _PROGRESS_ENABLED = True
+# When a parent owns a single shared Progress (see ``progress_group``), every
+# track() call adds a task (row) to it instead of spawning its own live display.
+# This is what lets concurrent build loops render side by side without fighting
+# over the terminal. ``None`` means "no group active" (the normal serial path).
+_SHARED_PROGRESS: T.Any = None
 
 
 def set_progress_enabled(enabled: bool) -> None:
@@ -198,6 +208,118 @@ class _RichTrack(T.Generic[_T]):
             self._task_id = None
 
 
+class _SharedTaskTrack(T.Generic[_T]):
+    """One task (row) inside a parent-owned shared Progress.
+
+    Adds its task on first use and removes it on close so concurrent loops come
+    and go as separate rows in a single live display. All Rich task operations
+    are guarded by the Progress' internal lock, so updates from worker threads
+    are safe without an explicit callback or queue.
+    """
+
+    def __init__(
+        self,
+        iterable: T.Iterable[_T] | None,
+        *,
+        desc: str,
+        total: int | None,
+        progress: T.Any,
+    ) -> None:
+        self._iterable = iterable
+        self._desc = desc
+        self.total = total
+        self.n: int | float = 0
+        self._progress = progress
+        self._task_id: T.Any | None = None
+
+    def _start(self) -> None:
+        if self._task_id is None:
+            self._task_id = self._progress.add_task(self._desc, total=self.total)
+
+    def __iter__(self) -> T.Iterator[_T]:
+        if self._iterable is None:
+            return iter(())
+        self._start()
+
+        def _generator() -> T.Iterator[_T]:
+            try:
+                for item in self._iterable or ():
+                    yield item
+                    self.update(1)
+            finally:
+                self.close()
+
+        return _generator()
+
+    def __enter__(self) -> "_SharedTaskTrack[_T]":
+        self._start()
+        return self
+
+    def __exit__(self, *_exc: T.Any) -> None:
+        self.close()
+
+    def set_description(self, desc: str) -> None:
+        self._desc = desc
+        if self._task_id is not None:
+            with contextlib.suppress(Exception):
+                self._progress.update(self._task_id, description=desc)
+
+    def update(self, n: int | float = 1) -> None:
+        self.n += n
+        if self._task_id is not None:
+            with contextlib.suppress(Exception):
+                self._progress.advance(self._task_id, n)
+
+    def close(self) -> None:
+        if self._task_id is not None:
+            with contextlib.suppress(Exception):
+                self._progress.remove_task(self._task_id)
+            self._task_id = None
+
+
+@contextlib.contextmanager
+def progress_group(*, transient: bool = True) -> T.Iterator[T.Any]:
+    """Own a single Rich Progress for a block of concurrent work.
+
+    While active, every ``track()`` call adds a task (row) to this one Progress
+    instead of creating its own live display, so concurrent loops -- e.g. several
+    dataset builds running on a thread pool -- render as separate rows without
+    fighting over the terminal cursor. Yields the Progress (so the caller can add
+    its own parent task) or ``None`` when no shared display can be owned
+    (progress disabled, Rich unavailable, non-TTY, or already inside a group); in
+    that case ``track()`` keeps its normal per-call behavior.
+    """
+    global _SHARED_PROGRESS
+    if (
+        not _PROGRESS_ENABLED
+        or _SHARED_PROGRESS is not None
+        or not rich_available()
+        or not _stderr_is_tty()
+    ):
+        yield _SHARED_PROGRESS
+        return
+
+    assert Progress is not None and Console is not None
+    progress = Progress(
+        TextColumn("[bold blue]{task.description}[/bold blue]"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=Console(file=sys.stderr, highlight=False, soft_wrap=True),
+        transient=transient,
+        expand=True,
+    )
+    progress.start()
+    _SHARED_PROGRESS = progress
+    try:
+        yield progress
+    finally:
+        _SHARED_PROGRESS = None
+        progress.stop()
+
+
 def track(
     iterable: T.Iterable[_T] | None = None,
     *,
@@ -221,6 +343,14 @@ def track(
 
     if disabled or not _PROGRESS_ENABLED:
         return _PlainTrack(iterable, desc=desc, total=total)
+
+    # A parent owns the live display: add a row to it rather than starting a
+    # competing one. This is the concurrent-build path; it takes priority over
+    # the per-call TTY/force heuristics below.
+    if _SHARED_PROGRESS is not None:
+        return _SharedTaskTrack(
+            iterable, desc=desc, total=total, progress=_SHARED_PROGRESS
+        )
 
     if not forced and not stderr_is_tty:
         return _PlainTrack(iterable, desc=desc, total=total)

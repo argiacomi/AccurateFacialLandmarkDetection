@@ -262,7 +262,9 @@ def stage_manifest(args: argparse.Namespace) -> int:
     print(f"crops dir       : {stats['images_root']}")
     print(f"staged crops    : {staged} (unique native images)")
     print(f"reused crops    : {reused} (samples sharing a native image)")
-    print(f"skipped 256x256 : {stats['skipped_already_256']} (native path already cheap)")
+    print(
+        f"skipped 256x256 : {stats['skipped_already_256']} (native path already cheap)"
+    )
     print(f"skipped no image: {stats['skipped_no_image']}")
     print(f"bit-identity OK : {staged + reused}/{staged + reused + len(mismatches)}")
     if mismatches:

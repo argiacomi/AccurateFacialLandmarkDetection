@@ -16,7 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from tqdm import tqdm
+from lib.datasets.progress import track
 
 logger = logging.getLogger(__name__)
 DEFAULT_CACHE_DIR = Path(".fs_cache/landmark_quality")
@@ -131,6 +131,12 @@ def _progress_enabled() -> bool:
     return logger.isEnabledFor(logging.INFO)
 
 
+def _progress_disable() -> bool | None:
+    # None lets track() auto-detect TTY and the global progress flag; True forces
+    # progress off when the logger is below INFO, matching the old tqdm gating.
+    return None if _progress_enabled() else True
+
+
 def _default_source_value(spec: DatasetSourceSpec, key: str) -> str | None:
     value = DEFAULT_DOWNLOAD_SOURCES.get(spec.dataset, {}).get(key)
     return str(value) if value else None
@@ -199,13 +205,12 @@ def _download_with_progress(
 ) -> None:
     length = response.headers.get("Content-Length")
     total = int(length) if length and length.isdigit() else None
-    with tqdm(
+    with track(
         total=total,
         desc=f"Download {label}",
         unit="B",
         unit_scale=True,
-        unit_divisor=1024,
-        disable=not _progress_enabled(),
+        disable=_progress_disable(),
     ) as bar:
         while True:
             chunk = response.read(1024 * 1024)
@@ -279,11 +284,11 @@ def safe_zip_extractall(
         target = (dest / member.filename).resolve()
         if not _is_relative_to(target, dest):
             raise ValueError(f"Blocked zip path traversal member: {member.filename}")
-    for member in tqdm(
+    for member in track(
         members,
         desc=f"Extract {dest.name}",
         unit="file",
-        disable=not _progress_enabled(),
+        disable=_progress_disable(),
     ):
         zf.extract(member, dest)
 
@@ -300,11 +305,11 @@ def safe_tar_extractall(
         target = (dest / member.name).resolve()
         if not _is_relative_to(target, dest):
             raise ValueError(f"Blocked tar path traversal member: {member.name}")
-    for member in tqdm(
+    for member in track(
         members,
         desc=f"Extract {dest.name}",
         unit="file",
-        disable=not _progress_enabled(),
+        disable=_progress_disable(),
     ):
         try:
             tf.extract(member, dest, filter="data")
