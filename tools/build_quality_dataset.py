@@ -55,7 +55,39 @@ from lib.core.schema import (
     to_canonical_68,
 )
 from lib.datasets.parallel import parallel_map
-from lib.datasets.progress import track
+from lib.datasets.progress import track as _dataset_progress_track
+
+
+def track(
+    iterable=None,
+    *,
+    desc: str,
+    total=None,
+    unit: str = "it",
+    unit_scale: bool = False,
+    leave: bool = False,
+    disable=None,
+):
+    """Force visible progress for dataset build loops.
+
+    Builder functions know their sample counts. The prepare orchestrator does
+    not, so build progress belongs here rather than in prepare_landmark_dataset.
+    """
+
+    if str(desc).startswith("Build "):
+        leave = True
+        disable = False
+    return _dataset_progress_track(
+        iterable,
+        desc=desc,
+        total=total,
+        unit=unit,
+        unit_scale=unit_scale,
+        leave=leave,
+        disable=disable,
+    )
+
+
 from lib.datasets.sources import extract_archive_to_temp
 from lib.datasets.video_frames import extract_video_frames, video_files
 from lib.io_utils import read_json, relative_or_absolute, safe_id, write_json

@@ -9,6 +9,7 @@ import torch
 
 from lib.core.manifest_aliases import is_schema_aware_manifest_dataset
 from lib.evaluation.split_safe import validate_no_train_test_leakage
+from lib.logging_utils import Verbosity, log_event
 from lib.training.data import (
     build_dataset,
     legacy_domain_balanced_collate,
@@ -21,6 +22,7 @@ from lib.training.domain_balanced_sampler import (
     parse_target_spec_for_kind,
 )
 from lib.training.evaluator import eval_collate
+from lib.logging_utils import summarize_mapping
 from lib.training.runtime import dataloader_kwargs, maybe_limit_eval_dataset
 
 
@@ -33,6 +35,34 @@ class TrainerDataLoaders:
     train_dataloader: torch.utils.data.DataLoader
     test_dataloader: torch.utils.data.DataLoader
     full_test_dataloader: torch.utils.data.DataLoader
+
+
+def _sampler_targets_summary(targets: T.Mapping[str, T.Any]) -> str:
+    bucket = targets.get("bucket", {}) if isinstance(targets, dict) else {}
+    dataset = targets.get("dataset", {}) if isinstance(targets, dict) else {}
+    schema = targets.get("schema", {}) if isinstance(targets, dict) else {}
+    return (
+        "domain-balanced | "
+        f"buckets {len(bucket)} | datasets {len(dataset)} | schemas {len(schema)}"
+    )
+
+
+def _sampler_targets_summary(targets: dict[str, T.Any]) -> str:
+    """Compact one-line summary of resolved sampler targets.
+
+    Full resolved target dictionaries are useful for debugging, but too wide for
+    normal console startup logs.
+    """
+
+    bucket = targets.get("bucket", {}) if isinstance(targets, dict) else {}
+    dataset = targets.get("dataset", {}) if isinstance(targets, dict) else {}
+    schema = targets.get("schema", {}) if isinstance(targets, dict) else {}
+    parts = [
+        f"bucket {summarize_mapping(bucket, top_n=4, as_percent=True)}",
+        f"dataset {summarize_mapping(dataset, top_n=4)}",
+        f"schema {summarize_mapping(schema, top_n=4)}",
+    ]
+    return " | ".join(parts)
 
 
 def build_training_loaders(
@@ -111,9 +141,12 @@ def build_training_loaders(
             ),
         )
         if rank == 0:
-            print(
-                f"domain-balanced sampler targets: {train_sampler.resolved_targets()}",
-                flush=True,
+            resolved_targets = train_sampler.resolved_targets()
+            log_event(
+                "sampler",
+                f"targets | {_sampler_targets_summary(resolved_targets)}",
+                level=Verbosity.INFO,
+                resolved_targets=resolved_targets,
             )
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,

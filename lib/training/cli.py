@@ -78,10 +78,22 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--eval-progress",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Show tqdm progress bars during evaluation.",
+        default=False,
+        help=(
+            "Show an interactive Rich progress bar during evaluation. "
+            "Disabled by default to keep logs compact."
+        ),
     )
     parser.add_argument("--log-every", type=int, default=20)
+    parser.add_argument(
+        "--train-progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Show a Rich live training progress bar when running interactively. "
+            "Non-TTY logs and --log-format json fall back to periodic train lines."
+        ),
+    )
     parser.add_argument(
         "--save-last-checkpoint",
         action=argparse.BooleanOptionalAction,
@@ -379,9 +391,9 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         choices=["quiet", "info", "verbose", "debug"],
         help=(
             "Console verbosity. 'quiet' shows only epoch/eval summaries and "
-            "errors; 'info' adds per-batch train lines; 'verbose' adds head "
-            "diagnostics, sampler detail, and checkpoint writes; 'debug' adds "
-            "full structures."
+            "errors; 'info' shows the Rich train progress bar or compact periodic "
+            "train lines; 'verbose' adds head diagnostics, sampler detail, and "
+            "checkpoint writes; 'debug' adds full structures."
         ),
     )
     return parser

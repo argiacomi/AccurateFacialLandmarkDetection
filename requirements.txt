@@ -17,6 +17,7 @@ scipy>=1.10
 # Dataset download/prep utilities
 gdown>=5.0
 tqdm>=4.65
+rich>=13.7
 
 # Hyperparameter tuning
 optuna>=3.6

@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import logging
 import math
 import re
 import sys
@@ -32,8 +31,14 @@ from lib.manifest.contract import (
     TRAINING_MANIFEST_VERSION,
     manifest_summary,
 )
+from lib.logging_utils import (
+    configure_console_logging,
+    fmt_count,
+    fmt_mapping,
+    log_event,
+    verbosity_from_name,
+)
 
-logger = logging.getLogger(__name__)
 
 DATASET_DEFAULT_BUCKET: dict[str, str] = {
     "cofw68": "occlusion",
@@ -540,13 +545,29 @@ def build_hard_negative_manifest(
             json.dumps(audit, indent=2, sort_keys=True), encoding="utf-8"
         )
 
-    logger.info(
-        "Wrote %d hard-negative samples to %s (%s)",
-        total_selected,
-        output_dir / "manifest.json",
-        ", ".join(f"{bucket}={counts[bucket]}" for bucket in BUCKET_ORDER),
+    log_event(
+        "manifest",
+        (
+            f"wrote {output_dir / 'manifest.json'} | "
+            f"samples {fmt_count(total_selected)} | "
+            f"mix {fmt_mapping(counts, keys=BUCKET_ORDER)}"
+        ),
+        sample_count=total_selected,
+        manifest=str(output_dir / "manifest.json"),
+        counts=counts,
     )
     return mix_report
+
+
+def _hard_negative_log_level_name(value: str | None) -> str:
+    key = str(value or "info").lower()
+    if key == "normal":
+        return "info"
+    if key in {"warning", "error", "critical"}:
+        return "quiet"
+    if key in {"quiet", "info", "verbose", "debug"}:
+        return key
+    return "info"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -615,14 +636,34 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Drop MERL-RAV samples whose imageNNNNN id appears in this file.",
     )
-    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=(
+            "quiet",
+            "info",
+            "normal",
+            "verbose",
+            "debug",
+            "warning",
+            "error",
+            "critical",
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ),
+    )
+    parser.add_argument("--log-format", default="human", choices=("human", "json"))
     return parser
 
 
 def main(argv: T.Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO)
+    configure_console_logging(
+        verbosity_from_name(_hard_negative_log_level_name(args.log_level)),
+        args.log_format,
     )
 
     manifests: dict[str, Path] = {}

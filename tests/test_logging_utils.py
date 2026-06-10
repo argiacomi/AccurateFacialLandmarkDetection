@@ -159,6 +159,77 @@ def test_sampler_summary_line_is_compact():
     assert "{" not in line
 
 
+def test_batch_mix_summary_line_is_compact():
+    from lib.training.heatmap_stage import _batch_mix_summary_line
+
+    mix = {
+        "bucket": {
+            "occlusion": 10,
+            "anchor": 9,
+            "blur": 1,
+            "semifrontal": 1,
+            "profile": 9,
+            "expression": 2,
+        },
+        "dataset": {
+            "cofw68": 6,
+            "aflw2000": 8,
+            "wflw": 3,
+            "multipie": 5,
+            "merl_rav": 5,
+            "cofw29": 1,
+            "menpo2d": 2,
+            "w300": 2,
+        },
+        "schema": {"2d_68": 22, "2d_98": 3, "2d_39": 6, "2d_29": 1},
+    }
+
+    line = _batch_mix_summary_line(mix)
+
+    assert "bucket occlusion=31.2%" in line
+    assert "schema 2d_68=68.8%" in line
+    assert "dataset aflw2000=25.0%" in line
+    assert "+2 more" in line or "+5 more" in line
+    assert "{" not in line
+    assert "}" not in line
+
+
+def test_sampler_targets_summary_is_compact():
+    from lib.training.loaders import _sampler_targets_summary
+
+    targets = {
+        "bucket": {
+            "anchor": 0.25,
+            "occlusion": 0.25,
+            "profile": 0.25,
+            "profile_occlusion": 0.25,
+        },
+        "dataset": {
+            "300vw": 1.0,
+            "aflw2000": 1.0,
+            "cofw29": 1.0,
+            "cofw68": 1.0,
+            "fll2": 1.0,
+        },
+        "schema": {
+            "2d_106": 1.0,
+            "2d_194": 1.0,
+            "2d_29": 1.0,
+            "2d_39": 1.0,
+            "2d_68": 1.0,
+        },
+    }
+
+    line = _sampler_targets_summary(targets)
+
+    assert line.startswith("bucket ")
+    assert "dataset " in line
+    assert "schema " in line
+    assert "+1 more" in line
+    assert "{" not in line
+    assert "}" not in line
+
+
 def test_pipeline_stage_summary_line():
     from tools.run_cdvit_manifest_training_pipeline import (
         StageResult,
@@ -245,3 +316,52 @@ def test_production_manifest_parser_accepts_shared_logging_flags():
 
     assert args.log_format == "json"
     assert args.log_level == "quiet"
+
+
+def test_hard_negative_parser_accepts_shared_logging_flags():
+    from tools.build_hard_negative_manifest import _parser
+
+    args = _parser().parse_args(
+        [
+            "--w300-manifest",
+            "manifest.json",
+            "--output-dir",
+            "out",
+            "--log-format",
+            "json",
+            "--log-level",
+            "quiet",
+        ]
+    )
+
+    assert args.log_format == "json"
+    assert args.log_level == "quiet"
+
+
+def test_prepare_parser_accepts_shared_logging_flags():
+    from tools.prepare_landmark_dataset import _parser
+
+    args = _parser().parse_args(
+        [
+            "--datasets",
+            "wflw",
+            "--log-format",
+            "json",
+            "--log-level",
+            "verbose",
+            "--no-progress",
+        ]
+    )
+
+    assert args.log_format == "json"
+    assert args.log_level == "verbose"
+    assert args.progress is False
+
+
+def test_dataset_track_disabled_under_capture():
+    from lib.datasets.progress import set_progress_enabled, track
+
+    set_progress_enabled(True)
+    values = list(track([1, 2, 3], desc="Datasets", total=3))
+
+    assert values == [1, 2, 3]

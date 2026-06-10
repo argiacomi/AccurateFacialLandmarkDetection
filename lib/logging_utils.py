@@ -24,6 +24,25 @@ import math
 import sys
 import typing as T
 
+try:
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+    from rich.text import Text
+except Exception:  # noqa: BLE001
+    Console = None  # type: ignore[assignment]
+    Progress = None  # type: ignore[assignment]
+    BarColumn = None  # type: ignore[assignment]
+    TextColumn = None  # type: ignore[assignment]
+    TimeElapsedColumn = None  # type: ignore[assignment]
+    TimeRemainingColumn = None  # type: ignore[assignment]
+    Text = None  # type: ignore[assignment]
+
 
 class Verbosity(enum.IntEnum):
     """Console detail tiers, ordered from terse (QUIET) to noisy (DEBUG).
@@ -42,6 +61,47 @@ _STATE: dict[str, T.Any] = {
     "verbosity": Verbosity.INFO,
     "log_format": "human",
 }
+
+
+_TAG_STYLES = {
+    "data": "bold blue",
+    "train": "bold cyan",
+    "epoch": "bold green",
+    "eval": "bold magenta",
+    "sampler": "bold yellow",
+    "pipeline": "bold blue",
+    "manifest": "bold green",
+    "error": "bold red",
+}
+
+
+def rich_available() -> bool:
+    return Console is not None and Progress is not None
+
+
+def _stream_is_tty(stream: T.TextIO) -> bool:
+    try:
+        return bool(stream.isatty())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _rich_console(stream: T.TextIO | None = None) -> T.Any | None:
+    if _STATE["log_format"] != "human" or not rich_available():
+        return None
+    out = stream if stream is not None else sys.stdout
+    if not _stream_is_tty(out):
+        return None
+    return Console(file=out, highlight=False, soft_wrap=True)
+
+
+def _rich_event_text(tag: str, message: str) -> T.Any:
+    text = Text()
+    text.append(f"[{tag}]", style=_TAG_STYLES.get(tag, "bold cyan"))
+    if message:
+        text.append(" ")
+        text.append(str(message))
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -141,14 +201,147 @@ def log_event(
         payload = {"tag": tag, "message": message, **fields}
         print(json.dumps(payload, sort_keys=True, default=str), file=out, flush=True)
     else:
-        text = f"[{tag}] {message}" if message else f"[{tag}]"
-        print(text, file=out, flush=True)
+        console = _rich_console(out)
+        if console is not None:
+            console.print(_rich_event_text(tag, message))
+        else:
+            text = f"[{tag}] {message}" if message else f"[{tag}]"
+            print(text, file=out, flush=True)
 
 
 def log_error(tag: str, message: str, **fields: T.Any) -> None:
     """Emit an error line. Always shown (even under ``--quiet``) and goes to stderr."""
 
     log_event(tag, message, level=Verbosity.QUIET, stream=sys.stderr, **fields)
+
+
+def start_training_progress(
+    total: int,
+    *,
+    description: str,
+    enabled: bool = True,
+    level: Verbosity | int = Verbosity.INFO,
+) -> tuple[T.Any, T.Any] | None:
+    """Start a Rich progress bar for interactive training output.
+
+    Returns ``None`` when Rich is unavailable, JSON mode is active, output is not a
+    TTY, verbosity suppresses train output, or the caller disables progress.
+    """
+
+    if not enabled or not is_enabled(level):
+        return None
+    console = _rich_console(sys.stderr)
+    if console is None:
+        return None
+
+    progress = Progress(
+        TextColumn("[bold cyan]{task.description}[/bold cyan]"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.percentage:>5.1f}%"),
+        TextColumn("loss {task.fields[loss]}"),
+        TextColumn("loc {task.fields[loc]}"),
+        TextColumn("heat {task.fields[heat]}"),
+        TextColumn("aux {task.fields[aux]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+        expand=True,
+    )
+    progress.start()
+    task_id = progress.add_task(
+        description,
+        total=max(int(total), 1),
+        loss="-",
+        loc="-",
+        heat="-",
+        aux="-",
+    )
+    return progress, task_id
+
+
+def _progress_scalar(value: T.Any) -> str:
+    if value is None or _is_zero(value):
+        return "-"
+    text = fmt_num(value, 3)
+    return text[1:] if text.startswith("0.") else text
+
+
+def update_training_progress(
+    state: tuple[T.Any, T.Any] | None,
+    *,
+    completed: int,
+    loss: T.Any | None = None,
+    components: T.Mapping[str, T.Any] | None = None,
+) -> None:
+    if state is None:
+        return
+    progress, task_id = state
+    update: dict[str, T.Any] = {"completed": int(completed)}
+    if loss is not None:
+        update["loss"] = _progress_scalar(loss)
+    if components is not None:
+        update["loc"] = _progress_scalar(components.get("loc"))
+        update["heat"] = _progress_scalar(components.get("heat"))
+        update["aux"] = _progress_scalar(components.get("aux"))
+    progress.update(task_id, **update)
+
+
+def stop_training_progress(state: tuple[T.Any, T.Any] | None) -> None:
+    if state is None:
+        return
+    progress, _task_id = state
+    progress.stop()
+
+
+def iterate_with_progress(
+    iterable: T.Iterable[T.Any],
+    *,
+    total: int | None = None,
+    description: str = "work",
+    enabled: bool = True,
+    level: Verbosity | int = Verbosity.INFO,
+) -> T.Iterator[T.Any]:
+    """Yield items with a Rich progress bar when interactive.
+
+    Falls back to the plain iterable in JSON mode, non-TTY logs, missing Rich, or
+    suppressed verbosity. This intentionally avoids raw tqdm output.
+    """
+
+    if not enabled or not is_enabled(level):
+        yield from iterable
+        return
+
+    console = _rich_console(sys.stderr)
+    if console is None:
+        yield from iterable
+        return
+
+    if total is None:
+        try:
+            total = len(iterable)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            total = None
+
+    progress = Progress(
+        TextColumn("[bold magenta]{task.description}[/bold magenta]"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.percentage:>5.1f}%" if total else ""),
+        TextColumn("{task.completed}/{task.total}" if total else "{task.completed}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+        expand=True,
+    )
+    progress.start()
+    task_id = progress.add_task(description, total=total)
+    try:
+        for item in iterable:
+            yield item
+            progress.advance(task_id)
+    finally:
+        progress.stop()
 
 
 def log_table(
@@ -371,9 +564,14 @@ __all__ = [
     "is_debug",
     "is_enabled",
     "is_verbose",
+    "iterate_with_progress",
     "log_error",
     "log_event",
     "log_table",
+    "rich_available",
+    "start_training_progress",
+    "stop_training_progress",
     "summarize_mapping",
+    "update_training_progress",
     "verbosity_from_name",
 ]

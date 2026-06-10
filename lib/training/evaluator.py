@@ -5,7 +5,6 @@ import os
 import numpy as np
 import torch
 from torch.utils.data._utils.collate import default_collate
-from tqdm import tqdm
 
 from lib.core.schema import head_name_for_schema
 from lib.evaluation.split_safe import (
@@ -13,7 +12,13 @@ from lib.evaluation.split_safe import (
     metrics_for_nmes,
     record_for_sample,
 )
-from lib.logging_utils import Verbosity, fmt_count, fmt_num, log_event
+from lib.logging_utils import (
+    Verbosity,
+    fmt_count,
+    fmt_num,
+    iterate_with_progress,
+    log_event,
+)
 
 
 def eval_collate(batch):
@@ -286,7 +291,12 @@ def evaluate_landmark_model(
     records = []
     nme_values = []
 
-    iterator = tqdm(test_dataloader) if show_progress else test_dataloader
+    iterator = iterate_with_progress(
+        test_dataloader,
+        total=len(test_dataloader) if hasattr(test_dataloader, "__len__") else None,
+        description="eval",
+        enabled=show_progress,
+    )
     for batch_idx, batch in enumerate(iterator):
         if isinstance(batch, dict) and "heads" in batch:
             data = batch["image"].to(device, non_blocking=non_blocking)

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import typing as T
 from collections import Counter
 from pathlib import Path
@@ -34,8 +35,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.datasets.progress import track
 from lib.io_utils import read_json
+from lib.logging_utils import (
+    Verbosity,
+    configure_console_logging,
+    fmt_count,
+    log_error,
+    log_event,
+    log_table,
+    verbosity_from_name,
+)
 from lib.manifest.validator import validate_training_manifest
 from tools import build_quality_dataset as builder
 from tools import download_landmark_datasets as downloader
@@ -45,6 +54,23 @@ VIDEO_DATASETS = frozenset({"300vw", "wflw-v"})
 DATASETS_NEEDING_300W_IMAGES = frozenset({"jd-landmark", "helen"})
 # Datasets that are annotation layers over the native AFLW image cache.
 DATASETS_NEEDING_AFLW_IMAGES = frozenset({"merl-rav"})
+
+
+def _prepare_log_level_name(value: str | None) -> str:
+    key = str(value or "info").lower()
+    if key == "normal":
+        return "info"
+    if key in {"warning", "error", "critical"}:
+        return "quiet"
+    if key in {"quiet", "info", "verbose", "debug"}:
+        return key
+    return "info"
+
+
+def _short_list(values: T.Sequence[str], *, limit: int = 8) -> str:
+    shown = list(values[:limit])
+    suffix = f" +{len(values) - limit} more" if len(values) > limit else ""
+    return ", ".join(shown) + suffix
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +300,11 @@ def _build_dataset(
     if args.allow_overlap:
         arglist += ["--allow-overlap"]
     arglist += ["--workers", str(args.workers)]
+    arglist += ["--log-format", str(getattr(args, "log_format", "human"))]
+    arglist += [
+        "--log-level",
+        _prepare_log_level_name(getattr(args, "log_level", "info")),
+    ]
     if dataset in VIDEO_DATASETS:
         arglist += ["--frame-stride", str(args.frame_stride)]
         if args.max_frames_per_video is not None:
@@ -323,15 +354,76 @@ def _dataset_summary(payload: T.Mapping[str, T.Any]) -> dict[str, dict[str, T.An
     return per_dataset
 
 
+def _short_build_path(value: Path | str | None, *, max_chars: int = 72) -> str:
+    if value is None:
+        return "-"
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    parts = Path(text).parts
+    if len(parts) >= 3:
+        shortened = ".../" + "/".join(parts[-3:])
+        if len(shortened) <= max_chars:
+            return shortened
+    return "..." + text[-max_chars + 3 :]
+
+
+def _manifest_dataset_build_counts(
+    manifest_path: Path, dataset: str
+) -> tuple[int, int, int]:
+    """Return per-dataset sample count, total manifest samples, skipped count."""
+
+    try:
+        payload = read_json(manifest_path)
+    except Exception:  # noqa: BLE001
+        return 0, 0, 0
+
+    samples = payload.get("samples") if isinstance(payload, dict) else None
+    if not isinstance(samples, list):
+        return 0, 0, 0
+
+    dataset_count = 0
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        sample_dataset = str(
+            sample.get("dataset") or sample.get("source", {}).get("dataset") or ""
+        )
+        if sample_dataset == dataset:
+            dataset_count += 1
+
+    metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+    skipped = 0
+    if isinstance(metadata, dict):
+        try:
+            skipped = int(metadata.get("skipped_count", 0))
+        except (TypeError, ValueError):
+            skipped = 0
+
+    return dataset_count, len(samples), skipped
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
+
+def _ensure_prepare_logging_defaults(args) -> None:
+    """Keep prepare(args) compatible with hand-built argparse.Namespace tests."""
+
+    if not hasattr(args, "log_format"):
+        args.log_format = "human"
+    if not hasattr(args, "log_level"):
+        args.log_level = "info"
+    if not hasattr(args, "progress"):
+        args.progress = True
+
+
 def prepare(args: argparse.Namespace) -> int:
+    _ensure_prepare_logging_defaults(args)
     datasets = downloader.normalize_datasets(args.datasets)
     if not datasets:
-        print(
-            "No datasets requested. Pass --datasets <id> [<id> ...].", file=sys.stderr
-        )
+        log_error("prepare", "no datasets requested. Pass --datasets <id> [<id> ...].")
         return 2
     data_root = Path(args.data_root)
     output_root = Path(args.output_root)
@@ -345,7 +437,10 @@ def prepare(args: argparse.Namespace) -> int:
         if any(d in DATASETS_NEEDING_AFLW_IMAGES for d in datasets):
             download_target_names.append("aflw")
         download_targets = downloader.normalize_datasets(download_target_names)
-        print(f"Downloading sources for: {', '.join(download_targets)}")
+        log_event(
+            "download",
+            f"sources {len(download_targets)} | {_short_list(download_targets)}",
+        )
         _, registry = downloader.download_datasets(
             download_targets,
             output_root=data_root,
@@ -363,12 +458,15 @@ def prepare(args: argparse.Namespace) -> int:
     # source cannot abort the rest; a single-dataset run has nothing else to build,
     # so it fails fast unless --keep-going is requested explicitly.
     keep_going = args.keep_going or len(datasets) > 1
-    dataset_bar = track(datasets, desc="Prepare", total=len(datasets), unit="dataset")
-    for dataset in dataset_bar:
-        dataset_bar.set_description(f"Prepare {dataset}")
+    dataset_total = len(datasets)
+    dataset_iter = datasets
+    for dataset_index, dataset in enumerate(dataset_iter, start=1):
         # First built dataset honors the requested mode; later ones merge into it.
         mode = args.manifest_mode if not built_any else "merge"
         record: dict[str, T.Any] = {"dataset": dataset, "source_dir": None}
+        started_at = time.time()
+        index_label = f"{dataset_index:02d}/{dataset_total:02d}"
+
         try:
             # Resolution/staging runs inside the try so a single dataset's missing
             # source or staging error is contained rather than aborting the run.
@@ -376,16 +474,55 @@ def prepare(args: argparse.Namespace) -> int:
                 dataset, registry, data_root, args.image_root
             )
             record["source_dir"] = str(source) if source else None
+
+            log_event(
+                "prepare",
+                (
+                    f"{index_label} build {dataset} | mode {mode} | "
+                    f"source {_short_build_path(source)}"
+                ),
+                level=Verbosity.INFO,
+                dataset=dataset,
+                mode=mode,
+                source_dir=str(source) if source else None,
+                image_root=image_root,
+            )
+
             manifest_path = _build_dataset(
                 dataset, source, image_root, output_root, mode=mode, args=args
             )
             built_any = True
             record["status"] = "built"
             record["manifest"] = str(manifest_path)
+
+            dataset_samples, total_samples, skipped = _manifest_dataset_build_counts(
+                manifest_path, dataset
+            )
+            elapsed = time.time() - started_at
+            log_event(
+                "prepare",
+                (
+                    f"{index_label} done {dataset} | "
+                    f"samples {fmt_count(dataset_samples)} | "
+                    f"manifest total {fmt_count(total_samples)} | "
+                    f"skipped {fmt_count(skipped)} | {elapsed:.1f}s"
+                ),
+                level=Verbosity.INFO,
+                dataset=dataset,
+                sample_count=dataset_samples,
+                manifest_total=total_samples,
+                skipped_count=skipped,
+                duration_seconds=elapsed,
+                manifest=str(manifest_path),
+            )
         except Exception as err:  # noqa: BLE001
             record["status"] = "error"
             record["error"] = str(err)
-            print(f"ERROR: {dataset}: {err}", file=sys.stderr)
+            elapsed = time.time() - started_at
+            log_error(
+                "prepare",
+                f"{dataset}: {err} | {index_label} failed after {elapsed:.1f}s",
+            )
             if not keep_going:
                 results.append(record)
                 _print_summary(results, None, output_root, datasets)
@@ -428,12 +565,27 @@ def _print_summary(
     per_dataset = (
         _dataset_summary(manifest_payload) if manifest_payload is not None else {}
     )
+    errors = [record for record in results if record["status"] == "error"]
+    built = [record for record in results if record["status"] != "error"]
 
-    print("\nPer-dataset summary:")
+    log_event(
+        "prepare",
+        (
+            f"Per-dataset summary | datasets {len(datasets)} | built {len(built)} | "
+            f"errors {len(errors)} | names {_short_list(datasets)} | output {output_root}"
+        ),
+        level=Verbosity.INFO,
+        datasets=len(datasets),
+        built=len(built),
+        errors=len(errors),
+        output_root=str(output_root),
+    )
+
+    rows: list[list[T.Any]] = []
     for record in results:
         dataset = record["dataset"]
         if record["status"] == "error":
-            print(f"  {dataset:14s} ERROR: {record['error']}")
+            rows.append([dataset, "ERROR", record.get("error", "")])
             continue
         stats = per_dataset.get(dataset, {})
         count = stats.get("samples", 0)
@@ -441,23 +593,44 @@ def _print_summary(
             ",".join(f"{k}={v}" for k, v in sorted(stats.get("schemas", {}).items()))
             or "-"
         )
-        print(f"  {dataset:14s} samples={count} schemas={schemas}")
+        rows.append([dataset, fmt_count(count), schemas])
+    if rows:
+        log_table(
+            "prepare",
+            "per-dataset",
+            rows,
+            headers=("dataset", "samples", "schemas"),
+            level=Verbosity.VERBOSE,
+        )
 
     if report is not None:
-        print("\nCombined manifest summary:")
-        print(f"  manifest:      {report['manifest']}")
-        print(f"  ok:            {report['ok']}")
-        print(f"  total_samples: {report['total_samples']}")
-        print(f"  valid_samples: {report['valid_samples']}")
-        print(f"  schemas:       {report['schemas']}")
-        print(f"  heads:         {report['heads']}")
-        print(f"  leakage:       {report['leakage']['violation_count']}")
+        log_event(
+            "prepare",
+            (
+                f"Combined manifest summary | manifest {report['manifest']} | ok {report['ok']} | "
+                f"samples {fmt_count(report['valid_samples'])}/"
+                f"{fmt_count(report['total_samples'])} | "
+                f"schemas {len(report['schemas'])} | "
+                f"leakage {report['leakage']['violation_count']}"
+            ),
+            level=Verbosity.INFO,
+            manifest=report["manifest"],
+            ok=report["ok"],
+            total_samples=report["total_samples"],
+            valid_samples=report["valid_samples"],
+            schemas=report["schemas"],
+            heads=report["heads"],
+            leakage=report["leakage"],
+        )
 
     if combined_manifest.is_file():
-        print("\nTraining command:")
-        print(
-            "  python tools/run_cdvit_manifest_training_pipeline.py "
-            f"--manifest {combined_manifest}"
+        log_event(
+            "prepare",
+            (
+                "train command: python tools/run_cdvit_manifest_training_pipeline.py "
+                f"--manifest {combined_manifest}"
+            ),
+            level=Verbosity.INFO,
         )
 
 
@@ -559,18 +732,52 @@ def _parser() -> argparse.ArgumentParser:
             "continue past a single failure; this also keeps single-dataset runs going."
         ),
     )
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show download/extraction progress indicators and long-build heartbeat lines.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=(
+            "quiet",
+            "info",
+            "normal",
+            "verbose",
+            "debug",
+            "warning",
+            "error",
+            "critical",
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ),
+    )
+    parser.add_argument("--log-format", default="human", choices=("human", "json"))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    configure_console_logging(
+        verbosity_from_name(
+            _prepare_log_level_name(getattr(args, "log_level", "info"))
+        ),
+        getattr(args, "log_format", "human"),
+    )
+    from lib.datasets.progress import set_progress_enabled
+
+    set_progress_enabled(bool(getattr(args, "progress", True)))
     try:
         return prepare(args)
     except KeyboardInterrupt:
-        print(
-            "\nInterrupted by user (Ctrl-C). Any partially built manifest in the output "
-            "root may be incomplete; re-run to finish.",
-            file=sys.stderr,
+        log_error(
+            "prepare",
+            "interrupted by user (Ctrl-C). Any partially built manifest in the output root may be incomplete; re-run to finish.",
         )
         return 130
 

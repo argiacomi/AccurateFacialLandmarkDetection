@@ -51,7 +51,10 @@ from lib.logging_utils import (
     fmt_progress,
     is_verbose,
     log_event,
+    start_training_progress,
+    stop_training_progress,
     summarize_mapping,
+    update_training_progress,
     verbosity_from_name,
 )
 from lib.training.checkpoint_compat import (
@@ -363,6 +366,26 @@ def _sampler_summary_line(epoch: int, diagnostics: dict) -> str:
     )
 
 
+def _batch_mix_summary_line(mix: dict) -> str:
+    """Compact per-step batch mix summary.
+
+    ``batch_mix`` returns nested count dictionaries. Logging the raw structure makes
+    every train line hard to scan, so normal console output shows only top shares.
+    The raw batch object can still be inspected through debug tooling if needed.
+    """
+
+    if not mix:
+        return "-"
+    parts: list[str] = []
+    for category, top_n in (("bucket", 4), ("schema", 3), ("dataset", 3)):
+        values = mix.get(category, {}) if isinstance(mix, dict) else {}
+        if values:
+            parts.append(
+                f"{category} {summarize_mapping(values, top_n=top_n, as_percent=True)}"
+            )
+    return " | ".join(parts) if parts else "-"
+
+
 def main():
     parser = build_heatmap_stage_arg_parser()
     args = parser.parse_args()
@@ -622,6 +645,12 @@ def main():
                     "epoch-reseeded worker RNG",
                     level=Verbosity.VERBOSE,
                 )
+            total_train_steps = max(len(train_dataloader), 1)
+            train_progress = start_training_progress(
+                total_train_steps,
+                description=f"e{int(epoch):03d}",
+                enabled=is_rank_zero() and bool(getattr(args, "train_progress", True)),
+            )
             batch_fetch_start_time = time.time()
             for batch_idx, batch in enumerate(train_dataloader):
                 if is_rank_zero():
@@ -783,6 +812,8 @@ def main():
                 if is_rank_zero():
                     ema.update_parameters(net.module)
                 n += data.shape[0]
+                if is_rank_zero() and train_progress is not None:
+                    update_training_progress(train_progress, completed=batch_idx + 1)
                 if (
                     args.log_every > 0
                     and batch_idx % args.log_every == 0
@@ -796,21 +827,33 @@ def main():
                         "vis": loss_visibility.item(),
                         "aux": loss_aux.item(),
                     }
-                    mix = batch_mix(batch)
-                    train_line = (
-                        f"epoch {epoch:>3} | step {batch_idx:>5} | "
-                        f"{fmt_progress(n, len(train_dataset))} | "
-                        f"loss {fmt_num(loss.item())} | "
-                        # Stable column order; drop zero components to keep the
-                        # line short as auxiliary/visibility heads come and go.
-                        f"{fmt_mapping(loss_components, keys=_LOSS_COMPONENT_ORDER, omit_zero=True)}"
-                    )
-                    if mix:
-                        train_line += f" | mix {mix}"
-                    log_event("train", train_line, level=Verbosity.INFO)
-                    if loss_details is not None:
+                    if train_progress is not None:
+                        update_training_progress(
+                            train_progress,
+                            completed=batch_idx + 1,
+                            loss=loss.item(),
+                            components=loss_components,
+                        )
+                    else:
+                        train_line = (
+                            f"e{int(epoch):03d} "
+                            f"{int(batch_idx):06d}/{int(total_train_steps):06d} | "
+                            f"{fmt_progress(batch_idx + 1, total_train_steps)} | "
+                            f"loss {fmt_num(loss.item(), 3)} | "
+                            f"{fmt_mapping(loss_components, precision=3, keys=_LOSS_COMPONENT_ORDER, omit_zero=True)}"
+                        )
+                        log_event(
+                            "train",
+                            train_line,
+                            level=Verbosity.INFO,
+                            loss=float(loss.item()),
+                            components=loss_components,
+                        )
+                    if loss_details is not None and is_verbose():
                         _log_schema_head_details(loss_details)
                 batch_fetch_start_time = time.time()
+
+            stop_training_progress(train_progress)
 
             if hasattr(train_sampler, "last_epoch_diagnostics"):
                 sampler_diagnostics = _aggregate_sampler_diagnostics(
@@ -820,7 +863,7 @@ def main():
                     log_event(
                         "sampler",
                         _sampler_summary_line(epoch, sampler_diagnostics),
-                        level=Verbosity.INFO,
+                        level=Verbosity.VERBOSE,
                     )
                     log_event(
                         "sampler",
@@ -932,7 +975,7 @@ def main():
                         "running full final eval so best.weights.pt and "
                         "best_checkpoint.pt are selected from the full "
                         "validation set",
-                        level=Verbosity.INFO,
+                        level=Verbosity.VERBOSE,
                     )
                 model_report = None
                 ema_report = None
@@ -942,7 +985,7 @@ def main():
                         f"fast overall-only eval at epoch {epoch}; slice "
                         f"reports every {args.eval_slice_reports_every} evaluated "
                         f"epoch(s)",
-                        level=Verbosity.INFO,
+                        level=Verbosity.VERBOSE,
                     )
 
                 if should_eval_model:
@@ -1079,7 +1122,7 @@ def main():
                     log_event(
                         "eval",
                         f"best history: {best_history or '-'}",
-                        level=Verbosity.INFO,
+                        level=Verbosity.VERBOSE,
                     )
                 elif ema is not None and should_eval_model:
                     reason = (

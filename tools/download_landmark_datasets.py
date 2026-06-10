@@ -25,6 +25,13 @@ if str(ROOT) not in sys.path:
 
 from lib.datasets.progress import track
 from lib.io_utils import sha1_file, sha256_file
+from lib.logging_utils import (
+    Verbosity,
+    configure_console_logging,
+    log_error,
+    log_event,
+    verbosity_from_name,
+)
 
 CHUNK_SIZE = 1024 * 1024
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
@@ -422,7 +429,7 @@ def _verify(path: Path, *, sha256: str | None, sha1: str | None) -> None:
 def _download_url(url: str, destination: Path, *, force: bool) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not force:
-        print(f"Using existing {destination}")
+        log_event("download", f"reuse {destination}", level=Verbosity.VERBOSE)
         return destination
     if force and destination.exists():
         destination.unlink()
@@ -433,7 +440,7 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
-        print(f"Downloading {url} -> {destination}")
+        log_event("download", f"url {destination.name}", level=Verbosity.INFO)
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(request) as response, tmp_path.open("wb") as out:
             total_header = response.headers.get("Content-Length")
@@ -445,6 +452,8 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
                 total=total,
                 unit="B",
                 unit_scale=True,
+                leave=True,
+                disable=False,
             )
             with bar:
                 while True:
@@ -467,7 +476,7 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
 def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not force:
-        print(f"Using existing {destination}")
+        log_event("download", f"reuse {destination}", level=Verbosity.VERBOSE)
         return destination
     gdown = shutil.which("gdown")
     if gdown is None:
@@ -477,7 +486,7 @@ def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> P
         )
     if force and destination.exists():
         destination.unlink()
-    print(f"Downloading Google Drive file {file_id} -> {destination}")
+    log_event("download", f"gdrive {file_id} -> {destination}", level=Verbosity.INFO)
     tmp_destination = destination.with_name(f"{destination.name}.part")
     if tmp_destination.exists():
         tmp_destination.unlink()
@@ -494,40 +503,68 @@ def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> P
     return destination
 
 
+def _safe_extract_target(destination: Path, member_name: str) -> Path:
+    target = (destination / member_name).resolve()
+    root = destination.resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"unsafe archive member path: {member_name}")
+    return target
+
+
 def _extract_zip(path: Path, destination: Path) -> None:
-    with zipfile.ZipFile(path, "r") as zf:
-        members = zf.infolist()
-        for member in members:
-            target = (destination / member.filename).resolve()
-            if not target.is_relative_to(destination.resolve()):
-                raise ValueError(
-                    f"blocked zip path traversal member: {member.filename}"
-                )
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path) as archive:
+        members = archive.infolist()
+        log_event(
+            "extract",
+            f"{path.name} | files {len(members)} | -> {destination}",
+            level=Verbosity.INFO,
+        )
         for member in track(
-            members, desc=f"Extract {path.name}", total=len(members), unit="file"
+            members,
+            desc=f"Extract {path.name}",
+            total=len(members),
+            unit="file",
+            leave=True,
+            disable=False,
         ):
-            zf.extract(member, destination)
+            _safe_extract_target(destination, member.filename)
+            _extract_tar_member(archive, member, destination)
+
+
+def _extract_tar_member(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    destination: Path,
+) -> None:
+    """Extract one tar member using Python's safe data filter when available."""
+
+    try:
+        archive.extract(member, destination, filter="data")
+    except TypeError:
+        # Python versions before tarfile extraction filters.
+        archive.extract(member, destination)
 
 
 def _extract_tar(path: Path, destination: Path) -> None:
-    with tarfile.open(path, "r:*") as tf:
-        members = tf.getmembers()
-        for member in members:
-            if member.issym() or member.islnk():
-                raise ValueError(f"blocked tar link member: {member.name}")
-            target = (destination / member.name).resolve()
-            if not target.is_relative_to(destination.resolve()):
-                raise ValueError(f"blocked tar path traversal member: {member.name}")
-        extract_kwargs: dict[str, str] = {"filter": "data"}
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(path) as archive:
+        members = archive.getmembers()
+        log_event(
+            "extract",
+            f"{path.name} | files {len(members)} | -> {destination}",
+            level=Verbosity.INFO,
+        )
         for member in track(
-            members, desc=f"Extract {path.name}", total=len(members), unit="file"
+            members,
+            desc=f"Extract {path.name}",
+            total=len(members),
+            unit="file",
+            leave=True,
+            disable=False,
         ):
-            try:
-                tf.extract(member, destination, **extract_kwargs)
-            except TypeError:
-                # Python without the data filter kwarg; drop it for this and later members.
-                extract_kwargs = {}
-                tf.extract(member, destination)
+            _safe_extract_target(destination, member.name)
+            _extract_tar_member(archive, member, destination)
 
 
 def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
@@ -542,14 +579,18 @@ def _extract_archive(path: Path, destination: Path, *, force: bool) -> Path:
     if destination.is_dir() and marker.is_file() and not force:
         try:
             if json.loads(marker.read_text(encoding="utf-8")) == marker_payload:
-                print(f"Using existing extraction {destination}")
+                log_event(
+                    "download",
+                    f"reuse extraction {destination}",
+                    level=Verbosity.VERBOSE,
+                )
                 return destination
         except json.JSONDecodeError:
             pass
     if force and destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    print(f"Extracting {path} -> {destination}")
+    log_event("download", f"extract {path.name} -> {destination}", level=Verbosity.INFO)
     if zipfile.is_zipfile(path):
         _extract_zip(path, destination)
     elif tarfile.is_tarfile(path):
@@ -576,7 +617,7 @@ def _write_manual_steps(asset: SourceAsset, dataset_dir: Path) -> Path:
     lines.extend(f"{idx}. {step}" for idx, step in enumerate(steps, 1))
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"Wrote manual instructions: {path}")
+    log_event("download", f"manual instructions {path}", level=Verbosity.INFO)
     return path
 
 
@@ -689,7 +730,11 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
             # re-downloading the archive just to re-extract.
             extraction = _find_existing_extraction(asset, args.output_root)
             if extraction is not None:
-                print(f"Using existing extraction {extraction} for {asset.name}")
+                log_event(
+                    "download",
+                    f"reuse extraction {asset.dataset}/{asset.name}",
+                    level=Verbosity.VERBOSE,
+                )
                 result.update(
                     status="reused_extraction",
                     extracted=str(extraction),
@@ -698,7 +743,11 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
                 return result
         if reuse is not None:
             path, status = reuse
-            print(f"Reusing existing archive {path} for {asset.name}")
+            log_event(
+                "download",
+                f"reuse archive {asset.dataset}/{asset.name}",
+                level=Verbosity.VERBOSE,
+            )
             result["reused_from"] = str(path)
             checksum_status = "reused"
         else:
@@ -737,7 +786,7 @@ def _process_asset(asset: SourceAsset, args: argparse.Namespace) -> dict[str, T.
     except Exception as err:  # noqa: BLE001
         result.update(status="error", error=str(err))
         if args.keep_going:
-            print(f"ERROR: {asset.name}: {err}", file=sys.stderr)
+            log_error("download", f"{asset.name}: {err}")
             return result
         raise
     return result
@@ -941,6 +990,34 @@ def format_list_table(sources: T.Sequence[SourceAsset]) -> str:
     return "\n".join(lines)
 
 
+def _asset_progress_line(index: int, total: int, asset: SourceAsset) -> str:
+    return f"{index:02d}/{total:02d} {asset.dataset} | {asset.name}"
+
+
+def _process_assets_with_status(
+    sources: T.Sequence[SourceAsset], args: argparse.Namespace
+) -> list[dict[str, T.Any]]:
+    total = len(sources)
+    results: list[dict[str, T.Any]] = []
+    for index, asset in enumerate(sources, start=1):
+        # Durable breadcrumb before any long download/extract/subprocess call.
+        log_event("download", _asset_progress_line(index, total, asset))
+        result = _process_asset(asset, args)
+        status = str(result.get("status", "unknown"))
+        # Keep the completion line compact. Detailed reuse/extract paths remain
+        # under --log-level verbose.
+        log_event(
+            "download",
+            f"{index:02d}/{total:02d} done | {asset.dataset} | {status}",
+            level=Verbosity.INFO,
+            status=status,
+            dataset=asset.dataset,
+            asset=asset.name,
+        )
+        results.append(result)
+    return results
+
+
 def download_datasets(
     datasets: T.Sequence[str] | None,
     *,
@@ -964,13 +1041,21 @@ def download_datasets(
         skip_checksum=skip_checksum,
         keep_going=keep_going,
     )
-    results = [
-        _process_asset(asset, args)
-        for asset in track(sources, desc="Datasets", total=len(sources), unit="asset")
-    ]
+    results = _process_assets_with_status(sources, args)
     _write_summary(results, output_root)
     write_registry(results, output_root)
     return results, load_registry(output_root) or build_registry(results, output_root)
+
+
+def _download_log_level_name(value: str | None) -> str:
+    key = str(value or "info").lower()
+    if key == "normal":
+        return "info"
+    if key in {"warning", "error", "critical"}:
+        return "quiet"
+    if key in {"quiet", "info", "verbose", "debug"}:
+        return key
+    return "info"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1012,6 +1097,32 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--list", action="store_true", help="List configured sources and exit."
     )
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show interactive Rich progress bars.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=(
+            "quiet",
+            "info",
+            "normal",
+            "verbose",
+            "debug",
+            "warning",
+            "error",
+            "critical",
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ),
+    )
+    parser.add_argument("--log-format", default="human", choices=("human", "json"))
     return parser
 
 
@@ -1027,6 +1138,15 @@ def _resolve_requested_datasets(args: argparse.Namespace) -> list[str] | None:
 
 
 def _run(args: argparse.Namespace) -> int:
+    configure_console_logging(
+        verbosity_from_name(
+            _download_log_level_name(getattr(args, "log_level", "info"))
+        ),
+        getattr(args, "log_format", "human"),
+    )
+    from lib.datasets.progress import set_progress_enabled
+
+    set_progress_enabled(bool(getattr(args, "progress", True)))
     requested = _resolve_requested_datasets(args)
     sources = _selected_sources(requested, include_alternates=args.include_alternates)
 
@@ -1034,15 +1154,13 @@ def _run(args: argparse.Namespace) -> int:
         print(format_list_table(sources))
         return 0
 
-    results = [
-        _process_asset(asset, args)
-        for asset in track(sources, desc="Datasets", total=len(sources), unit="asset")
-    ]
+    results = _process_assets_with_status(sources, args)
     summary = _write_summary(results, Path(args.output_root))
     registry = write_registry(results, Path(args.output_root))
-    print(f"\nWrote summary: {summary}")
-    print(f"Wrote registry: {registry}")
-    _print_build_hints(Path(args.output_root))
+    log_event("download", f"summary {summary}")
+    log_event("download", f"registry {registry}")
+    if getattr(args, "log_level", "info").lower() in {"verbose", "debug", "DEBUG"}:
+        _print_build_hints(Path(args.output_root))
 
     errored = [result for result in results if result.get("status") == "error"]
     return 1 if errored else 0
