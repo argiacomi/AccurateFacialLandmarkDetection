@@ -63,6 +63,30 @@ def set_dataset_runtime_epoch(dataset: T.Any, epoch: int, args: T.Any) -> None:
             pass
 
 
+def _limit_worker_threads() -> None:
+    """Run each DataLoader worker single-threaded to avoid CPU oversubscription.
+
+    With many workers, OpenCV's parallel backend spawns one thread per core
+    inside every worker process, so total decode threads explode to roughly
+    num_workers x num_cores and thrash the scheduler on image-decode-bound
+    loaders. PyTorch already pins its own intra-op threads to 1 in workers but
+    does not touch OpenCV, so cv2 is the unhandled offender. Forcing one thread
+    per worker is output-neutral (identical pixels and tensors, only fewer
+    threads); process-level parallelism still comes from num_workers.
+    """
+
+    try:
+        import cv2
+
+        cv2.setNumThreads(0)
+    except Exception:
+        pass
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
 def seed_worker(worker_id: int) -> None:
     info = torch.utils.data.get_worker_info()
     dataset = info.dataset if info is not None else None
@@ -73,6 +97,7 @@ def seed_worker(worker_id: int) -> None:
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
+    _limit_worker_threads()
 
 
 def normalize_runtime_args(args: T.Any) -> T.Any:
