@@ -5048,23 +5048,21 @@ def _merl_rav_landmark_files(root: Path) -> list[Path]:
     )
 
 
-def _parse_merl_rav_pts_with_visibility(
-    path: Path,
-) -> tuple[np.ndarray, tuple[bool, ...] | None, str | None]:
-    """Parse MERL-RAV .pts rows and optional visibility/occlusion flags.
+def _parse_merl_rav_pts_signed(path: Path) -> np.ndarray:
+    """Parse a MERL-RAV ``.pts`` file preserving signed coordinates.
 
-    Expected rows are x y [visibility]. For MERL-style labels, the third column
-    is commonly a point visibility flag. We interpret 1 as visible and 0 as
-    occluded when the file only uses {0, 1}. If all values are visible, the
-    sample is clean; otherwise it is tagged occlusion.
+    MERL-RAV signed-coordinate semantics:
+      * positive ``x y``: visible landmark
+      * negative ``-x -y``: externally occluded landmark estimated at ``abs(x), abs(y)``
+      * ``-1 -1``: self-occluded landmark with no usable coordinate
     """
 
-    rows: list[list[float]] = []
-    flags: list[float] = []
-
+    rows: list[tuple[float, float]] = []
     in_block = False
     saw_brace = False
-    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1
+    ):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -5078,38 +5076,111 @@ def _parse_merl_rav_pts_with_visibility(
             continue
         if ":" in line and not re.match(r"^[+-]?\d", line):
             continue
+        if not in_block and any(
+            line.lower().startswith(prefix) for prefix in ("version", "n_points")
+        ):
+            continue
 
         parts = line.replace(",", " ").split()
         if len(parts) < 2:
             continue
         try:
-            x = float(parts[0])
-            y = float(parts[1])
-        except ValueError:
+            rows.append((float(parts[0]), float(parts[1])))
+        except ValueError as err:
+            raise ValueError(
+                f"invalid MERL-RAV .pts row {line_number} in {path}: {line}"
+            ) from err
+
+    if len(rows) != 68:
+        raise ValueError(
+            f"MERL-RAV .pts file must contain 68 points, got {len(rows)}: {path}"
+        )
+    return np.asarray(rows, dtype=np.float32)
+
+
+def _merl_rav_decode_signed_points(
+    signed_xy: np.ndarray,
+    *,
+    image_hw: tuple[int, int],
+) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Decode MERL-RAV signed landmarks into safe coordinates and masks.
+
+    Returns:
+      labels:
+        ``visible``, ``externally_occluded``, or ``self_occluded`` per point.
+      safe_points:
+        Coordinates to save for training. Invalid/out-of-image points are set to 0.
+      source_valid:
+        Points with a coordinate estimate in MERL-RAV source space.
+      in_image:
+        Source-valid points that lie inside the matched AFLW image.
+      coordinate_valid:
+        Points usable for heatmap/coordinate loss. Currently same as ``in_image``.
+      score_visible:
+        Points visible/scorable by default. Externally/self occluded are false.
+    """
+
+    arr = np.asarray(signed_xy, dtype=np.float32)
+    if arr.shape != (68, 2):
+        raise ValueError(
+            f"MERL-RAV signed landmarks must have shape (68, 2), got {arr.shape}"
+        )
+
+    height, width = int(image_hw[0]), int(image_hw[1])
+    if height <= 0 or width <= 0:
+        raise ValueError(f"invalid image size for MERL-RAV decode: {image_hw}")
+
+    labels: list[str] = []
+    decoded = np.zeros((68, 2), dtype=np.float32)
+    source_valid = np.zeros((68,), dtype=bool)
+    score_visible = np.zeros((68,), dtype=bool)
+
+    for idx, (x_value, y_value) in enumerate(arr):
+        x = float(x_value)
+        y = float(y_value)
+
+        if not np.isfinite([x, y]).all():
+            labels.append("invalid")
             continue
 
-        rows.append([x, y])
-        if len(parts) >= 3:
-            try:
-                flags.append(float(parts[2]))
-            except ValueError:
-                pass
+        if x == -1.0 and y == -1.0:
+            labels.append("self_occluded")
+            continue
 
-    if not rows:
-        raise ValueError(f"no point rows found in {path}")
+        if x < 0.0 or y < 0.0:
+            labels.append("externally_occluded")
+            decoded[idx] = (abs(x), abs(y))
+            source_valid[idx] = True
+            score_visible[idx] = False
+            continue
 
-    points = np.asarray(rows, dtype=np.float32)
-    if len(flags) != len(rows):
-        return points, None, None
+        labels.append("visible")
+        decoded[idx] = (x, y)
+        source_valid[idx] = True
+        score_visible[idx] = True
 
-    unique = {int(value) for value in flags if float(value).is_integer()}
-    if unique.issubset({0, 1}):
-        visibility = tuple(bool(int(value)) for value in flags)
-        return points, visibility, "merl_rav_pts_visibility_1_visible_0_occluded"
+    finite = np.isfinite(decoded).all(axis=1)
+    in_image = (
+        source_valid
+        & finite
+        & (decoded[:, 0] >= 0.0)
+        & (decoded[:, 0] < float(width))
+        & (decoded[:, 1] >= 0.0)
+        & (decoded[:, 1] < float(height))
+    )
+    coordinate_valid = in_image.copy()
+    score_visible = score_visible & coordinate_valid
 
-    # Fallback for non-binary numeric visibility: positive means visible.
-    visibility = tuple(float(value) > 0.0 for value in flags)
-    return points, visibility, "merl_rav_pts_visibility_positive_visible"
+    safe_points = decoded.astype(np.float32, copy=True)
+    safe_points[~coordinate_valid] = 0.0
+
+    if not coordinate_valid.any():
+        raise ValueError(
+            "MERL-RAV sample has no coordinate-valid in-image landmarks after "
+            "signed-coordinate decoding"
+        )
+
+    return labels, safe_points, source_valid, in_image, coordinate_valid, score_visible
 
 
 def _merl_rav_conditions(
@@ -5188,14 +5259,9 @@ def _build_merl_rav(
         sample_stem = landmark_path.stem
         image_id, face_index = _merl_rav_image_identity(sample_stem)
         sample_id = f"merl-rav/{sample_stem}"
+
         try:
-            raw_points, visibility, visibility_source = (
-                _parse_merl_rav_pts_with_visibility(landmark_path)
-            )
-            points, detected_schema = _canonical_points(
-                raw_points,
-                source_schema=f"2d_{raw_points.shape[0]}",
-            )
+            signed_points = _parse_merl_rav_pts_signed(landmark_path)
 
             image = None
             for candidate_name in _merl_rav_image_name_candidates(sample_stem):
@@ -5211,6 +5277,28 @@ def _build_merl_rav(
                     f"AFLW image not found for {sample_stem} "
                     f"(tried base image id {image_id})"
                 )
+
+            image_bgr = cv2.imread(str(image), cv2.IMREAD_COLOR)
+            if image_bgr is None:
+                raise FileNotFoundError(f"could not read AFLW image: {image}")
+            image_hw = image_bgr.shape[:2]
+
+            (
+                visibility_labels,
+                points,
+                source_valid,
+                in_image,
+                coordinate_valid,
+                score_visible,
+            ) = _merl_rav_decode_signed_points(signed_points, image_hw=image_hw)
+
+            detected_schema = "2d_68"
+            points = normalize_landmark_array(points, schema=detected_schema)
+
+            bbox_points = points[coordinate_valid]
+            face_bbox = _bbox_from_points_xyxy(bbox_points)
+            normalizer = _normalizer_from_bbox(face_bbox)
+
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": sample_id, "reason": str(err)})
             continue
@@ -5218,14 +5306,21 @@ def _build_merl_rav(
         # Split by source image, not face index, so multiple faces from the same
         # AFLW image cannot leak across train/test.
         split = _deterministic_split("merl-rav", image_id)
-        condition, conds = _merl_rav_conditions(scenario, split, visibility)
+
+        score_visibility_tuple = tuple(bool(value) for value in score_visible.tolist())
+        condition, conds = _merl_rav_conditions(
+            scenario,
+            split,
+            score_visibility_tuple,
+        )
         path_conds = _merl_rav_path_conditions(landmark_path)
         conds = _merge_condition_labels(path_conds, conds)
         condition = conds[0]
+
         metadata = _path_identity_metadata(landmark_path, root=root, dataset="merl-rav")
         metadata.update(
             {
-                "dataset_parser": "merl_rav_pts",
+                "dataset_parser": "merl_rav_native_aflw_signed_pts",
                 "parser_type": "dataset_specific",
                 "source_schema": detected_schema,
                 "source_image": str(image.resolve()),
@@ -5234,22 +5329,41 @@ def _build_merl_rav(
                 "source_conditions": list(path_conds),
                 "image_id": image_id,
                 "merl_rav_label_id": sample_stem,
-                "visibility_target_source": visibility_source,
-                "visible_landmark_count": int(
-                    sum(1 for value in visibility or () if bool(value))
-                ),
+                "merl_rav_visibility_labels": visibility_labels,
+                "visibility_target_source": "merl_rav_signed_coordinates_score_visible",
+                "coordinate_validity_source": "merl_rav_signed_coordinates_in_image",
+                "landmark_source_valid_mask": [
+                    bool(value) for value in source_valid.tolist()
+                ],
+                "landmark_in_image_mask": [bool(value) for value in in_image.tolist()],
+                "landmark_coordinate_valid_mask": [
+                    bool(value) for value in coordinate_valid.tolist()
+                ],
+                "landmark_score_visibility_mask": [
+                    bool(value) for value in score_visible.tolist()
+                ],
+                "landmark_source_valid_count": int(source_valid.sum()),
+                "landmark_in_image_count": int(in_image.sum()),
+                "landmark_coordinate_valid_count": int(coordinate_valid.sum()),
+                "landmark_score_visible_count": int(score_visible.sum()),
+                "visible_landmark_count": int(score_visible.sum()),
                 "occluded_landmark_count": int(
-                    sum(1 for value in visibility or () if not bool(value))
+                    (coordinate_valid & ~score_visible).sum()
                 ),
+                "self_occluded_landmark_count": int(
+                    sum(label == "self_occluded" for label in visibility_labels)
+                ),
+                "externally_occluded_landmark_count": int(
+                    sum(label == "externally_occluded" for label in visibility_labels)
+                ),
+                "face_bbox": face_bbox,
+                "face_bbox_source": "merl_rav_coordinate_valid_landmark_bbox",
+                "normalizer_source": "merl_rav_coordinate_valid_landmark_bbox_max_side",
+                "aflw_image_source": "aflw_native",
             }
         )
         if face_index is not None:
             metadata["face_index"] = face_index
-
-        if visibility is None:
-            metadata.pop("visibility_target_source", None)
-            metadata.pop("visible_landmark_count", None)
-            metadata.pop("occluded_landmark_count", None)
 
         samples.append(
             _with_split(
@@ -5264,7 +5378,8 @@ def _build_merl_rav(
                     source_schema=detected_schema,
                     source_id=sample_id,
                     metadata=metadata,
-                    visibility=visibility,
+                    visibility=score_visibility_tuple,
+                    normalizer=normalizer,
                 ),
                 split,
             )
