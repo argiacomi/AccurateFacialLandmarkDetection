@@ -287,6 +287,8 @@ def evaluate_landmark_model(
     request record output files.
     """
     model.eval()
+    eval_device = torch.device(device)
+    eval_autocast_enabled = eval_device.type == "cuda"
     build_records = bool(build_records or include_records)
     records = []
     nme_values = []
@@ -300,7 +302,12 @@ def evaluate_landmark_model(
     for batch_idx, batch in enumerate(iterator):
         if isinstance(batch, dict) and "heads" in batch:
             data = batch["image"].to(device, non_blocking=non_blocking)
-            stage_pred = model(data)[-1]
+            with torch.autocast(
+                device_type=eval_device.type,
+                dtype=torch.float16,
+                enabled=eval_autocast_enabled,
+            ):
+                stage_pred = model(data)[-1]
             for head_name, payload in batch["heads"].items():
                 indices = payload["indices"].to(device, non_blocking=non_blocking)
                 pred_keypoints, heatmap = landmark_prediction_for_head(
@@ -338,7 +345,12 @@ def evaluate_landmark_model(
         data = data.to(device, non_blocking=non_blocking)
         keypoints = target.to(device, non_blocking=non_blocking)
         landmark_mask = landmark_mask.to(device, non_blocking=non_blocking)
-        stage_pred = model(data)[-1]
+        with torch.autocast(
+            device_type=eval_device.type,
+            dtype=torch.float16,
+            enabled=eval_autocast_enabled,
+        ):
+            stage_pred = model(data)[-1]
         pred_keypoints, heatmap = landmark_prediction_for_head(
             stage_pred, "landmarks_68"
         )
