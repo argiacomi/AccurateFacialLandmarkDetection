@@ -361,6 +361,29 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable only if the model forward pass can skip trainable parameters",
     )
+    parser.add_argument(
+        "--log-format",
+        type=str,
+        default="human",
+        choices=["human", "json"],
+        help=(
+            "Console output format. 'human' prints short tagged lines; 'json' "
+            "emits one JSON object per event for CI/log parsing. The structured "
+            "runtime_metrics.jsonl is written either way."
+        ),
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="info",
+        choices=["quiet", "info", "verbose", "debug"],
+        help=(
+            "Console verbosity. 'info' shows only epoch/eval summaries and "
+            "errors; 'info' adds per-batch train lines; 'verbose' adds head "
+            "diagnostics, sampler detail, and checkpoint writes; 'debug' adds "
+            "full structures."
+        ),
+    )
     return parser
 
 

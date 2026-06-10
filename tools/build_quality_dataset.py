@@ -59,6 +59,7 @@ from lib.datasets.progress import track
 from lib.datasets.sources import extract_archive_to_temp
 from lib.datasets.video_frames import extract_video_frames, video_files
 from lib.io_utils import read_json, relative_or_absolute, safe_id, write_json
+from lib.logging_utils import Verbosity, fmt_count, fmt_mapping, log_event
 from lib.manifest.contract import (
     TRAINING_MANIFEST_CONTRACT,
     TRAINING_MANIFEST_VERSION,
@@ -5831,6 +5832,34 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _manifest_completion_summary(manifest_path: Path) -> str:
+    """Best-effort ``| samples N | schemas ...`` suffix for the completion line.
+
+    Reads the just-written manifest to report sample and per-schema counts. Any
+    failure returns an empty suffix so the completion line still prints.
+    """
+
+    try:
+        payload = read_json(manifest_path)
+    except Exception:  # noqa: BLE001
+        return ""
+    samples = payload.get("samples") if isinstance(payload, dict) else None
+    if not isinstance(samples, list):
+        return ""
+    schemas: dict[str, int] = {}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        schema = str(
+            sample.get("target_schema") or sample.get("source_schema") or "unknown"
+        )
+        schemas[schema] = schemas.get(schema, 0) + 1
+    suffix = f" | samples {fmt_count(len(samples))}"
+    if schemas:
+        suffix += f" | schemas {fmt_mapping(schemas)}"
+    return suffix
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(
@@ -5845,8 +5874,11 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as err:  # noqa: BLE001
         logger.error("manifest build failed: %s", err)
         return 1
-    logger.info("Wrote landmark manifest: %s", manifest)
-    print(f"Wrote landmark manifest: {manifest}")
+    log_event(
+        "manifest",
+        f"wrote {manifest}{_manifest_completion_summary(manifest)}",
+        level=Verbosity.INFO,
+    )
     return 0
 
 

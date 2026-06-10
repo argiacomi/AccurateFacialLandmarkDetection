@@ -41,6 +41,19 @@ from lib.evaluation.split_safe import (
     write_eval_records_csv,
     write_eval_records_jsonl,
 )
+from lib.logging_utils import (
+    Verbosity,
+    configure_console_logging,
+    fmt_count,
+    fmt_duration,
+    fmt_mapping,
+    fmt_num,
+    fmt_progress,
+    is_verbose,
+    log_event,
+    summarize_mapping,
+    verbosity_from_name,
+)
 from lib.training.checkpoint_compat import (
     checkpoint_compat_errors_from_args as _checkpoint_compat_errors,
 )
@@ -81,13 +94,6 @@ from lib.training.device import (
     compile_model,
     make_grad_scaler,
     select_compile_backend,
-)
-from lib.training.log_format import (
-    fmt_count,
-    fmt_duration,
-    fmt_mapping,
-    fmt_num,
-    fmt_progress,
 )
 from lib.training.ema import EMA
 from lib.training.eval_schedule import build_eval_schedule
@@ -173,6 +179,47 @@ _training_runtime_config = TrainingRuntimeConfig.from_args
 # Checkpoint save/load/RNG helpers live in lib.landmarks.training.checkpointing.
 
 
+# Stable column order for the per-batch training loss breakdown.
+_LOSS_COMPONENT_ORDER = ("loc", "heat", "star", "cons", "vis", "aux")
+
+
+def _log_schema_head_details(loss_details) -> None:
+    """Log schema-head diagnostics: a one-line summary normally, full at -v.
+
+    The full per-head counts/contributions/aux/visibility breakdown is wide and
+    hard to compare across steps, so it is shown only under ``--verbose``. The
+    complete payload is always retained in runtime_metrics.jsonl.
+    """
+
+    head_counts = loss_details.get("head_sample_counts", {})
+    head_losses = {
+        name: float(value.item())
+        for name, value in loss_details.get("head_loss_contributions", {}).items()
+    }
+    if is_verbose():
+        vis_weight = float(
+            loss_details.get("visibility_loss_weight", torch.tensor(0.0)).item()
+        )
+        log_event(
+            "train",
+            "  heads | "
+            f"counts {fmt_mapping(head_counts)} | "
+            f"contrib {fmt_mapping(head_losses)} | "
+            f"aux_valid {fmt_mapping(loss_details.get('auxiliary_valid_counts', {}))} | "
+            f"aux_acc {fmt_mapping(loss_details.get('auxiliary_accuracy', {}))} | "
+            f"vis_valid {fmt_mapping(loss_details.get('visibility_valid_counts', {}))} | "
+            f"vis_w {fmt_num(vis_weight)}",
+            level=Verbosity.VERBOSE,
+        )
+        return
+    log_event(
+        "train",
+        f"  heads | active {fmt_mapping(head_counts, max_items=4)} | "
+        f"contrib total={fmt_num(sum(head_losses.values()))}",
+        level=Verbosity.INFO,
+    )
+
+
 def _save_best_weights(state_dict, ckpt_folder: str | os.PathLike[str]) -> None:
     """Write explicit best weights and the legacy best_model compatibility copy."""
 
@@ -199,16 +246,18 @@ def _load_resume_model_state(net, state_dict, args) -> None:
             f"unexpected={unexpected[:10]!r} non_schema_missing={bad_missing[:10]!r}"
         )
     if missing:
-        print(
-            f"[resume] {len(missing)} schema/auxiliary head key(s) missing from "
+        log_event(
+            "resume",
+            f"{len(missing)} schema/auxiliary head key(s) missing from "
             f"checkpoint; initialized from current model ({missing[:10]})",
-            flush=True,
+            level=Verbosity.VERBOSE,
         )
     if unexpected:
-        print(
-            f"[resume] {len(unexpected)} unexpected checkpoint key(s) ignored "
+        log_event(
+            "resume",
+            f"{len(unexpected)} unexpected checkpoint key(s) ignored "
             f"({unexpected[:10]})",
-            flush=True,
+            level=Verbosity.VERBOSE,
         )
 
 
@@ -288,6 +337,32 @@ def _aggregate_sampler_diagnostics(local_diagnostics):
     }
 
 
+def _sampler_summary_line(epoch: int, diagnostics: dict) -> str:
+    """One-line domain-balanced sampler summary for the console.
+
+    Renders the bucket mix as percentages plus fallback and missing-target
+    counts. The full diagnostics object is preserved in runtime_metrics.jsonl
+    and printed verbatim only under ``--log-level debug``.
+    """
+
+    actual_mix = diagnostics.get("actual_mix", {}) or {}
+    bucket_mix = actual_mix.get("bucket", {}) or {}
+    fallback_counts = diagnostics.get("fallback_counts", {}) or {}
+    fallbacks = sum(
+        int(count) for key, count in fallback_counts.items() if key != "exact"
+    )
+    missing_counts = {
+        category: len(values or [])
+        for category, values in (diagnostics.get("missing_targets", {}) or {}).items()
+    }
+    return (
+        f"e{int(epoch):03d} domain mix | "
+        f"bucket {summarize_mapping(bucket_mix, top_n=4, as_percent=True)} | "
+        f"fallback {fallbacks} | "
+        f"missing {fmt_mapping(missing_counts)}"
+    )
+
+
 def main():
     parser = build_heatmap_stage_arg_parser()
     args = parser.parse_args()
@@ -300,6 +375,11 @@ def main():
     if args.ignore_declared_splits:
         args.split_policy = "random_hash"
     args = normalize_runtime_args(args)
+    configure_console_logging(
+        verbosity_from_name(getattr(args, "log_level", "normal")),
+        getattr(args, "log_format", "human"),
+        configure_stdlib=False,
+    )
     setup_seed(args.seed, deterministic=args.deterministic)
     lmk_num = landmark_count_for_dataset(args)
     device = setup_distributed_from_env(args)
@@ -327,11 +407,13 @@ def main():
         train_dataloader = loaders.train_dataloader
         test_dataloader = loaders.test_dataloader
         full_test_dataloader = loaders.full_test_dataloader
-        print(
-            f"[data] train: {fmt_count(len(train_dataset))} samples | "
-            f"test: {fmt_count(len(test_dataset))} samples | device {device}",
-            flush=True,
-        )
+        if is_rank_zero():
+            log_event(
+                "data",
+                f"train {fmt_count(len(train_dataset))} samples | "
+                f"test {fmt_count(len(test_dataset))} samples | device {device}",
+                level=Verbosity.QUIET,
+            )
         if is_rank_zero():
             append_runtime_metrics(
                 args,
@@ -404,10 +486,12 @@ def main():
                 "Pass --find_unused_parameters or --auxiliary-loss-stage all."
             )
             if is_rank_zero():
-                print(
-                    "[ddp] visibility heads on final stage only; "
+                log_event(
+                    "ddp",
+                    "visibility heads on final stage only; "
                     "find_unused_parameters=True (required for unused "
-                    "non-final visibility parameters)."
+                    "non-final visibility parameters).",
+                    level=Verbosity.VERBOSE,
                 )
         if distributed_is_active():
             net = torch.nn.parallel.DistributedDataParallel(
@@ -435,11 +519,12 @@ def main():
                 device=device,
             )
             if is_rank_zero():
-                print(
-                    f"[compile] enabled (backend={compile_backend}, "
+                log_event(
+                    "compile",
+                    f"enabled (backend={compile_backend}, "
                     f"mode={getattr(args, 'compile_mode', 'default')}); "
                     "expect extra warmup compilation on the first steps",
-                    flush=True,
+                    level=Verbosity.QUIET,
                 )
 
         optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
@@ -476,17 +561,18 @@ def main():
                 args,
             )
             if is_rank_zero():
-                print(
-                    f"[resume] restored training checkpoint; resuming at epoch "
-                    f"{start_epoch}",
-                    flush=True,
+                log_event(
+                    "resume",
+                    f"restored training checkpoint; resuming at epoch {start_epoch}",
+                    level=Verbosity.QUIET,
                 )
         if start_epoch >= args.epoch:
             if is_rank_zero():
-                print(
-                    f"[resume] next_epoch={start_epoch} >= requested epoch="
+                log_event(
+                    "resume",
+                    f"next_epoch={start_epoch} >= requested epoch="
                     f"{args.epoch}; training already complete for this target",
-                    flush=True,
+                    level=Verbosity.QUIET,
                 )
             if dist.is_initialized():
                 barrier_start = time.time()
@@ -529,11 +615,12 @@ def main():
             train_sampler.set_epoch(epoch)
             set_dataset_runtime_epoch(train_dataset, epoch, args)
             if args.persistent_workers and epoch == start_epoch and is_rank_zero():
-                print(
-                    "[train] note: --persistent-workers seeds DataLoader workers "
+                log_event(
+                    "train",
+                    "note: --persistent-workers seeds DataLoader workers "
                     "once for throughput; use --no-persistent-workers for "
                     "epoch-reseeded worker RNG",
-                    flush=True,
+                    level=Verbosity.VERBOSE,
                 )
             batch_fetch_start_time = time.time()
             for batch_idx, batch in enumerate(train_dataloader):
@@ -705,42 +792,24 @@ def main():
                         "loc": loss_loc.item(),
                         "heat": loss_heatmap.item(),
                         "star": loss_star.item(),
-                        "consist": loss_consistency.item(),
+                        "cons": loss_consistency.item(),
                         "vis": loss_visibility.item(),
                         "aux": loss_aux.item(),
                     }
                     mix = batch_mix(batch)
-                    log_line = (
-                        f"[train] epoch {epoch:>3} | step {batch_idx:>5} | "
+                    train_line = (
+                        f"epoch {epoch:>3} | step {batch_idx:>5} | "
                         f"{fmt_progress(n, len(train_dataset))} | "
-                        f"loss {fmt_num(loss.item())} "
-                        f"({fmt_mapping(loss_components)})"
+                        f"loss {fmt_num(loss.item())} | "
+                        # Stable column order; drop zero components to keep the
+                        # line short as auxiliary/visibility heads come and go.
+                        f"{fmt_mapping(loss_components, keys=_LOSS_COMPONENT_ORDER, omit_zero=True)}"
                     )
                     if mix:
-                        log_line += f" | mix {mix}"
-                    print(log_line, flush=True)
+                        train_line += f" | mix {mix}"
+                    log_event("train", train_line, level=Verbosity.INFO)
                     if loss_details is not None:
-                        head_losses = {
-                            name: float(value.item())
-                            for name, value in loss_details.get(
-                                "head_loss_contributions", {}
-                            ).items()
-                        }
-                        vis_weight = float(
-                            loss_details.get(
-                                "visibility_loss_weight", torch.tensor(0.0)
-                            ).item()
-                        )
-                        print(
-                            f"[train]   heads | "
-                            f"counts {fmt_mapping(loss_details.get('head_sample_counts', {}))} | "
-                            f"contrib {fmt_mapping(head_losses)} | "
-                            f"aux_valid {fmt_mapping(loss_details.get('auxiliary_valid_counts', {}))} | "
-                            f"aux_acc {fmt_mapping(loss_details.get('auxiliary_accuracy', {}))} | "
-                            f"vis_valid {fmt_mapping(loss_details.get('visibility_valid_counts', {}))} | "
-                            f"vis_w {fmt_num(vis_weight)}",
-                            flush=True,
-                        )
+                        _log_schema_head_details(loss_details)
                 batch_fetch_start_time = time.time()
 
             if hasattr(train_sampler, "last_epoch_diagnostics"):
@@ -748,10 +817,15 @@ def main():
                     train_sampler.last_epoch_diagnostics
                 )
                 if is_rank_zero():
-                    print(
-                        f"[sampler] epoch {epoch} domain-balanced: "
-                        f"{sampler_diagnostics}",
-                        flush=True,
+                    log_event(
+                        "sampler",
+                        _sampler_summary_line(epoch, sampler_diagnostics),
+                        level=Verbosity.INFO,
+                    )
+                    log_event(
+                        "sampler",
+                        f"  full {sampler_diagnostics}",
+                        level=Verbosity.DEBUG,
                     )
                     append_runtime_metrics(
                         args,
@@ -814,14 +888,14 @@ def main():
                 peak_memory_mb = cuda_peak_memory_mb(device)
                 current_lr = float(scheduler.get_last_lr()[0])
                 epoch_line = (
-                    f"[epoch] {epoch:>3} done | {fmt_duration(duration)} | "
+                    f"{epoch:>3} done | {fmt_duration(duration)} | "
                     f"{fmt_count(global_train_samples)} samples | "
                     f"{fmt_num(samples_per_second, 1)} samples/s | "
                     f"lr {current_lr:.2e}"
                 )
                 if peak_memory_mb is not None:
-                    epoch_line += f" | peak_mem {fmt_num(peak_memory_mb, 1)} MB"
-                print(epoch_line, flush=True)
+                    epoch_line += f" | peak {fmt_num(peak_memory_mb, 1)} MB"
+                log_event("epoch", epoch_line, level=Verbosity.QUIET)
                 append_runtime_metrics(
                     args,
                     {
@@ -853,20 +927,22 @@ def main():
                 is_full_eval = eval_schedule.is_full_eval
                 should_build_eval_records = eval_schedule.should_build_records
                 if eval_schedule.forced_final_full_eval:
-                    print(
-                        "[eval] running full final eval so best.weights.pt and "
+                    log_event(
+                        "eval",
+                        "running full final eval so best.weights.pt and "
                         "best_checkpoint.pt are selected from the full "
                         "validation set",
-                        flush=True,
+                        level=Verbosity.INFO,
                     )
                 model_report = None
                 ema_report = None
                 if should_eval_model and not should_build_eval_records:
-                    print(
-                        f"[eval] fast overall-only eval at epoch {epoch}; slice "
+                    log_event(
+                        "eval",
+                        f"fast overall-only eval at epoch {epoch}; slice "
                         f"reports every {args.eval_slice_reports_every} evaluated "
                         f"epoch(s)",
-                        flush=True,
+                        level=Verbosity.INFO,
                     )
 
                 if should_eval_model:
@@ -920,7 +996,11 @@ def main():
                             args,
                         )
                     print_eval_summary(f"test {eval_scope}", model_report)
-                    print(f"[eval] best NME {fmt_num(best_nme * 100)}%", flush=True)
+                    log_event(
+                        "eval",
+                        f"best NME {fmt_num(best_nme * 100)}%",
+                        level=Verbosity.QUIET,
+                    )
                     append_runtime_metrics(
                         args,
                         {
@@ -933,10 +1013,11 @@ def main():
                         },
                     )
                 else:
-                    print(
-                        f"[eval] skipping model eval at epoch {epoch}; "
+                    log_event(
+                        "eval",
+                        f"skipping model eval at epoch {epoch}; "
                         f"--eval-every={args.eval_every}",
-                        flush=True,
+                        level=Verbosity.INFO,
                     )
 
                 should_eval_ema = eval_schedule.should_eval_ema
@@ -995,17 +1076,20 @@ def main():
                         )
                         for entry in best_record
                     )
-                    print(
-                        f"[eval] best history: {best_history or '-'}", flush=True
+                    log_event(
+                        "eval",
+                        f"best history: {best_history or '-'}",
+                        level=Verbosity.INFO,
                     )
                 elif ema is not None and should_eval_model:
                     reason = (
                         eval_schedule.ema_skip_reason
                         or f"--eval-ema-every={args.eval_ema_every}"
                     )
-                    print(
-                        f"[eval] skipping EMA eval at epoch {epoch}; {reason}",
-                        flush=True,
+                    log_event(
+                        "eval",
+                        f"skipping EMA eval at epoch {epoch}; {reason}",
+                        level=Verbosity.INFO,
                     )
 
                 if model_report is not None:

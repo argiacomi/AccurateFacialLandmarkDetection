@@ -13,7 +13,7 @@ from lib.evaluation.split_safe import (
     metrics_for_nmes,
     record_for_sample,
 )
-from lib.training.log_format import fmt_count, fmt_num
+from lib.logging_utils import Verbosity, fmt_count, fmt_num, log_event
 
 
 def eval_collate(batch):
@@ -392,15 +392,16 @@ def landmark_prediction_for_head(stage_pred, head_name):
 def print_eval_summary(title, report):
     metrics = report["overall"]
     if metrics["sample_count"] == 0:
-        print(f"[eval] {title} | no samples", flush=True)
+        log_event("eval", f"{title} | no samples", level=Verbosity.QUIET)
         return
-    print(
-        f"[eval] {title} | "
+    log_event(
+        "eval",
+        f"{title} | "
         f"NME {fmt_num(metrics['nme_percent'])}% | "
         f"FR@0.10 {fmt_num(metrics['fr_percent'], 2)}% | "
         f"AUC@0.10 {fmt_num(metrics['auc'])} | "
         f"n={fmt_count(metrics['sample_count'])}",
-        flush=True,
+        level=Verbosity.QUIET,
     )
 
 

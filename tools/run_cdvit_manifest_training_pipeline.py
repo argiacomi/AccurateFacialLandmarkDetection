@@ -38,6 +38,16 @@ from lib.datasets.manifest import (
     manifest_index_path,
 )
 from lib.io_utils import sha256_file, write_json
+from lib.logging_utils import (
+    Verbosity,
+    configure_console_logging,
+    fmt_count,
+    fmt_duration,
+    is_debug,
+    log_error,
+    log_event,
+    verbosity_from_name,
+)
 from lib.manifest.validator import validate_training_manifest
 from lib.pipeline.config import (
     _extract_config_path,
@@ -894,10 +904,11 @@ def _load_checkpoint_metadata(path: Path) -> dict[str, T.Any] | None:
 
 def _normalize_runtime_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.restore_rng and args.persistent_workers:
-        print(
+        log_event(
+            "pipeline",
             "warning: --restore-rng requires epoch-reseeded training workers; "
             "forcing --no-persistent-workers for checkpoint-compatible replay",
-            flush=True,
+            level=Verbosity.INFO,
         )
         args.persistent_workers = False
     return args
@@ -1214,12 +1225,29 @@ def _require_local_tools(args: argparse.Namespace) -> None:
         raise FileNotFoundError("missing local manifest tool(s): " + ", ".join(missing))
 
 
+def _stage_summary_line(result: StageResult) -> str:
+    """One human-readable summary line for a completed pipeline stage.
+
+    The full StageResult (command, every output path, notes, error) is appended
+    to pipeline_progress.jsonl; this keeps the console scannable.
+    """
+
+    parts = [f"{result.name} {result.status}", fmt_duration(result.duration_seconds)]
+    if result.outputs:
+        parts.append(f"outputs {fmt_count(len(result.outputs))}")
+    parts.extend(note for note in result.notes if note)
+    line = " | ".join(parts)
+    if result.error:
+        line += f" | error {result.error}"
+    return line
+
+
 def _format_command(argv: T.Sequence[str]) -> str:
-    return "+ " + " ".join(shlex.quote(str(part)) for part in argv)
+    return " ".join(shlex.quote(str(part)) for part in argv)
 
 
 def _run_command(argv: list[str], *, cwd: Path, dry_run: bool) -> None:
-    print(_format_command(argv), flush=True)
+    log_event("cmd", _format_command(argv), level=Verbosity.INFO)
     if dry_run:
         return
     subprocess.run(argv, cwd=str(cwd), check=True)
@@ -1255,10 +1283,11 @@ def _run_dataset_build_commands(
             _run_command(command, cwd=cwd, dry_run=dry_run)
         return
 
-    print(
-        f"+ running {len(commands)} independent manifest build command(s) "
+    log_event(
+        "cmd",
+        f"running {len(commands)} independent manifest build command(s) "
         f"with {workers} worker(s)",
-        flush=True,
+        level=Verbosity.INFO,
     )
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_command = {
@@ -1741,6 +1770,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop-after", choices=STAGES, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--log-format",
+        type=str,
+        default="human",
+        choices=["human", "json"],
+        help=(
+            "Console output format. 'human' prints short tagged lines; 'json' "
+            "emits one JSON object per event. The full StageResult is appended "
+            "to pipeline_progress.jsonl either way."
+        ),
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="normal",
+        choices=["info", "normal", "verbose", "debug"],
+        help=(
+            "Console verbosity. 'info'/'normal' show one summary line per stage; "
+            "'debug' also prints the full StageResult JSON to the console."
+        ),
+    )
     return parser
 
 
@@ -1750,6 +1800,11 @@ def main(argv: list[str] | None = None) -> int:
     config_path = _extract_config_path(cli_argv)
     merged_argv = _merge_config_argv(parser, config_path, cli_argv)
     args = _normalize_runtime_args(parser.parse_args(merged_argv))
+    configure_console_logging(
+        verbosity_from_name(getattr(args, "log_level", "normal")),
+        getattr(args, "log_format", "human"),
+        configure_stdlib=False,
+    )
     paths = PipelinePaths(
         output_root=Path(args.output_root),
         run_name=args.run_name,
@@ -1763,21 +1818,35 @@ def main(argv: list[str] | None = None) -> int:
         paths.run_root / "run_config.resolved.json",
         _resolved_pipeline_config(args, paths, selected_stages),
     )
-    print(f"CD-ViT pipeline run root: {paths.run_root}")
-    print(f"Stages: {', '.join(selected_stages)}")
+    log_event("pipeline", f"run root {paths.run_root}", level=Verbosity.INFO)
+    log_event(
+        "pipeline",
+        f"stages {', '.join(selected_stages)}",
+        level=Verbosity.INFO,
+    )
 
     for stage in selected_stages:
         try:
             result = _run_stage(stage, args, paths)
         except KeyboardInterrupt:
-            print(
-                f"\nInterrupted by user (Ctrl-C) during stage '{stage}'. "
+            log_error(
+                "pipeline",
+                f"interrupted by user (Ctrl-C) during stage '{stage}'. "
                 f"Resume with --start-at {stage} (run root: {paths.run_root}).",
-                file=sys.stderr,
             )
             return 130
         _append_progress(paths, result)
-        print(json.dumps(result.to_json(), indent=2), flush=True)
+        # One scannable summary line; the full StageResult stays in the JSONL.
+        # --log-format json emits the structured result; --log-level debug also
+        # prints the indented JSON for in-place debugging.
+        log_event(
+            "pipeline",
+            _stage_summary_line(result),
+            level=Verbosity.INFO,
+            **result.to_json(),
+        )
+        if is_debug():
+            print(json.dumps(result.to_json(), indent=2), flush=True)
         if result.status == "error":
             return 1
     return 0
