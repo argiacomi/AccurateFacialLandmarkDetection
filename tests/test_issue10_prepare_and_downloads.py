@@ -375,6 +375,7 @@ def _prepare_args(**overrides) -> argparse.Namespace:
         skip_image_exists_check=False,
         keep_going=True,
         samples_per_scenario=None,
+        dataset_workers=1,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -400,6 +401,63 @@ def test_prepare_wflwv_flow(tmp_path, capsys):
     assert "Per-dataset summary" in out
     assert "Combined manifest summary" in out
     assert "run_cdvit_manifest_training_pipeline.py --manifest" in out
+
+
+def test_resolve_parallel_budget_priority_and_cap(monkeypatch):
+    monkeypatch.setattr(prepare.os, "cpu_count", lambda: 8)
+
+    # --dataset-workers has priority: 4 outer leaves floor(8/4)=2 inner even
+    # though 16 were requested, and outer * inner == 8 never exceeds the budget.
+    assert prepare._resolve_parallel_budget(4, 16, 4) == (4, 2)
+    # outer is clamped to the dataset count, freeing more inner workers.
+    assert prepare._resolve_parallel_budget(4, 16, 2) == (2, 4)
+    # inner <= 0 means "all", still capped to the per-dataset budget.
+    assert prepare._resolve_parallel_budget(2, 0, 5) == (2, 4)
+    # outer <= 0 means "all CPUs" but is clamped to the dataset count.
+    assert prepare._resolve_parallel_budget(0, 16, 3) == (3, 2)
+    # --dataset-workers 1 keeps outer == 1 (serial), inner unchanged within budget.
+    assert prepare._resolve_parallel_budget(1, 16, 4) == (1, 8)
+
+
+def test_prepare_dataset_workers_parallel_matches_serial(tmp_path, monkeypatch):
+    monkeypatch.setattr(prepare.os, "cpu_count", lambda: 4)
+
+    def _run(out_name: str, dataset_workers: int) -> dict:
+        data_root = tmp_path / f"data_{out_name}"
+        output_root = tmp_path / out_name
+        _make_json_source(
+            data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2
+        )
+        _make_json_source(data_root / "300vw" / "extracted", dataset="300vw", count=3)
+        args = _prepare_args(
+            datasets=["wflw-v", "300vw"],
+            data_root=data_root,
+            output_root=output_root,
+            dataset_workers=dataset_workers,
+        )
+        assert prepare.prepare(args) == 0
+        return json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
+
+    serial = _run("serial", 1)
+    parallel = _run("parallel", 2)
+
+    assert (
+        parallel["metadata"]["sample_count"]
+        == serial["metadata"]["sample_count"]
+        == 5
+    )
+    assert (
+        {s["dataset"] for s in parallel["samples"]}
+        == {s["dataset"] for s in serial["samples"]}
+        == {"wflw-v", "300vw"}
+    )
+    # Every artifact in the merged manifest resolves relative to its directory.
+    base = tmp_path / "parallel"
+    for sample in parallel["samples"]:
+        for key in ("image", "landmarks"):
+            path = Path(sample[key])
+            resolved = path if path.is_absolute() else base / path
+            assert resolved.exists(), f"missing {key}: {sample[key]}"
 
 
 def test_prepare_multi_dataset_merge(tmp_path, capsys):

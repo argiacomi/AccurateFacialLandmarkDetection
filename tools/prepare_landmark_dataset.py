@@ -25,16 +25,20 @@ Example::
 from __future__ import annotations
 
 import argparse
+import copy
+import os
 import sys
 import time
 import typing as T
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lib.datasets.parallel import resolve_worker_count
 from lib.io_utils import read_json
 from lib.logging_utils import (
     Verbosity,
@@ -405,6 +409,303 @@ def _manifest_dataset_build_counts(
 
 
 # ---------------------------------------------------------------------------
+# Outer (per-dataset) parallelism
+#
+# Several datasets can be built at once, but never against the same output root:
+# each dataset is built in isolation into ``_datasets/NN-<dataset>/`` with
+# manifest_mode="replace", then their manifests are merged serially into the
+# combined ``manifest.json``. Validation and crop staging still run once on the
+# final combined manifest, exactly as in the serial path.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_parallel_budget(
+    dataset_workers: int | None,
+    inner_workers: int | None,
+    dataset_count: int,
+) -> tuple[int, int]:
+    """Split the CPU budget between outer datasets and inner workers.
+
+    ``--dataset-workers`` has priority: it is resolved first (clamped to the
+    dataset count and the machine's CPU count), then the inner ``--workers``
+    count is capped so that ``outer * inner`` never exceeds the CPU count. This
+    keeps the total thread fan-out bounded when several dataset builds each
+    spawn their own video-extraction / overlay workers. ``dataset_workers <= 1``
+    always yields ``outer == 1`` so the serial path is taken unchanged.
+    """
+    total = os.cpu_count() or 1
+    outer = max(1, min(resolve_worker_count(dataset_workers, dataset_count), total))
+    inner_budget = max(1, total // outer)
+    if inner_workers is None or inner_workers <= 0:
+        resolved_inner = inner_budget
+    else:
+        resolved_inner = min(int(inner_workers), inner_budget)
+    return outer, max(1, resolved_inner)
+
+
+def _dataset_output_dir(output_root: Path, index: int, dataset: str) -> Path:
+    safe = dataset.replace("/", "_").replace("\\", "_")
+    return output_root / "_datasets" / f"{index:02d}-{safe}"
+
+
+def _rebase_manifest_path(value: T.Any, *, from_root: Path, to_root: Path) -> str:
+    """Rewrite a per-dataset manifest path so it resolves under ``to_root``.
+
+    Per-dataset manifests store ``image`` as an absolute crop path (or a native
+    image path outside the output dir) and ``landmarks`` relative to their own
+    output dir. Re-root those onto the combined output so the merged manifest's
+    relative paths resolve against the combined ``manifest.json`` directory, and
+    leave genuinely external (native-image) paths absolute.
+    """
+    raw = Path(str(value))
+    resolved = raw if raw.is_absolute() else (from_root / raw).resolve()
+    try:
+        return resolved.relative_to(to_root.resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _rebase_dataset_payload(
+    payload: dict[str, T.Any],
+    *,
+    dataset_output_dir: Path,
+    output_root: Path,
+) -> dict[str, T.Any]:
+    for sample in payload.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        for key in ("image", "landmarks", "ground_truth"):
+            if sample.get(key):
+                sample[key] = _rebase_manifest_path(
+                    sample[key],
+                    from_root=dataset_output_dir,
+                    to_root=output_root,
+                )
+    return payload
+
+
+def _dataset_skipped_examples(
+    dataset_output_dir: Path, dataset: str, skipped_count: int
+) -> list[dict[str, str]]:
+    """Return ``skipped_count`` skipped entries for one dataset.
+
+    Real examples are read from the per-dataset ``dataset_audit.json`` (capped at
+    50 there); any remainder is padded with a generic pointer so the combined
+    manifest's ``skipped_count`` reflects the true sum across datasets.
+    """
+    if skipped_count <= 0:
+        return []
+    examples: list[dict[str, str]] = []
+    audit = dataset_output_dir / "dataset_audit.json"
+    if audit.is_file():
+        try:
+            payload = read_json(audit)
+        except Exception:  # noqa: BLE001
+            payload = None
+        raw = payload.get("skipped_examples") if isinstance(payload, dict) else None
+        if isinstance(raw, list):
+            examples = [item for item in raw if isinstance(item, dict)]
+    if len(examples) < skipped_count:
+        pad = skipped_count - len(examples)
+        examples.extend(
+            {"sample_id": dataset, "reason": "see per-dataset manifest"}
+            for _ in range(pad)
+        )
+    return examples[:skipped_count]
+
+
+def _build_one_dataset_for_parallel(
+    *,
+    dataset_index: int,
+    dataset_total: int,
+    dataset: str,
+    registry: dict[str, T.Any] | None,
+    data_root: Path,
+    output_root: Path,
+    args: argparse.Namespace,
+    inner_workers: int,
+) -> dict[str, T.Any]:
+    """Build a single dataset into its own isolated output dir (mode=replace)."""
+    started_at = time.time()
+    dataset_output_dir = _dataset_output_dir(output_root, dataset_index, dataset)
+    dataset_output_dir.mkdir(parents=True, exist_ok=True)
+
+    record: dict[str, T.Any] = {
+        "dataset": dataset,
+        "source_dir": None,
+        "dataset_output_dir": str(dataset_output_dir),
+    }
+
+    source, image_root = _resolve_inputs(dataset, registry, data_root, args.image_root)
+    record["source_dir"] = str(source) if source else None
+
+    index_label = f"{dataset_index:02d}/{dataset_total:02d}"
+    log_event(
+        "prepare",
+        f"{index_label} build {dataset} | mode replace | "
+        f"source {_short_build_path(source)}",
+        level=Verbosity.INFO,
+        dataset=dataset,
+        mode="replace",
+        source_dir=str(source) if source else None,
+        image_root=image_root,
+    )
+
+    # Cap the inner worker count for this build so outer * inner stays within the
+    # CPU budget; only --workers is overridden, every other arg is preserved.
+    build_args = copy.copy(args)
+    build_args.workers = inner_workers
+    manifest_path = _build_dataset(
+        dataset,
+        source,
+        image_root,
+        dataset_output_dir,
+        mode="replace",
+        args=build_args,
+    )
+
+    payload = read_json(manifest_path)
+    payload = _rebase_dataset_payload(
+        payload,
+        dataset_output_dir=dataset_output_dir,
+        output_root=output_root,
+    )
+
+    dataset_samples, total_samples, skipped_count = _manifest_dataset_build_counts(
+        manifest_path, dataset
+    )
+    elapsed = time.time() - started_at
+    log_event(
+        "prepare",
+        f"{index_label} done {dataset} | samples {fmt_count(dataset_samples)} | "
+        f"skipped {fmt_count(skipped_count)} | {elapsed:.1f}s",
+        level=Verbosity.INFO,
+        dataset=dataset,
+        sample_count=dataset_samples,
+        manifest_total=total_samples,
+        skipped_count=skipped_count,
+        duration_seconds=elapsed,
+        manifest=str(manifest_path),
+    )
+
+    record.update(
+        {
+            "status": "built",
+            "manifest": str(manifest_path),
+            "payload": payload,
+            "sample_count": dataset_samples,
+            "manifest_total": total_samples,
+            "skipped_count": skipped_count,
+            "skipped_examples": _dataset_skipped_examples(
+                dataset_output_dir, dataset, skipped_count
+            ),
+            "duration_seconds": elapsed,
+        }
+    )
+    return record
+
+
+def _build_datasets_parallel(
+    datasets: list[str],
+    *,
+    registry: dict[str, T.Any] | None,
+    data_root: Path,
+    output_root: Path,
+    args: argparse.Namespace,
+    outer_workers: int,
+    inner_workers: int,
+) -> tuple[list[dict[str, T.Any]], bool]:
+    """Build every dataset concurrently, then merge into the combined manifest.
+
+    Each dataset builds in isolation; only the final serial merge writes to the
+    combined ``output_root/manifest.json``. Returns ``(results, built_any)`` with
+    the same record shape the serial path produces.
+    """
+    # Force OpenCV single-threaded so that outer * inner Python workers do not
+    # each spawn an internal OpenCV thread pool and oversubscribe the machine.
+    try:
+        import cv2
+
+        cv2.setNumThreads(0)
+        cv2.ocl.setUseOpenCL(False)
+    except Exception:  # noqa: BLE001
+        pass
+
+    dataset_total = len(datasets)
+    log_event(
+        "prepare",
+        f"parallel build | datasets {dataset_total} | "
+        f"dataset-workers {outer_workers} | workers/dataset {inner_workers}",
+        level=Verbosity.INFO,
+        datasets=dataset_total,
+        dataset_workers=outer_workers,
+        inner_workers=inner_workers,
+    )
+
+    results: list[dict[str, T.Any]] = []
+    with ThreadPoolExecutor(max_workers=outer_workers) as executor:
+        future_to_dataset = {
+            executor.submit(
+                _build_one_dataset_for_parallel,
+                dataset_index=index,
+                dataset_total=dataset_total,
+                dataset=dataset,
+                registry=registry,
+                data_root=data_root,
+                output_root=output_root,
+                args=args,
+                inner_workers=inner_workers,
+            ): dataset
+            for index, dataset in enumerate(datasets, start=1)
+        }
+        for future in as_completed(future_to_dataset):
+            dataset = future_to_dataset[future]
+            try:
+                results.append(future.result())
+            except Exception as err:  # noqa: BLE001
+                log_error("prepare", f"{dataset}: {err}")
+                results.append(
+                    {
+                        "dataset": dataset,
+                        "source_dir": None,
+                        "status": "error",
+                        "error": str(err),
+                    }
+                )
+
+    # Restore the requested dataset order for a deterministic merge and summary.
+    order = {dataset: index for index, dataset in enumerate(datasets)}
+    results.sort(key=lambda item: order.get(item["dataset"], 10**9))
+
+    merged_samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    built_any = False
+    for record in results:
+        if record.get("status") == "error":
+            continue
+        built_any = True
+        payload = record.pop("payload", None) or {}
+        for sample in payload.get("samples", []):
+            if isinstance(sample, dict):
+                merged_samples.append(sample)
+        skipped.extend(record.get("skipped_examples") or [])
+
+    if built_any:
+        builder._write_manifest(
+            output_root,
+            "multi_dataset",
+            "default",
+            merged_samples,
+            mode=args.manifest_mode,
+            allow_overlap=args.allow_overlap,
+            scenarios=None,
+            skipped=skipped,
+        )
+
+    return results, built_any
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -506,7 +807,27 @@ def prepare(args: argparse.Namespace) -> int:
     # so it fails fast unless --keep-going is requested explicitly.
     keep_going = args.keep_going or len(datasets) > 1
     dataset_total = len(datasets)
-    dataset_iter = datasets
+    # --dataset-workers has priority over --workers; the budget split caps inner
+    # workers so outer * inner never exceeds the CPU count. dataset_workers <= 1
+    # (or a single dataset) keeps outer_workers == 1 and the serial path below.
+    outer_workers, inner_workers = _resolve_parallel_budget(
+        getattr(args, "dataset_workers", 1), args.workers, dataset_total
+    )
+    if outer_workers > 1 and dataset_total > 1:
+        # Outer parallelism builds each dataset in its own isolated output dir and
+        # merges them serially; the serial loop below is skipped (empty iter).
+        results, built_any = _build_datasets_parallel(
+            datasets,
+            registry=registry,
+            data_root=data_root,
+            output_root=output_root,
+            args=args,
+            outer_workers=outer_workers,
+            inner_workers=inner_workers,
+        )
+        dataset_iter: list[str] = []
+    else:
+        dataset_iter = datasets
     for dataset_index, dataset in enumerate(dataset_iter, start=1):
         # First built dataset honors the requested mode; later ones merge into it.
         mode = args.manifest_mode if not built_any else "merge"
@@ -762,6 +1083,17 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=16,
         help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).",
+    )
+    parser.add_argument(
+        "--dataset-workers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel datasets to build during multidataset prepare runs. 1 keeps "
+            "the current serial behavior. When >1, each dataset is built in an "
+            "isolated output dir and merged; --dataset-workers takes priority over "
+            "--workers and the two combined never exceed the CPU count."
+        ),
     )
     parser.add_argument(
         "--force", action="store_true", help="Redownload/re-extract existing files."
