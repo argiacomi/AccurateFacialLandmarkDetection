@@ -806,7 +806,13 @@ def main():
                     ema.update_parameters(net.module)
                 n += data.shape[0]
                 if is_rank_zero() and train_progress is not None:
-                    update_training_progress(train_progress, completed=batch_idx + 1)
+                    update_training_progress(
+                        train_progress,
+                        completed=batch_idx + 1,
+                        total=total_train_steps,
+                        count_completed=n,
+                        count_total=len(train_dataset),
+                    )
                 if (
                     args.log_every > 0
                     and batch_idx % args.log_every == 0
@@ -824,6 +830,9 @@ def main():
                         update_training_progress(
                             train_progress,
                             completed=batch_idx + 1,
+                            total=total_train_steps,
+                            count_completed=n,
+                            count_total=len(train_dataset),
                             loss=loss.item(),
                             components=loss_components,
                         )

@@ -240,11 +240,16 @@ def start_training_progress(
         TextColumn("[bold cyan]{task.description}[/bold cyan]"),
         BarColumn(bar_width=None),
         TextColumn("{task.percentage:>5.1f}%"),
+        TextColumn("|"),
+        TextColumn("{task.fields[counts]}"),
+        TextColumn("|"),
         TextColumn("loss {task.fields[loss]}"),
         TextColumn("loc {task.fields[loc]}"),
         TextColumn("heat {task.fields[heat]}"),
         TextColumn("aux {task.fields[aux]}"),
+        TextColumn("|"),
         TimeElapsedColumn(),
+        TextColumn("/"),
         TimeRemainingColumn(),
         console=console,
         transient=False,
@@ -254,6 +259,7 @@ def start_training_progress(
     task_id = progress.add_task(
         description,
         total=max(int(total), 1),
+        counts=f"0 / {fmt_count(total)}",
         loss="-",
         loc="-",
         heat="-",
@@ -273,6 +279,9 @@ def update_training_progress(
     state: tuple[T.Any, T.Any] | None,
     *,
     completed: int,
+    total: int | None = None,
+    count_completed: int | None = None,
+    count_total: int | None = None,
     loss: T.Any | None = None,
     components: T.Mapping[str, T.Any] | None = None,
 ) -> None:
@@ -280,6 +289,16 @@ def update_training_progress(
         return
     progress, task_id = state
     update: dict[str, T.Any] = {"completed": int(completed)}
+    if total is not None:
+        update["total"] = max(int(total), 1)
+
+    if count_completed is None:
+        count_completed = int(completed)
+    if count_total is None:
+        count_total = int(total) if total is not None else None
+    if count_total is not None:
+        update["counts"] = f"{fmt_count(count_completed)} / {fmt_count(count_total)}"
+
     if loss is not None:
         update["loss"] = _progress_scalar(loss)
     if components is not None:
