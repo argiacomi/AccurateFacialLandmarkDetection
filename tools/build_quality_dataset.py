@@ -2555,8 +2555,12 @@ def _build_expected_schema_dataset(
         candidate_root: _build_image_index(candidate_root)
         for candidate_root in source_image_roots
     }
+    landmark_files = _landmark_paths(root)
     for landmark_path in track(
-        _landmark_paths(root), desc=f"Build {dataset}", unit="file"
+        landmark_files,
+        desc=f"Build {dataset}",
+        total=len(landmark_files),
+        unit="file",
     ):
         _raise_if_interrupted()
         try:
@@ -3462,9 +3466,14 @@ def _build_subject_session_dataset(
         for list_path in list_files:
             source_split = _list_split_from_path(list_path)
             split = _manifest_split_for_source_split(source_split)
-            for line_number, line in enumerate(
-                list_path.read_text(encoding="utf-8", errors="ignore").splitlines(),
-                start=1,
+            list_lines = list_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).splitlines()
+            for line_number, line in track(
+                enumerate(list_lines, start=1),
+                desc=f"Build {dataset} ({source_split})",
+                total=len(list_lines),
+                unit="line",
             ):
                 if not line.strip() or line.lstrip().startswith("#"):
                     continue
@@ -3563,8 +3572,12 @@ def _build_subject_session_dataset(
     image_index = _build_image_index(image_base)
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
+    fallback_landmark_files = _landmark_paths(root)
     for landmark_path in track(
-        _landmark_paths(root), desc=f"Build {dataset}", unit="file"
+        fallback_landmark_files,
+        desc=f"Build {dataset}",
+        total=len(fallback_landmark_files),
+        unit="file",
     ):
         try:
             points, source_schema = _load_landmark_file(landmark_path)
@@ -5589,7 +5602,12 @@ def _build_video_dataset(
         unit="video",
     )
 
-    for task, (video_id, frame_records, error) in zip(tasks, extracted):
+    for task, (video_id, frame_records, error) in track(
+        zip(tasks, extracted),
+        desc=f"Build {dataset}",
+        total=len(tasks),
+        unit="video",
+    ):
         if error is not None:
             skipped.append({"sample_id": video_id, "reason": error})
             continue
