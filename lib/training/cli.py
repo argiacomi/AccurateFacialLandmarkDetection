@@ -307,6 +307,48 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--data_name", type=str, default="WFLW")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cuda", "mps", "cpu"],
+        help=(
+            "Accelerator to train on. 'auto' prefers CUDA, then Apple Silicon "
+            "(MPS), then CPU. CUDA enables NCCL DDP (under torchrun), fp16 AMP, "
+            "and FlashAttention; MPS/CPU run single-process in fp32."
+        ),
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Compile the model with torch.compile for faster training. Adds "
+            "warmup compilation cost on the first steps; variable batch "
+            "composition (e.g. domain-balanced sampling) may trigger recompiles."
+        ),
+    )
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        default="default",
+        choices=["default", "reduce-overhead", "max-autotune"],
+        help=(
+            "torch.compile optimization mode; only used with --compile and the "
+            "Inductor backend."
+        ),
+    )
+    parser.add_argument(
+        "--compile-backend",
+        type=str,
+        default="auto",
+        choices=["auto", "inductor", "aot_eager", "eager"],
+        help=(
+            "torch.compile backend. 'auto' uses Inductor on CUDA/CPU and "
+            "aot_eager on MPS (Inductor's MPS backend is experimental and can "
+            "miscompile conv backward). Only used with --compile."
+        ),
+    )
     parser.add_argument("--seed", type=int, default="0")
     parser.add_argument(
         "--deterministic",

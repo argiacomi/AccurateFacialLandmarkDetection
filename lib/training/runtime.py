@@ -12,9 +12,12 @@ import torch.distributed as dist
 
 def dataloader_kwargs(args: T.Any, *, eval_loader: bool = False) -> dict[str, T.Any]:
     workers = int(args.eval_num_workers if eval_loader else args.num_workers)
+    # Pinned host memory only accelerates CUDA H2D copies; on MPS/CPU it has no
+    # benefit and torch warns when no CUDA device is present, so gate it.
+    pin_memory = bool(args.pin_memory) and torch.cuda.is_available()
     kwargs: dict[str, T.Any] = {
         "num_workers": workers,
-        "pin_memory": bool(args.pin_memory),
+        "pin_memory": pin_memory,
     }
     if workers > 0:
         kwargs["persistent_workers"] = bool(args.persistent_workers)

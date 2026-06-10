@@ -28,7 +28,6 @@ import torch.distributed as dist
 # from Attention import  SA2SA1_twins
 # from UNet2 import UNet
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.optim.lr_scheduler import StepLR
 
 from lib.core.manifest_aliases import (
@@ -69,10 +68,26 @@ from lib.training.data import (
     unpack_train_batch,
 )
 from lib.training.ddp import (
+    LocalModelWrapper,
+    distributed_is_active,
     distributed_rank,
     distributed_world_size,
     is_rank_zero,
     setup_distributed_from_env,
+)
+from lib.training.device import (
+    attention_kernel,
+    autocast,
+    compile_model,
+    make_grad_scaler,
+    select_compile_backend,
+)
+from lib.training.log_format import (
+    fmt_count,
+    fmt_duration,
+    fmt_mapping,
+    fmt_num,
+    fmt_progress,
 )
 from lib.training.ema import EMA
 from lib.training.eval_schedule import build_eval_schedule
@@ -185,14 +200,14 @@ def _load_resume_model_state(net, state_dict, args) -> None:
         )
     if missing:
         print(
-            "resume checkpoint missing schema/auxiliary head keys initialized from current model: "
-            f"{len(missing)} missing ({missing[:10]})",
+            f"[resume] {len(missing)} schema/auxiliary head key(s) missing from "
+            f"checkpoint; initialized from current model ({missing[:10]})",
             flush=True,
         )
     if unexpected:
         print(
-            "resume checkpoint unexpected keys ignored: "
-            f"{len(unexpected)} unexpected ({unexpected[:10]})",
+            f"[resume] {len(unexpected)} unexpected checkpoint key(s) ignored "
+            f"({unexpected[:10]})",
             flush=True,
         )
 
@@ -292,7 +307,7 @@ def main():
     eval_config = EvalConfig.from_args(args)
     dataset_build_config = DatasetBuildConfig.from_args(args)
 
-    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+    with attention_kernel(device):
         # if True:
 
         schema_aware_training = (
@@ -312,7 +327,11 @@ def main():
         train_dataloader = loaders.train_dataloader
         test_dataloader = loaders.test_dataloader
         full_test_dataloader = loaders.full_test_dataloader
-        print("----------------------len(train_dataset)", len(train_dataset))
+        print(
+            f"[data] train: {fmt_count(len(train_dataset))} samples | "
+            f"test: {fmt_count(len(test_dataset))} samples | device {device}",
+            flush=True,
+        )
         if is_rank_zero():
             append_runtime_metrics(
                 args,
@@ -328,7 +347,7 @@ def main():
             lmk_num,
             schema_aware_training=schema_aware_training,
             auxiliary_class_names=AUXILIARY_CLASS_NAMES,
-        ).cuda()
+        ).to(device)
         # net = VitAttnStage(
         #     nstack=args.nstack,
         #     Attn=lambda: SA2SA1_2(args.heatmap_size, args.max_depth),
@@ -390,11 +409,38 @@ def main():
                     "find_unused_parameters=True (required for unused "
                     "non-final visibility parameters)."
                 )
-        net = torch.nn.parallel.DistributedDataParallel(
-            net,
-            device_ids=[args.local_rank],
-            find_unused_parameters=ddp_find_unused,
-        )
+        if distributed_is_active():
+            net = torch.nn.parallel.DistributedDataParallel(
+                net,
+                device_ids=[args.local_rank],
+                find_unused_parameters=ddp_find_unused,
+            )
+        else:
+            # Single-process (MPS/CPU or single-GPU without torchrun): expose the
+            # same ``.module`` / call surface DDP would, without a process group.
+            net = LocalModelWrapper(net)
+
+        if getattr(args, "compile", False):
+            # Compile outermost (after DDP) so net.module.state_dict() stays
+            # prefix-free for checkpoints and Dynamo can split DDP graphs. The
+            # uncompiled base model remains reachable via net.module, so EMA and
+            # eval keep running in eager mode.
+            compile_backend = select_compile_backend(
+                device, getattr(args, "compile_backend", "auto")
+            )
+            net = compile_model(
+                net,
+                mode=getattr(args, "compile_mode", "default"),
+                backend=getattr(args, "compile_backend", "auto"),
+                device=device,
+            )
+            if is_rank_zero():
+                print(
+                    f"[compile] enabled (backend={compile_backend}, "
+                    f"mode={getattr(args, 'compile_mode', 'default')}); "
+                    "expect extra warmup compilation on the first steps",
+                    flush=True,
+                )
 
         optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
         scheduler = StepLR(optimizer, args.sched_step, gamma=0.5)
@@ -417,7 +463,7 @@ def main():
             else None
         )
         ema = EMA(net.module, 0.99, 100, 10) if is_rank_zero() else None
-        scaler = torch.amp.GradScaler("cuda")
+        scaler = make_grad_scaler(device)
         if isinstance(resume_checkpoint, dict) and "model" in resume_checkpoint:
             start_epoch, best_nme, best_record = _restore_training_checkpoint(
                 resume_checkpoint,
@@ -430,12 +476,16 @@ def main():
                 args,
             )
             if is_rank_zero():
-                print(f"resumed training checkpoint from epoch {start_epoch}")
+                print(
+                    f"[resume] restored training checkpoint; resuming at epoch "
+                    f"{start_epoch}",
+                    flush=True,
+                )
         if start_epoch >= args.epoch:
             if is_rank_zero():
                 print(
-                    f"resume checkpoint next_epoch={start_epoch} is >= requested epoch={args.epoch}; "
-                    "training is already complete for this epoch target",
+                    f"[resume] next_epoch={start_epoch} >= requested epoch="
+                    f"{args.epoch}; training already complete for this target",
                     flush=True,
                 )
             if dist.is_initialized():
@@ -480,8 +530,9 @@ def main():
             set_dataset_runtime_epoch(train_dataset, epoch, args)
             if args.persistent_workers and epoch == start_epoch and is_rank_zero():
                 print(
-                    "note: --persistent-workers seeds DataLoader workers once for throughput; "
-                    "use --no-persistent-workers for epoch-reseeded worker RNG",
+                    "[train] note: --persistent-workers seeds DataLoader workers "
+                    "once for throughput; use --no-persistent-workers for "
+                    "epoch-reseeded worker RNG",
                     flush=True,
                 )
             batch_fetch_start_time = time.time()
@@ -523,7 +574,7 @@ def main():
                 loss_visibility = torch.tensor(0.0, device=device)
                 loss_details = None
                 # if True:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                with autocast(device):
                     pred_info = net(data)
                     for i in range(len(pred_info)):
                         if schema_batch:
@@ -642,7 +693,7 @@ def main():
                 #                 loss.backward()
                 #                 optimizer.step()
 
-                if dist.get_rank() == 0:
+                if is_rank_zero():
                     ema.update_parameters(net.module)
                 n += data.shape[0]
                 if (
@@ -650,28 +701,44 @@ def main():
                     and batch_idx % args.log_every == 0
                     and is_rank_zero()
                 ):
+                    loss_components = {
+                        "loc": loss_loc.item(),
+                        "heat": loss_heatmap.item(),
+                        "star": loss_star.item(),
+                        "consist": loss_consistency.item(),
+                        "vis": loss_visibility.item(),
+                        "aux": loss_aux.item(),
+                    }
                     mix = batch_mix(batch)
-                    mix_text = f" mix: {mix}" if mix else ""
-                    print(
-                        f"train epoch {epoch} batch_idx {batch_idx} rank {distributed_rank()}  {n}/{len(train_dataset)} "
-                        f"loss: {loss.item()} loss_loc: {loss_loc.item()} loss_heatmap: {loss_heatmap.item()} "
-                        f"loss_consistency: {loss_consistency.item()} loss_star: {loss_star.item()} "
-                        f"loss_visibility: {loss_visibility.item()} loss_aux: {loss_aux.item()}{mix_text}"
+                    log_line = (
+                        f"[train] epoch {epoch:>3} | step {batch_idx:>5} | "
+                        f"{fmt_progress(n, len(train_dataset))} | "
+                        f"loss {fmt_num(loss.item())} "
+                        f"({fmt_mapping(loss_components)})"
                     )
+                    if mix:
+                        log_line += f" | mix {mix}"
+                    print(log_line, flush=True)
                     if loss_details is not None:
-                        head_counts = loss_details.get("head_sample_counts", {})
                         head_losses = {
                             name: float(value.item())
                             for name, value in loss_details.get(
                                 "head_loss_contributions", {}
                             ).items()
                         }
+                        vis_weight = float(
+                            loss_details.get(
+                                "visibility_loss_weight", torch.tensor(0.0)
+                            ).item()
+                        )
                         print(
-                            f"schema head loss details counts={head_counts} contributions={head_losses} "
-                            f"aux_valid={loss_details.get('auxiliary_valid_counts', {})} "
-                            f"aux_accuracy={loss_details.get('auxiliary_accuracy', {})} "
-                            f"visibility_valid={loss_details.get('visibility_valid_counts', {})} "
-                            f"visibility_weight={float(loss_details.get('visibility_loss_weight', torch.tensor(0.0)).item())}",
+                            f"[train]   heads | "
+                            f"counts {fmt_mapping(loss_details.get('head_sample_counts', {}))} | "
+                            f"contrib {fmt_mapping(head_losses)} | "
+                            f"aux_valid {fmt_mapping(loss_details.get('auxiliary_valid_counts', {}))} | "
+                            f"aux_acc {fmt_mapping(loss_details.get('auxiliary_accuracy', {}))} | "
+                            f"vis_valid {fmt_mapping(loss_details.get('visibility_valid_counts', {}))} | "
+                            f"vis_w {fmt_num(vis_weight)}",
                             flush=True,
                         )
                 batch_fetch_start_time = time.time()
@@ -682,7 +749,8 @@ def main():
                 )
                 if is_rank_zero():
                     print(
-                        f"domain-balanced sampler epoch {epoch}: {sampler_diagnostics}",
+                        f"[sampler] epoch {epoch} domain-balanced: "
+                        f"{sampler_diagnostics}",
                         flush=True,
                     )
                     append_runtime_metrics(
@@ -744,11 +812,16 @@ def main():
                 duration = time.time() - epoch_start_time
                 samples_per_second = float(global_train_samples) / max(duration, 1e-9)
                 peak_memory_mb = cuda_peak_memory_mb(device)
-                print(
-                    f"#epoch runtime epoch={epoch} duration={duration:.3f}s "
-                    f"samples_per_second={samples_per_second:.3f} "
-                    f"peak_cuda_memory_mb={peak_memory_mb}"
+                current_lr = float(scheduler.get_last_lr()[0])
+                epoch_line = (
+                    f"[epoch] {epoch:>3} done | {fmt_duration(duration)} | "
+                    f"{fmt_count(global_train_samples)} samples | "
+                    f"{fmt_num(samples_per_second, 1)} samples/s | "
+                    f"lr {current_lr:.2e}"
                 )
+                if peak_memory_mb is not None:
+                    epoch_line += f" | peak_mem {fmt_num(peak_memory_mb, 1)} MB"
+                print(epoch_line, flush=True)
                 append_runtime_metrics(
                     args,
                     {
@@ -758,7 +831,7 @@ def main():
                         "rank0_train_samples": int(n),
                         "samples_per_second": samples_per_second,
                         "peak_cuda_memory_mb": peak_memory_mb,
-                        "lr": float(scheduler.get_last_lr()[0]),
+                        "lr": current_lr,
                     },
                 )
 
@@ -781,15 +854,19 @@ def main():
                 should_build_eval_records = eval_schedule.should_build_records
                 if eval_schedule.forced_final_full_eval:
                     print(
-                        "running full final eval so best.weights.pt and best_checkpoint.pt are selected "
-                        "from the full validation set"
+                        "[eval] running full final eval so best.weights.pt and "
+                        "best_checkpoint.pt are selected from the full "
+                        "validation set",
+                        flush=True,
                     )
                 model_report = None
                 ema_report = None
                 if should_eval_model and not should_build_eval_records:
                     print(
-                        f"running fast overall-only eval at epoch {epoch}; "
-                        f"slice reports every {args.eval_slice_reports_every} evaluated epoch(s)"
+                        f"[eval] fast overall-only eval at epoch {epoch}; slice "
+                        f"reports every {args.eval_slice_reports_every} evaluated "
+                        f"epoch(s)",
+                        flush=True,
                     )
 
                 if should_eval_model:
@@ -843,7 +920,7 @@ def main():
                             args,
                         )
                     print_eval_summary(f"test {eval_scope}", model_report)
-                    print("BEST NME %: {}".format(best_nme * 100))
+                    print(f"[eval] best NME {fmt_num(best_nme * 100)}%", flush=True)
                     append_runtime_metrics(
                         args,
                         {
@@ -857,7 +934,9 @@ def main():
                     )
                 else:
                     print(
-                        f"skipping model eval at epoch {epoch}; --eval-every={args.eval_every}"
+                        f"[eval] skipping model eval at epoch {epoch}; "
+                        f"--eval-every={args.eval_every}",
+                        flush=True,
                     )
 
                 should_eval_ema = eval_schedule.should_eval_ema
@@ -908,13 +987,26 @@ def main():
                             args,
                         )
                     print_eval_summary(f"test ema {eval_scope}", ema_report)
-                    print(best_record)
+                    best_history = " | ".join(
+                        (
+                            f"epoch {int(entry[0])} ({entry[1]}) {fmt_num(entry[-1], 2)}%"
+                            if len(entry) == 3
+                            else f"epoch {int(entry[0])} {fmt_num(entry[-1], 2)}%"
+                        )
+                        for entry in best_record
+                    )
+                    print(
+                        f"[eval] best history: {best_history or '-'}", flush=True
+                    )
                 elif ema is not None and should_eval_model:
                     reason = (
                         eval_schedule.ema_skip_reason
                         or f"--eval-ema-every={args.eval_ema_every}"
                     )
-                    print(f"skipping EMA eval at epoch {epoch}; {reason}")
+                    print(
+                        f"[eval] skipping EMA eval at epoch {epoch}; {reason}",
+                        flush=True,
+                    )
 
                 if model_report is not None:
                     records = records_from_report(model_report)

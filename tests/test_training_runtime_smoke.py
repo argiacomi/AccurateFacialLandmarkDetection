@@ -102,7 +102,12 @@ def test_dataloader_kwargs_disable_prefetch_without_workers(tmp_path):
         tmp_path, num_workers=0, persistent_workers=True, prefetch_factor=2
     )
     kwargs = train._dataloader_kwargs(args)
-    assert kwargs == {"num_workers": 0, "pin_memory": True}
+    # Pinned memory only benefits CUDA H2D copies, so it is gated on CUDA
+    # availability (off on MPS/CPU) even when --pin-memory is set.
+    assert kwargs == {
+        "num_workers": 0,
+        "pin_memory": torch.cuda.is_available(),
+    }
 
 
 def test_dataloader_kwargs_wires_worker_flags(tmp_path):
@@ -111,7 +116,7 @@ def test_dataloader_kwargs_wires_worker_flags(tmp_path):
     )
     kwargs = train._dataloader_kwargs(args)
     assert kwargs["num_workers"] == 2
-    assert kwargs["pin_memory"] is True
+    assert kwargs["pin_memory"] is torch.cuda.is_available()
     assert kwargs["persistent_workers"] is True
     assert kwargs["prefetch_factor"] == 4
     assert kwargs["worker_init_fn"] is train._seed_worker
