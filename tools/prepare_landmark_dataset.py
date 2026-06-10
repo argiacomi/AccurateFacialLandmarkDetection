@@ -682,6 +682,8 @@ def _build_one_dataset_for_parallel(
     # CPU budget; only --workers is overridden, every other arg is preserved.
     build_args = copy.copy(args)
     build_args.workers = inner_workers
+    if not log_status:
+        build_args.log_level = "quiet"
     manifest_path = _build_dataset(
         dataset,
         source,
