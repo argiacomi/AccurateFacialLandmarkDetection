@@ -9,7 +9,7 @@ from lib.evaluation.split_safe import EVAL_MODES, SPLIT_POLICIES
 
 def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root_folder", type=str, default="WFLW")
+    parser.add_argument("--root_folder", type=str, default="")
     parser.add_argument("--ckpt_folder", type=str, default="checkpoint")
     parser.add_argument("--batch_size", type=int, default="16")
     parser.add_argument("--num_workers", type=int, default="12")
@@ -318,7 +318,7 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
             "Pass --no-synchronize-runtime-timing for low-overhead CPU wall-clock timing."
         ),
     )
-    parser.add_argument("--data_name", type=str, default="WFLW")
+    parser.add_argument("--data_name", type=str, default="FS68Manifest")
     parser.add_argument(
         "--device",
         type=str,

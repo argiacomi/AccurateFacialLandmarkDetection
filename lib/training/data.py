@@ -30,12 +30,6 @@ def is_schema_aware_manifest_dataset_name(data_name):
 
 
 def landmark_count_for_dataset(args):
-    if args.data_name == "WFLW":
-        return 98
-    if args.data_name == "cofw68":
-        return 29
-    if args.data_name == "300W":
-        return 68
     if is_schema_aware_manifest_dataset_name(args.data_name):
         return int(args.lmk_num)
     raise ValueError(f"unknown data_name: {args.data_name}")
@@ -57,11 +51,6 @@ def build_dataset(
     include_metadata=False,
     schema_aware_training=False,
 ):
-    manifest_path = (
-        manifest_for_split(args, split)
-        if is_schema_aware_manifest_dataset_name(args.data_name)
-        else ""
-    )
     from lib.datasets.registry import GetDataset
 
     return GetDataset(
@@ -71,18 +60,12 @@ def build_dataset(
         preload=args.preload != 0,
         aug=aug,
         heatmap_size=heatmap_size,
-        manifest_path=manifest_path,
-        eval_mode=args.eval_mode
-        if is_schema_aware_manifest_dataset_name(args.data_name)
-        else "random_hash",
-        heldout_datasets=args.heldout_dataset
-        if is_schema_aware_manifest_dataset_name(args.data_name)
-        else None,
+        manifest_path=manifest_for_split(args, split),
+        eval_mode=args.eval_mode,
+        heldout_datasets=args.heldout_dataset,
         include_metadata=include_metadata,
         schema_aware_training=schema_aware_training,
-        split_policy=args.split_policy
-        if is_schema_aware_manifest_dataset_name(args.data_name)
-        else "declared_or_random_hash",
+        split_policy=args.split_policy,
     )
 
 

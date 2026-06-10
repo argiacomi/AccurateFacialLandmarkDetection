@@ -17,13 +17,6 @@ def compute_fr_and_auc(nmes, thres=0.10, step=0.0001):
     return nme, fr, auc
 
 
-def GetNormcofw68(landmarks_gt):
-    left = np.mean(landmarks_gt[[8, 12, 13, 10]], axis=0)
-    right = np.mean(landmarks_gt[[9, 11, 14, 15]], axis=0)
-    norm = np.linalg.norm(left - right)
-    return norm
-
-
 def GetNorm300W(landmarks_gt):
     # left = np.mean(landmarks_gt[36:42], axis=0)
     # right = np.mean(landmarks_gt[42:48], axis=0)
@@ -33,24 +26,16 @@ def GetNorm300W(landmarks_gt):
     return norm
 
 
-def calc_nme(landmarks_pred, landmarks_gt, data_name="WFLW"):
+def calc_nme(landmarks_pred, landmarks_gt, data_name="FS68Manifest"):
     ION_list = []  # inner occular norm
-    if data_name == "WFLW":
-        norm_indices = [60, 72]  # WFLW
-    elif data_name == "cofw68":
-        norm_indices = [16, 17]
 
-    # target_w_size and preds : n, 98 , 2
+    # target and preds : n, 68, 2
     target_np = landmarks_gt.cpu().numpy()
     pred_np = landmarks_pred.cpu().numpy()
 
     for target, pred in zip(target_np, pred_np):
         diff = target - pred
-        if data_name == "WFLW":
-            norm = np.linalg.norm(target[norm_indices[0]] - target[norm_indices[1]])
-        elif data_name == "cofw68":
-            norm = GetNormcofw68(target)
-        elif data_name in ("300W", "FS68Manifest"):
+        if data_name == "FS68Manifest":
             norm = GetNorm300W(target)
         else:
             raise ValueError(f"unknown dataset for NME: {data_name}")
