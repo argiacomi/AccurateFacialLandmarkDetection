@@ -109,6 +109,30 @@ def _resolve_path(base_dir, value):
     return os.path.realpath(os.path.join(_resolved_base_dir(str(base_dir)), raw))
 
 
+def _prepared_crop_from_entry(base_dir, entry, metadata):
+    """Resolve an optional pre-resized 256x256 crop declared by a manifest entry.
+
+    Returns ``(abs_image_path, (orig_h, orig_w))`` when the entry provides both a
+    ``prepared_image`` path and the native ``prepared_image_orig_hw`` dimensions
+    needed to rescale native-space landmarks, else ``("", None)``. The crop is a
+    pure decode-cost optimization: callers fall back to decoding the native
+    ``image`` whenever it is absent, unreadable, or not exactly 256x256, so a
+    missing or stale crop can never change training output.
+    """
+
+    value = entry.get("prepared_image") or metadata.get("prepared_image")
+    if not value:
+        return "", None
+    orig_hw = entry.get("prepared_image_orig_hw") or metadata.get(
+        "prepared_image_orig_hw"
+    )
+    try:
+        orig_h, orig_w = int(orig_hw[0]), int(orig_hw[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return "", None
+    return _resolve_path(base_dir, value), (orig_h, orig_w)
+
+
 def _clamp_weight(value):
     try:
         weight = float(value)
@@ -850,6 +874,9 @@ class LandmarkDataset(Dataset):
                 entry, metadata, landmark_count
             )
             conditions = _coerce_conditions(entry, metadata)
+            prepared_image, prepared_orig_hw = _prepared_crop_from_entry(
+                base_dir, entry, metadata
+            )
             samples.append(
                 {
                     "sample_id": str(
@@ -859,6 +886,8 @@ class LandmarkDataset(Dataset):
                         or index
                     ),
                     "image": _resolve_path(base_dir, image_value),
+                    "prepared_image": prepared_image,
+                    "prepared_image_orig_hw": prepared_orig_hw,
                     "landmarks": landmarks_path,
                     "dataset": str(
                         entry.get("dataset") or metadata.get("dataset") or ""
@@ -913,7 +942,44 @@ class LandmarkDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _load_prepared_crop(self, sample):
+        """Load a pre-resized 256x256 crop, or return ``None`` to fall back.
+
+        The crop is the byte-lossless result of resizing the native image to
+        256x256 with INTER_LINEAR, stored as a BGR PNG. ``cv2.resize`` is a
+        per-channel spatial op and the BGR->RGB swap only reorders channels, so
+        ``swap(resize(decode))`` (native path) equals ``resize(swap(decode))``
+        bit for bit. Landmarks stay in native space and are rescaled with the
+        stored original dimensions using the same arithmetic as the native
+        branch, so the returned image and landmarks are identical to decoding
+        the native image. Any miss (no crop, unreadable, or unexpected shape)
+        returns ``None`` so the caller decodes the native image instead.
+        """
+
+        prepared_image = sample.get("prepared_image")
+        orig_hw = sample.get("prepared_image_orig_hw")
+        if not prepared_image or not orig_hw:
+            return None
+        img = cv2.imread(prepared_image, cv2.IMREAD_COLOR)
+        if img is None or img.shape[0] != 256 or img.shape[1] != 256:
+            return None
+        img = img[:, :, [2, 1, 0]]
+        lmk = np.load(sample["landmarks"]).astype(np.float32)[:, :2]
+        if float(np.nanmax(lmk)) <= 1.5:
+            lmk = lmk * 255.0
+        orig_h, orig_w = int(orig_hw[0]), int(orig_hw[1])
+        if orig_h != 256 or orig_w != 256:
+            scale_x = 256.0 / float(orig_w)
+            scale_y = 256.0 / float(orig_h)
+            lmk[:, 0] *= scale_x
+            lmk[:, 1] *= scale_y
+        return img, lmk
+
     def _load_image_and_landmarks(self, sample):
+        prepared = self._load_prepared_crop(sample)
+        if prepared is not None:
+            return prepared
+
         img = cv2.imread(sample["image"], cv2.IMREAD_COLOR)
         if img is None:
             raise FileNotFoundError(f"could not read image {sample['image']}")

@@ -48,6 +48,7 @@ from lib.logging_utils import (
 from lib.manifest.validator import validate_training_manifest
 from tools import build_quality_dataset as builder
 from tools import download_landmark_datasets as downloader
+from tools.stage_prepared_crops import stage_crops
 
 VIDEO_DATASETS = frozenset({"300vw", "wflw-v"})
 # Datasets that are annotation layers over the existing 300W image cache.
@@ -419,6 +420,52 @@ def _ensure_prepare_logging_defaults(args) -> None:
         args.progress = True
 
 
+def _stage_combined_crops(
+    combined_manifest: Path,
+    args: argparse.Namespace,
+    manifest_payload: T.Mapping[str, T.Any] | None,
+) -> T.Mapping[str, T.Any] | None:
+    """Stage 256x256 crops in place and return the re-read manifest payload."""
+
+    if not combined_manifest.is_file():
+        return manifest_payload
+    started_at = time.time()
+    stats = stage_crops(
+        combined_manifest,
+        out_manifest=combined_manifest,
+        images_subdir=getattr(args, "stage_crops_subdir", "images"),
+        force=getattr(args, "force_stage_crops", False),
+        strict=False,
+    )
+    elapsed = time.time() - started_at
+    identical = stats["staged"] + stats["reused"]
+    total = identical + len(stats["mismatches"])
+    mismatch_note = (
+        f" | left native {fmt_count(len(stats['mismatches']))}"
+        if stats["mismatches"]
+        else ""
+    )
+    log_event(
+        "prepare",
+        (
+            f"stage-crops | crops {fmt_count(stats['staged'])} unique | "
+            f"reused {fmt_count(stats['reused'])} | "
+            f"skipped 256x256 {fmt_count(stats['skipped_already_256'])} | "
+            f"bit-identical {fmt_count(identical)}/{fmt_count(total)}{mismatch_note} | "
+            f"dir {stats['images_root']} | {elapsed:.1f}s"
+        ),
+        level=Verbosity.INFO,
+        staged=stats["staged"],
+        reused=stats["reused"],
+        skipped_already_256=stats["skipped_already_256"],
+        skipped_no_image=stats["skipped_no_image"],
+        mismatched=len(stats["mismatches"]),
+        images_root=stats["images_root"],
+        duration_seconds=elapsed,
+    )
+    return read_json(combined_manifest) if combined_manifest.is_file() else None
+
+
 def prepare(args: argparse.Namespace) -> int:
     _ensure_prepare_logging_defaults(args)
     datasets = downloader.normalize_datasets(args.datasets)
@@ -539,6 +586,19 @@ def prepare(args: argparse.Namespace) -> int:
             combined_manifest,
             require_images=not args.skip_image_exists_check,
             manifest_payload=combined_payload,
+        )
+
+    # Crop staging runs after validation (so a malformed manifest is never
+    # staged) and only when the manifest is valid. It augments the manifest in
+    # place; the loader falls back to native decode for any unstaged sample, so
+    # it can only speed training up, never change its data.
+    if (
+        built_any
+        and getattr(args, "stage_crops", False)
+        and (report is None or report.get("ok", False))
+    ):
+        combined_payload = _stage_combined_crops(
+            combined_manifest, args, combined_payload
         )
 
     _print_summary(
@@ -723,6 +783,26 @@ def _parser() -> argparse.ArgumentParser:
         "--skip-image-exists-check",
         action="store_true",
         help="Do not require manifest images to exist during validation.",
+    )
+    parser.add_argument(
+        "--stage-crops",
+        action="store_true",
+        help=(
+            "After building and validating, stage 256x256 crops for native-image "
+            "samples and record them in the combined manifest so training skips "
+            "full-resolution decode. Output-neutral: the loader falls back to "
+            "native decode for any unstaged sample."
+        ),
+    )
+    parser.add_argument(
+        "--stage-crops-subdir",
+        default="images",
+        help="Crop directory relative to --output-root (default: images).",
+    )
+    parser.add_argument(
+        "--force-stage-crops",
+        action="store_true",
+        help="Rewrite staged crop PNGs even when they already exist.",
     )
     parser.add_argument(
         "--keep-going",
