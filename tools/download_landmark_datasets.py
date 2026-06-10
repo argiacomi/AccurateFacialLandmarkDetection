@@ -157,9 +157,9 @@ SOURCES: tuple[SourceAsset, ...] = (
     ),
     SourceAsset(
         dataset="cofw29",
-        name="cofw29 original color images",
+        name="cofw29 color images",
         filename="COFW_color.zip",
-        url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
+        google_drive_file_id="1iNelCKpsvWHa2qM-f9-aRnIttklcUO6X",
         shared_with=("cofw68",),
         note="Original COFW 29-point color source (shared with cofw68). Preserve 29-point labels and visibility/occlusion metadata.",
     ),
@@ -167,7 +167,7 @@ SOURCES: tuple[SourceAsset, ...] = (
         dataset="cofw68",
         name="cofw68 color images",
         filename="COFW_color.zip",
-        url="https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1",
+        google_drive_file_id="1iNelCKpsvWHa2qM-f9-aRnIttklcUO6X",
         required_for_builder=False,
         shared_with=("cofw29",),
         note="cofw68 color image archive (shared with cofw29). Pair with cofw68 annotations/JSON for manifest building.",
@@ -406,7 +406,7 @@ def _download_with_urllib(url: str, destination: Path, *, force: bool) -> Path:
     tmp_path = Path(tmp_name)
 
     try:
-        log_event("download", f"url {destination.name}", level=Verbosity.INFO)
+        log_event("download", f"url {destination.name}", level=Verbosity.VERBOSE)
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(request) as response, tmp_path.open("wb") as out:
             total_header = response.headers.get("Content-Length")
@@ -472,7 +472,7 @@ def _download_with_gdown(
         ) from err
 
     origin = f"gdrive {file_id}" if file_id is not None else f"url {url}"
-    log_event("download", f"{origin} -> {destination.name}", level=Verbosity.INFO)
+    log_event("download", f"{origin} -> {destination.name}", level=Verbosity.VERBOSE)
 
     tmp_path = destination.with_name(f"{destination.name}.part")
     if tmp_path.exists():
@@ -1061,22 +1061,34 @@ def _asset_progress_line(index: int, total: int, asset: SourceAsset) -> str:
 
 
 def _process_one_asset_with_status(
-    index: int, total: int, asset: SourceAsset, args: argparse.Namespace
+    index: int,
+    total: int,
+    asset: SourceAsset,
+    args: argparse.Namespace,
+    *,
+    log_status: bool = True,
 ) -> dict[str, T.Any]:
     # Durable breadcrumb before any long download/extract/subprocess call.
-    log_event("download", _asset_progress_line(index, total, asset))
+    # Suppress these while Rich owns a live shared progress display; otherwise
+    # normal log lines interleave with the live table and create scrollback spam.
+    if log_status:
+        log_event("download", _asset_progress_line(index, total, asset))
+
     result = _process_asset(asset, args)
     status = str(result.get("status", "unknown"))
+
     # Keep the completion line compact. Detailed reuse/extract paths remain
     # under --log-level verbose.
-    log_event(
-        "download",
-        f"{index:02d}/{total:02d} done | {asset.dataset} | {status}",
-        level=Verbosity.INFO,
-        status=status,
-        dataset=asset.dataset,
-        asset=asset.name,
-    )
+    if log_status:
+        log_event(
+            "download",
+            f"{index:02d}/{total:02d} done | {asset.dataset} | {status}",
+            level=Verbosity.INFO,
+            status=status,
+            dataset=asset.dataset,
+            asset=asset.name,
+        )
+
     return result
 
 
@@ -1102,17 +1114,29 @@ def _process_assets_with_status(
     # restored to the requested source order for a stable summary/registry.
     results: list[dict[str, T.Any] | None] = [None] * total
     with (
-        concurrent_progress(),
+        concurrent_progress() as progress,
         ThreadPoolExecutor(max_workers=worker_count) as executor,
     ):
+        overall_task: T.Any | None = None
+        if progress is not None:
+            overall_task = progress.add_task("Download assets", total=total)
+
         future_to_pos = {
             executor.submit(
-                _process_one_asset_with_status, index, total, asset, args
+                _process_one_asset_with_status,
+                index,
+                total,
+                asset,
+                args,
+                log_status=progress is None,
             ): pos
             for pos, (index, asset) in enumerate(indexed)
         }
         for future in as_completed(future_to_pos):
             results[future_to_pos[future]] = future.result()
+            if progress is not None and overall_task is not None:
+                progress.advance(overall_task, 1)
+
     return [result for result in results if result is not None]
 
 

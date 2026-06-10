@@ -19,6 +19,8 @@ try:
         BarColumn,
         MofNCompleteColumn,
         Progress,
+        ProgressColumn,
+        Task,
         TaskProgressColumn,
         TextColumn,
         TimeElapsedColumn,
@@ -29,6 +31,8 @@ except Exception:  # noqa: BLE001
     Progress = None  # type: ignore[assignment]
     BarColumn = None  # type: ignore[assignment]
     MofNCompleteColumn = None  # type: ignore[assignment]
+    ProgressColumn = None  # type: ignore[assignment]
+    Task = None  # type: ignore[assignment]
     TaskProgressColumn = None  # type: ignore[assignment]
     TextColumn = None  # type: ignore[assignment]
     TimeElapsedColumn = None  # type: ignore[assignment]
@@ -41,6 +45,65 @@ _PROGRESS_ENABLED = True
 # This is what lets concurrent build loops render side by side without fighting
 # over the terminal. ``None`` means "no group active" (the normal serial path).
 _SHARED_PROGRESS: T.Any = None
+
+
+class _ScaledCompleteColumn(ProgressColumn if ProgressColumn is not None else object):
+    """Render byte download progress as MB/GB, otherwise preserve plain counts."""
+
+    def render(self, task: T.Any) -> str:
+        unit = task.fields.get("unit", "it")
+        unit_scale = bool(task.fields.get("unit_scale", False))
+        if unit == "B" and unit_scale:
+            completed = _format_bytes(float(task.completed))
+            if task.total is None:
+                return f"{completed}/?"
+            return f"{completed}/{_format_bytes(float(task.total))}"
+        completed = (
+            int(task.completed)
+            if float(task.completed).is_integer()
+            else task.completed
+        )
+        if task.total is None:
+            return f"{completed}"
+        total = int(task.total) if float(task.total).is_integer() else task.total
+        return f"{completed}/{total}"
+
+
+def _format_bytes(value: float) -> str:
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(value)
+    unit = units[0]
+    for unit in units:
+        if abs(size) < 1024 or unit == units[-1]:
+            break
+        size /= 1024
+    if unit == "B":
+        return f"{int(size)}B"
+    if size >= 100:
+        return f"{size:.0f}{unit}"
+    if size >= 10:
+        return f"{size:.1f}{unit}"
+    return f"{size:.2f}{unit}"
+
+
+def _add_progress_task(
+    progress: T.Any,
+    desc: str,
+    *,
+    total: int | float | None,
+    unit: str = "it",
+    unit_scale: bool = False,
+) -> T.Any:
+    try:
+        return progress.add_task(
+            desc,
+            total=total,
+            unit=unit,
+            unit_scale=unit_scale,
+        )
+    except TypeError:
+        # Some tests use a tiny fake Progress with add_task(desc, total=None).
+        return progress.add_task(desc, total=total)
 
 
 def set_progress_enabled(enabled: bool) -> None:
@@ -149,7 +212,7 @@ class _RichTrack(T.Generic[_T]):
             TextColumn("[bold blue]{task.description}[/bold blue]"),
             BarColumn(bar_width=None),
             TaskProgressColumn(),
-            MofNCompleteColumn(),
+            _ScaledCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             console=Console(
@@ -162,7 +225,13 @@ class _RichTrack(T.Generic[_T]):
             expand=True,
         )
         self._progress.start()
-        self._task_id = self._progress.add_task(self._desc, total=self.total)
+        self._task_id = _add_progress_task(
+            self._progress,
+            self._desc,
+            total=self.total,
+            unit=self._unit,
+            unit_scale=self._unit_scale,
+        )
 
     def __iter__(self) -> T.Iterator[_T]:
         if self._iterable is None:
@@ -224,17 +293,27 @@ class _SharedTaskTrack(T.Generic[_T]):
         desc: str,
         total: int | None,
         progress: T.Any,
+        unit: str,
+        unit_scale: bool,
     ) -> None:
         self._iterable = iterable
         self._desc = desc
         self.total = total
         self.n: int | float = 0
         self._progress = progress
+        self._unit = unit
+        self._unit_scale = unit_scale
         self._task_id: T.Any | None = None
 
     def _start(self) -> None:
         if self._task_id is None:
-            self._task_id = self._progress.add_task(self._desc, total=self.total)
+            self._task_id = _add_progress_task(
+                self._progress,
+                self._desc,
+                total=self.total,
+                unit=self._unit,
+                unit_scale=self._unit_scale,
+            )
 
     def __iter__(self) -> T.Iterator[_T]:
         if self._iterable is None:
@@ -310,7 +389,7 @@ def progress_group(*, transient: bool = True) -> T.Iterator[T.Any]:
         TextColumn("[bold blue]{task.description}[/bold blue]"),
         BarColumn(bar_width=None),
         TaskProgressColumn(),
-        MofNCompleteColumn(),
+        _ScaledCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=Console(file=sys.stderr, highlight=False, soft_wrap=True),
@@ -379,7 +458,12 @@ def track(
     # the per-call TTY/force heuristics below.
     if _SHARED_PROGRESS is not None:
         return _SharedTaskTrack(
-            iterable, desc=desc, total=total, progress=_SHARED_PROGRESS
+            iterable,
+            desc=desc,
+            total=total,
+            progress=_SHARED_PROGRESS,
+            unit=unit,
+            unit_scale=unit_scale,
         )
 
     if not forced and not stderr_is_tty:

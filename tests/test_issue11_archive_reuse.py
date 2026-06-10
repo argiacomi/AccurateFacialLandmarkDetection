@@ -170,26 +170,25 @@ def test_present_archive_still_preferred_over_extraction(tmp_path, monkeypatch):
 def _cofw_color(dataset: str) -> downloader.SourceAsset:
     return _asset(
         dataset,
-        name="cofw68 color images"
-        if dataset == "cofw68"
-        else "cofw29 original color images",
+        gdrive=True,
+        name="cofw68 color images" if dataset == "cofw68" else "cofw29 color images",
     )
 
 
 def test_cofw68_then_cofw29_reuses_shared_image_archive(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
 
-    def fake_url(url, destination, *, force=False):
+    def fake_gdrive(file_id, destination, *, force=False):
         return _valid_zip(destination)
 
-    monkeypatch.setattr(downloader, "_download_url", fake_url)
+    monkeypatch.setattr(downloader, "_download_google_drive", fake_gdrive)
     first = downloader._process_asset(_cofw_color("cofw68"), _args(output_root))
     assert first["status"] == "downloaded"
 
     # cofw29 must reuse the COFW color archive cofw68 already fetched.
     monkeypatch.setattr(
         downloader,
-        "_download_url",
+        "_download_google_drive",
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("should reuse cofw68 archive")
         ),
@@ -204,15 +203,15 @@ def test_cofw29_then_cofw68_reuses_shared_image_archive(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
     monkeypatch.setattr(
         downloader,
-        "_download_url",
-        lambda url, destination, *, force=False: _valid_zip(destination),
+        "_download_google_drive",
+        lambda file_id, destination, *, force=False: _valid_zip(destination),
     )
     first = downloader._process_asset(_cofw_color("cofw29"), _args(output_root))
     assert first["status"] == "downloaded"
 
     monkeypatch.setattr(
         downloader,
-        "_download_url",
+        "_download_google_drive",
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("should reuse cofw29 archive")
         ),
@@ -224,6 +223,11 @@ def test_cofw29_then_cofw68_reuses_shared_image_archive(tmp_path, monkeypatch):
 
 def test_cofw_annotation_assets_stay_separate(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
+    monkeypatch.setattr(
+        downloader,
+        "_download_google_drive",
+        lambda file_id, destination, *, force=False: _valid_zip(destination),
+    )
     monkeypatch.setattr(
         downloader,
         "_download_url",
@@ -245,7 +249,7 @@ def test_cofw_annotation_assets_stay_separate(tmp_path, monkeypatch):
     assert "cofw6868 benchmark annotations" not in cofw29
     # Both datasets still have their own color-image registry entry.
     assert "cofw68 color images" in cofw68
-    assert "cofw29 original color images" in cofw29
+    assert "cofw29 color images" in cofw29
 
 
 # ---------------------------------------------------------------------------
@@ -254,12 +258,12 @@ def test_cofw_annotation_assets_stay_separate(tmp_path, monkeypatch):
 def test_invalid_archive_is_rejected_and_removed(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
 
-    def fake_html(url, destination, *, force=False):
+    def fake_html(file_id, destination, *, force=False):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"<html><body>Download denied</body></html>")
         return destination
 
-    monkeypatch.setattr(downloader, "_download_url", fake_html)
+    monkeypatch.setattr(downloader, "_download_google_drive", fake_html)
     with pytest.raises(ValueError, match="not a valid zip/tar archive"):
         downloader._process_asset(
             _cofw_color("cofw68"), _args(output_root, keep_going=False)
@@ -283,19 +287,19 @@ def test_invalid_archive_is_not_reused(tmp_path):
 # ---------------------------------------------------------------------------
 # Reuse audit: idempotent re-runs
 # ---------------------------------------------------------------------------
-def test_rerun_reuses_existing_url_archive(tmp_path, monkeypatch):
+def test_rerun_reuses_existing_gdrive_archive(tmp_path, monkeypatch):
     output_root = tmp_path / "data"
     monkeypatch.setattr(
         downloader,
-        "_download_url",
-        lambda url, destination, *, force=False: _valid_zip(destination),
+        "_download_google_drive",
+        lambda file_id, destination, *, force=False: _valid_zip(destination),
     )
     first = downloader._process_asset(_cofw_color("cofw68"), _args(output_root))
     assert first["status"] == "downloaded"
 
     monkeypatch.setattr(
         downloader,
-        "_download_url",
+        "_download_google_drive",
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("rerun must reuse, not re-download")
         ),
@@ -309,11 +313,11 @@ def test_force_redownloads_even_when_archive_present(tmp_path, monkeypatch):
     _valid_zip(output_root / "cofw68" / "archives" / "COFW_color.zip")
     calls = {"n": 0}
 
-    def counting(url, destination, *, force=False):
+    def counting(file_id, destination, *, force=False):
         calls["n"] += 1
         return _valid_zip(destination)
 
-    monkeypatch.setattr(downloader, "_download_url", counting)
+    monkeypatch.setattr(downloader, "_download_google_drive", counting)
     result = downloader._process_asset(
         _cofw_color("cofw68"), _args(output_root, force=True)
     )
