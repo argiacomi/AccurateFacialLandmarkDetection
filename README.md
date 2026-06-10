@@ -234,3 +234,32 @@ The pipeline forwards runtime flags to `TrainHeatmapStageFP16.py` so long runs c
 - Evaluation cadence: `--eval-every`, `--full-eval-every`, `--eval-ema-every`, and `--eval-max-samples`.
 - Checkpoints: `last_checkpoint.pt`, `best_checkpoint.pt`, metadata sidecars, manifest/config compatibility checks, and optional `--restore-rng`.
 - Metrics: `runtime_metrics.jsonl` records epoch throughput, CUDA memory, data wait, device transfer, forward/loss, backward, optimizer step, scaler update, eval, EMA eval, checkpoint, aggregate compute, unattributed, and total epoch timing. CUDA transfer/compute/eval sections use CUDA event timing by default through `--synchronize-runtime-timing`; pass `--no-synchronize-runtime-timing` for low-overhead CPU wall-clock timing. Checkpoint timing includes periodic, legacy, best, EMA-best, and last-checkpoint writes.
+
+### Console output vs metrics files
+
+The console is human-first and intentionally terse: it summarizes a run with short
+`[tag]` lines (`[data]`, `[train]`, `[epoch]`, `[eval]`, `[sampler]`, `[pipeline]`,
+`[manifest]`) and points at the structured files for detail. The machine-readable
+record of a run always lives in those files regardless of console settings:
+`runtime_metrics.jsonl` (trainer), `pipeline_progress.jsonl` (pipeline),
+`eval_report.json` / eval record CSV/JSONL, and `dataset_audit.json` (dataset builders).
+
+The trainer, pipeline, and dataset tools share two console flags:
+
+- `--log-level quiet|info|verbose|debug` (default `info`):
+  - `quiet` — only epoch/eval/stage summaries and errors.
+  - `info` — adds the live training progress bar (or compact periodic `[train]` lines in non-TTY/JSON output).
+  - `verbose` — adds schema-head diagnostics, the domain-balanced sampler mix, and checkpoint writes.
+  - `debug` — adds full structures (e.g. raw sampler diagnostics, per-stage JSON) and stdlib `logger` output.
+- `--log-format human|json`: `human` prints tagged lines; `json` emits one JSON object per event for CI/log parsing. The structured metrics files above are written either way.
+
+```text
+[data]  train 124,000 samples | test 6,200 samples | device cuda:0
+[epoch] 12 done | 8m41s | 124,000 samples | 238.0 samples/s | lr 1.00e-04 | peak 11,842.0 MB
+[eval]  test sampled | NME 3.84% | FR@0.10 1.25% | AUC@0.10 0.0741 | n=2,048
+```
+
+Progress bars use [Rich](https://github.com/Textualize/rich) when stderr is an interactive
+terminal and automatically degrade to plain output under captured logs, `--log-format json`,
+or when Rich is not installed (it is an optional dependency). Dataset tools also expose
+`--progress/--no-progress` (and honor non-TTY detection) to control progress bars directly.

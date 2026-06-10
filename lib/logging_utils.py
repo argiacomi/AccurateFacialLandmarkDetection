@@ -5,8 +5,8 @@ Goals:
 * One consistent, human-first console format with short lowercase ``[tag]``
   prefixes that are easy to skim and grep.
 * A ``--log-format json`` mode that emits the same events as JSONL for CI/debug.
-* Verbosity tiers (``--quiet`` / default / ``--verbose`` / ``--debug``) so a run
-  can be terse or detailed without changing ``--log-every``.
+* Verbosity tiers (``--log-level quiet|info|verbose|debug``) so a run can be
+  terse or detailed without changing ``--log-every``.
 
 The detailed, machine-readable record of a run still lives in the structured
 files (``runtime_metrics.jsonl``, ``pipeline_progress.jsonl``,
@@ -117,7 +117,9 @@ def configure_console_logging(
 
     ``configure_stdlib`` also points the standard ``logging`` module at the
     console with a bare ``%(message)s`` format so dataset tools that use
-    ``logging.getLogger`` share the same clean look (no ``QUIET:name:`` prefix).
+    ``logging.getLogger`` share the same clean look (no ``LEVEL:name:`` prefix).
+    Below ``--log-level debug`` the stdlib logger is quieted so its internal
+    ``logger.info`` chatter does not compete with the tagged console lines.
     """
 
     _STATE["verbosity"] = Verbosity(int(verbosity))

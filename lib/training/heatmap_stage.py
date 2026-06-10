@@ -187,10 +187,11 @@ _LOSS_COMPONENT_ORDER = ("loc", "heat", "star", "cons", "vis", "aux")
 
 
 def _log_schema_head_details(loss_details) -> None:
-    """Log schema-head diagnostics: a one-line summary normally, full at -v.
+    """Log the full schema-head diagnostics line (``--log-level verbose``).
 
-    The full per-head counts/contributions/aux/visibility breakdown is wide and
-    hard to compare across steps, so it is shown only under ``--verbose``. The
+    The per-head counts/contributions/aux/visibility breakdown is wide and hard
+    to compare across steps, so it is verbose-only; the caller gates on
+    :func:`is_verbose` to also skip the per-head ``.item()`` syncs otherwise. The
     complete payload is always retained in runtime_metrics.jsonl.
     """
 
@@ -199,27 +200,19 @@ def _log_schema_head_details(loss_details) -> None:
         name: float(value.item())
         for name, value in loss_details.get("head_loss_contributions", {}).items()
     }
-    if is_verbose():
-        vis_weight = float(
-            loss_details.get("visibility_loss_weight", torch.tensor(0.0)).item()
-        )
-        log_event(
-            "train",
-            "  heads | "
-            f"counts {fmt_mapping(head_counts)} | "
-            f"contrib {fmt_mapping(head_losses)} | "
-            f"aux_valid {fmt_mapping(loss_details.get('auxiliary_valid_counts', {}))} | "
-            f"aux_acc {fmt_mapping(loss_details.get('auxiliary_accuracy', {}))} | "
-            f"vis_valid {fmt_mapping(loss_details.get('visibility_valid_counts', {}))} | "
-            f"vis_w {fmt_num(vis_weight)}",
-            level=Verbosity.VERBOSE,
-        )
-        return
+    vis_weight = float(
+        loss_details.get("visibility_loss_weight", torch.tensor(0.0)).item()
+    )
     log_event(
         "train",
-        f"  heads | active {fmt_mapping(head_counts, max_items=4)} | "
-        f"contrib total={fmt_num(sum(head_losses.values()))}",
-        level=Verbosity.INFO,
+        "  heads | "
+        f"counts {fmt_mapping(head_counts)} | "
+        f"contrib {fmt_mapping(head_losses)} | "
+        f"aux_valid {fmt_mapping(loss_details.get('auxiliary_valid_counts', {}))} | "
+        f"aux_acc {fmt_mapping(loss_details.get('auxiliary_accuracy', {}))} | "
+        f"vis_valid {fmt_mapping(loss_details.get('visibility_valid_counts', {}))} | "
+        f"vis_w {fmt_num(vis_weight)}",
+        level=Verbosity.VERBOSE,
     )
 
 
