@@ -460,6 +460,42 @@ def test_prepare_dataset_workers_parallel_matches_serial(tmp_path, monkeypatch):
             assert resolved.exists(), f"missing {key}: {sample[key]}"
 
 
+def test_prepare_dataset_workers_merge_does_not_double(tmp_path, monkeypatch):
+    monkeypatch.setattr(prepare.os, "cpu_count", lambda: 4)
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+    _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2)
+    _make_json_source(data_root / "300vw" / "extracted", dataset="300vw", count=3)
+
+    def _args(mode: str, dataset_workers: int) -> argparse.Namespace:
+        return _prepare_args(
+            datasets=["wflw-v", "300vw"],
+            data_root=data_root,
+            output_root=output_root,
+            dataset_workers=dataset_workers,
+            manifest_mode=mode,
+        )
+
+    def _sample_count() -> int:
+        payload = json.loads((output_root / "manifest.json").read_text("utf-8"))
+        ids = [s.get("sample_id") for s in payload["samples"]]
+        assert len(ids) == len(set(ids)), "merge produced duplicate sample_ids"
+        assert payload["metadata"]["sample_count"] == len(payload["samples"])
+        return len(payload["samples"])
+
+    # Serial replace writes absolute crop paths; a parallel merge rebuilds the
+    # same logical samples under _datasets/.. (different image strings). Without
+    # source-identity dedupe this would double to 10.
+    assert prepare.prepare(_args("replace", 1)) == 0
+    assert _sample_count() == 5
+    assert prepare.prepare(_args("merge", 2)) == 0
+    assert _sample_count() == 5
+
+    # Repeated parallel merge must also stay stable.
+    assert prepare.prepare(_args("merge", 2)) == 0
+    assert _sample_count() == 5
+
+
 def test_prepare_multi_dataset_merge(tmp_path, capsys):
     data_root = tmp_path / "data"
     output_root = tmp_path / "out"

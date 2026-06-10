@@ -25,6 +25,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import os
 import sys
@@ -430,8 +431,9 @@ def _resolve_parallel_budget(
     dataset count and the machine's CPU count), then the inner ``--workers``
     count is capped so that ``outer * inner`` never exceeds the CPU count. This
     keeps the total thread fan-out bounded when several dataset builds each
-    spawn their own video-extraction / overlay workers. ``dataset_workers <= 1``
-    always yields ``outer == 1`` so the serial path is taken unchanged.
+    spawn their own video-extraction / overlay workers. ``dataset_workers == 1``
+    yields ``outer == 1`` so the serial path is taken unchanged; ``<= 0`` means
+    "use all CPUs" (then clamped to the dataset count), matching ``--workers``.
     """
     total = os.cpu_count() or 1
     outer = max(1, min(resolve_worker_count(dataset_workers, dataset_count), total))
@@ -605,6 +607,57 @@ def _build_one_dataset_for_parallel(
     return record
 
 
+@contextlib.contextmanager
+def _opencv_single_threaded() -> T.Iterator[None]:
+    """Force OpenCV single-threaded inside the block, restoring prior settings.
+
+    Without this, the outer * inner Python workers would each spawn an internal
+    OpenCV thread pool and oversubscribe the machine. The previous thread count
+    and OpenCL flag are restored on exit so later crop staging (which runs after
+    the parallel build returns) and any subsequent build in the same process are
+    unaffected.
+    """
+    try:
+        import cv2
+    except Exception:  # noqa: BLE001
+        yield
+        return
+
+    old_threads = cv2.getNumThreads()
+    old_opencl: bool | None = None
+    with contextlib.suppress(Exception):
+        old_opencl = cv2.ocl.useOpenCL()
+    cv2.setNumThreads(0)
+    with contextlib.suppress(Exception):
+        cv2.ocl.setUseOpenCL(False)
+    try:
+        yield
+    finally:
+        cv2.setNumThreads(old_threads)
+        if old_opencl is not None:
+            with contextlib.suppress(Exception):
+                cv2.ocl.setUseOpenCL(old_opencl)
+
+
+def _merge_dedupe_key(sample: dict[str, T.Any]) -> tuple[T.Any, ...]:
+    """Stable per-sample identity for merge dedupe.
+
+    Re-running a merge in parallel mode rebuilds the same logical samples under
+    fresh ``_datasets/NN-.../`` paths, so the image-path key used by
+    ``_write_manifest`` would treat them as new and append duplicates. Keying on
+    source identity instead collapses a logical sample to one entry regardless of
+    where its crop currently lives.
+    """
+    source = sample.get("source")
+    source_id = source.get("source_id") if isinstance(source, dict) else None
+    return (
+        sample.get("dataset"),
+        source_id or sample.get("sample_id"),
+        sample.get("frame_id"),
+        sample.get("split"),
+    )
+
+
 def _build_datasets_parallel(
     datasets: list[str],
     *,
@@ -621,16 +674,6 @@ def _build_datasets_parallel(
     combined ``output_root/manifest.json``. Returns ``(results, built_any)`` with
     the same record shape the serial path produces.
     """
-    # Force OpenCV single-threaded so that outer * inner Python workers do not
-    # each spawn an internal OpenCV thread pool and oversubscribe the machine.
-    try:
-        import cv2
-
-        cv2.setNumThreads(0)
-        cv2.ocl.setUseOpenCL(False)
-    except Exception:  # noqa: BLE001
-        pass
-
     dataset_total = len(datasets)
     log_event(
         "prepare",
@@ -643,7 +686,9 @@ def _build_datasets_parallel(
     )
 
     results: list[dict[str, T.Any]] = []
-    with ThreadPoolExecutor(max_workers=outer_workers) as executor:
+    with _opencv_single_threaded(), ThreadPoolExecutor(
+        max_workers=outer_workers
+    ) as executor:
         future_to_dataset = {
             executor.submit(
                 _build_one_dataset_for_parallel,
@@ -677,7 +722,7 @@ def _build_datasets_parallel(
     order = {dataset: index for index, dataset in enumerate(datasets)}
     results.sort(key=lambda item: order.get(item["dataset"], 10**9))
 
-    merged_samples: list[dict[str, T.Any]] = []
+    new_samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     built_any = False
     for record in results:
@@ -687,16 +732,32 @@ def _build_datasets_parallel(
         payload = record.pop("payload", None) or {}
         for sample in payload.get("samples", []):
             if isinstance(sample, dict):
-                merged_samples.append(sample)
+                new_samples.append(sample)
         skipped.extend(record.get("skipped_examples") or [])
 
     if built_any:
+        # Merge in memory keyed on source identity (not image path) so a repeated
+        # --manifest-mode merge in parallel mode never doubles samples, then write
+        # once as a replace. _write_manifest still applies its image-path dedupe
+        # for cross-dataset overlap when --allow-overlap is not set.
+        deduped: dict[tuple[T.Any, ...], dict[str, T.Any]] = {}
+        if args.manifest_mode == "merge":
+            combined_manifest = output_root / "manifest.json"
+            if combined_manifest.is_file():
+                existing = read_json(combined_manifest)
+                for sample in existing.get("samples", []):
+                    if isinstance(sample, dict):
+                        deduped[_merge_dedupe_key(sample)] = sample
+        # Freshly built samples win on a stable-key collision (current paths).
+        for sample in new_samples:
+            deduped[_merge_dedupe_key(sample)] = sample
+
         builder._write_manifest(
             output_root,
             "multi_dataset",
             "default",
-            merged_samples,
-            mode=args.manifest_mode,
+            list(deduped.values()),
+            mode="replace",
             allow_overlap=args.allow_overlap,
             scenarios=None,
             skipped=skipped,
@@ -808,8 +869,9 @@ def prepare(args: argparse.Namespace) -> int:
     keep_going = args.keep_going or len(datasets) > 1
     dataset_total = len(datasets)
     # --dataset-workers has priority over --workers; the budget split caps inner
-    # workers so outer * inner never exceeds the CPU count. dataset_workers <= 1
-    # (or a single dataset) keeps outer_workers == 1 and the serial path below.
+    # workers so outer * inner never exceeds the CPU count. dataset_workers == 1
+    # (or a single dataset) keeps outer_workers == 1 and the serial path below;
+    # <=0 requests all CPUs.
     outer_workers, inner_workers = _resolve_parallel_budget(
         getattr(args, "dataset_workers", 1), args.workers, dataset_total
     )
@@ -1090,9 +1152,10 @@ def _parser() -> argparse.ArgumentParser:
         default=1,
         help=(
             "Parallel datasets to build during multidataset prepare runs. 1 keeps "
-            "the current serial behavior. When >1, each dataset is built in an "
-            "isolated output dir and merged; --dataset-workers takes priority over "
-            "--workers and the two combined never exceed the CPU count."
+            "the current serial behavior; <=0 uses all CPUs (clamped to the dataset "
+            "count). When >1, each dataset is built in an isolated output dir and "
+            "merged; --dataset-workers takes priority over --workers and the two "
+            "combined never exceed the CPU count."
         ),
     )
     parser.add_argument(
