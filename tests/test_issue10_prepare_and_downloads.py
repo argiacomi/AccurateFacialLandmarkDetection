@@ -352,6 +352,65 @@ def test_list_table_marks_manual_and_gdrive():
     assert "gdrive:12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm" in table
 
 
+def test_buildable_datasets_excludes_download_only():
+    # aflw stays downloadable (a source layer for merl-rav) but is not buildable.
+    assert "aflw" in downloader.DOWNLOAD_ONLY_DATASETS
+    assert "aflw" in downloader.ALL_DATASETS
+    assert "aflw" not in downloader.BUILDABLE_DATASETS
+    assert set(downloader.BUILDABLE_DATASETS) == set(downloader.ALL_DATASETS) - {"aflw"}
+
+
+def test_list_table_marks_download_only_aflw():
+    sources = downloader._selected_sources(["aflw", "wflw-v"], include_alternates=False)
+    table = downloader.format_list_table(sources)
+    aflw_rows = [line for line in table.splitlines() if line.startswith("aflw")]
+    assert aflw_rows and all("download-only" in line for line in aflw_rows)
+    # A buildable dataset keeps its normal kind marker.
+    assert any(
+        line.startswith("wflw-v") and "download-only" not in line
+        for line in table.splitlines()
+    )
+
+
+def _fake_full_result(asset, args):
+    extracted = Path(args.output_root) / asset.dataset / "extracted"
+    extracted.mkdir(parents=True, exist_ok=True)
+    return {
+        "dataset": asset.dataset,
+        "name": asset.name,
+        "filename": asset.filename,
+        "status": "downloaded",
+        "archive": str(extracted.parent / "archives" / asset.filename),
+        "extracted": str(extracted),
+        "source_kind": asset.source_kind,
+        "source": asset.source_display,
+        "checksum_status": "none",
+        "required_for_builder": asset.required_for_builder,
+        "alternate": asset.alternate,
+    }
+
+
+def test_process_assets_parallel_preserves_source_order(monkeypatch):
+    sources = downloader._selected_sources(None, include_alternates=False)
+    monkeypatch.setattr(downloader, "_process_asset", _fake_full_result)
+    args = argparse.Namespace(output_root=Path("/tmp/unused"), extract=False)
+
+    serial = downloader._process_assets_with_status(sources, args, workers=1)
+    parallel = downloader._process_assets_with_status(sources, args, workers=4)
+
+    assert len(parallel) == len(sources)
+    assert [r["name"] for r in parallel] == [r["name"] for r in serial]
+
+
+def test_download_datasets_accepts_workers(tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader, "_process_asset", _fake_full_result)
+    results, registry = downloader.download_datasets(
+        ["wflw-v", "300vw"], output_root=tmp_path, extract=False, workers=2
+    )
+    assert {r["dataset"] for r in results} == {"wflw-v", "300vw"}
+    assert set(registry["datasets"]) >= {"wflw-v", "300vw"}
+
+
 # ---------------------------------------------------------------------------
 # prepare flow (WFLW-V via tiny fake source layout)
 # ---------------------------------------------------------------------------

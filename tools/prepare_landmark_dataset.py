@@ -40,6 +40,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.datasets.parallel import resolve_worker_count
+from lib.datasets.progress import concurrent_progress
 from lib.io_utils import read_json
 from lib.logging_utils import (
     Verbosity,
@@ -665,35 +666,6 @@ def _merge_dedupe_key(sample: dict[str, T.Any]) -> tuple[T.Any, ...]:
     )
 
 
-@contextlib.contextmanager
-def _parallel_build_progress(args: argparse.Namespace) -> T.Iterator[T.Any]:
-    """Own one live display for the concurrent build, or suppress per-build bars.
-
-    Several builds each rendering their own rich progress would clobber one
-    another in the terminal. When a TTY is available we open a single shared
-    Progress (``progress_group``): every inner ``track()`` loop becomes one row,
-    so concurrent builds render side by side without fighting over the cursor,
-    and the yielded Progress lets the caller add an overall datasets task.
-
-    When no shared display can be owned (non-TTY/captured logs, no Rich, or
-    ``--no-progress``) we instead suppress the per-build bars so worker threads
-    do not interleave progress into the logs; the ``[prepare] NN/NN build|done``
-    lines remain the indicator. The user's ``--progress`` state is restored on
-    exit so the later serial validation/crop-staging keeps its own bar.
-    """
-    from lib.datasets.progress import progress_group, set_progress_enabled
-
-    with progress_group() as group:
-        if group is not None:
-            yield group
-            return
-        set_progress_enabled(False)
-        try:
-            yield None
-        finally:
-            set_progress_enabled(bool(getattr(args, "progress", True)))
-
-
 def _build_datasets_parallel(
     datasets: list[str],
     *,
@@ -722,8 +694,11 @@ def _build_datasets_parallel(
     )
 
     results: list[dict[str, T.Any]] = []
+    # One shared Progress (concurrent build rows + an overall task) when a TTY is
+    # available; otherwise per-build bars are suppressed so worker threads don't
+    # interleave output and the [prepare] NN/NN lines remain the indicator.
     with (
-        _parallel_build_progress(args) as build_progress,
+        concurrent_progress() as build_progress,
         _opencv_single_threaded(),
         ThreadPoolExecutor(max_workers=outer_workers) as executor,
     ):
@@ -902,6 +877,8 @@ def prepare(args: argparse.Namespace) -> int:
             force=args.force,
             skip_checksum=args.skip_checksum,
             keep_going=True,
+            # --dataset-workers also fans out the (I/O-bound) download/extract step.
+            workers=getattr(args, "dataset_workers", 1),
         )
     else:
         registry = downloader.load_registry(data_root)

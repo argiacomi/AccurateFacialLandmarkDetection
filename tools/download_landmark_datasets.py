@@ -9,13 +9,13 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
 import typing as T
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.datasets.progress import track
+from lib.datasets.parallel import resolve_worker_count
+from lib.datasets.progress import concurrent_progress, track
 from lib.io_utils import sha1_file, sha256_file
 from lib.logging_utils import (
     Verbosity,
@@ -56,7 +57,14 @@ ALL_DATASETS = (
     "xm2vts",
 )
 
-# BUILDABLE_DATASETS = tuple(dataset for dataset in ALL_DATASETS if dataset != "aflw")
+# Some ids are downloaded only as source layers for other datasets and have no
+# manifest builder of their own (e.g. AFLW supplies native images for MERL-RAV).
+# They stay in ALL_DATASETS so ``--datasets all`` still fetches them, but they are
+# flagged download-only in --list and excluded from the buildable set.
+DOWNLOAD_ONLY_DATASETS = frozenset({"aflw"})
+BUILDABLE_DATASETS = tuple(
+    dataset for dataset in ALL_DATASETS if dataset not in DOWNLOAD_ONLY_DATASETS
+)
 
 
 @dataclass(frozen=True)
@@ -378,7 +386,12 @@ def _verify(path: Path, *, sha256: str | None, sha1: str | None) -> None:
             raise ValueError(f"sha1 mismatch for {path}: expected {sha1}, got {actual}")
 
 
-def _download_url(url: str, destination: Path, *, force: bool) -> Path:
+def _download_with_urllib(url: str, destination: Path, *, force: bool) -> Path:
+    """Stream a public URL to ``destination`` via urllib.
+
+    Fallback for non-Google hosts that reject gdown's request. Writes to a
+    sibling ``.part`` file and removes it on any failure, including Ctrl-C.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not force:
         log_event("download", f"reuse {destination}", level=Verbosity.VERBOSE)
@@ -391,6 +404,7 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
     )
     os.close(fd)
     tmp_path = Path(tmp_name)
+
     try:
         log_event("download", f"url {destination.name}", level=Verbosity.INFO)
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -414,45 +428,140 @@ def _download_url(url: str, destination: Path, *, force: bool) -> Path:
                         break
                     out.write(chunk)
                     bar.update(len(chunk))
+
         if tmp_path.stat().st_size == 0:
             raise OSError(f"download produced an empty file: {tmp_path}")
+
         os.replace(tmp_path, destination)
         return destination
     except BaseException:
-        # BaseException so a Ctrl-C (KeyboardInterrupt) also removes the partial file.
         if tmp_path.exists():
             tmp_path.unlink()
         raise
 
 
-def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> Path:
+def _download_with_gdown(
+    destination: Path,
+    *,
+    url: str | None = None,
+    file_id: str | None = None,
+    force: bool,
+) -> Path:
+    """Download one archive via ``gdown.download`` using callback progress.
+
+    Exactly one of ``url`` or ``file_id`` must be given. Writes to a sibling
+    ``.part`` file, drives Rich progress from gdown's
+    ``progress(bytes_so_far, bytes_total)`` callback, then atomically renames
+    into place. Public URLs fall back to urllib if gdown fails.
+    """
+    if (url is None) == (file_id is None):
+        raise ValueError("provide exactly one of url or file_id")
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not force:
         log_event("download", f"reuse {destination}", level=Verbosity.VERBOSE)
         return destination
-    gdown = shutil.which("gdown")
-    if gdown is None:
-        raise RuntimeError(
-            "Google Drive download requested but gdown is not installed. Run `pip install gdown`, "
-            f"or manually download file id {file_id} to {destination}."
-        )
     if force and destination.exists():
         destination.unlink()
-    log_event("download", f"gdrive {file_id} -> {destination}", level=Verbosity.INFO)
-    tmp_destination = destination.with_name(f"{destination.name}.part")
-    if tmp_destination.exists():
-        tmp_destination.unlink()
+
     try:
-        subprocess.run([gdown, file_id, "-O", str(tmp_destination)], check=True)
-        if not tmp_destination.is_file() or tmp_destination.stat().st_size == 0:
-            raise OSError(
-                f"Google Drive download failed or produced empty file: {tmp_destination}"
-            )
-        os.replace(tmp_destination, destination)
-    finally:
-        if tmp_destination.exists():
-            tmp_destination.unlink()
-    return destination
+        import gdown
+    except ImportError as err:  # pragma: no cover - gdown is expected in envs
+        raise RuntimeError(
+            "gdown is required for downloads. Run `pip install -U gdown`."
+        ) from err
+
+    origin = f"gdrive {file_id}" if file_id is not None else f"url {url}"
+    log_event("download", f"{origin} -> {destination.name}", level=Verbosity.INFO)
+
+    tmp_path = destination.with_name(f"{destination.name}.part")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    bar = track(
+        desc=f"Download {destination.name}",
+        total=None,
+        unit="B",
+        unit_scale=True,
+        leave=True,
+        disable=False,
+    )
+    last_seen = 0
+
+    def _on_progress(bytes_so_far: int, bytes_total: int | None) -> None:
+        nonlocal last_seen
+
+        if bytes_total is not None and bar.total != bytes_total:
+            bar.set_total(bytes_total)
+
+        delta = bytes_so_far - last_seen
+        if delta > 0:
+            bar.update(delta)
+            last_seen = bytes_so_far
+
+    try:
+        with bar:
+            if file_id is not None:
+                result = gdown.download(
+                    id=file_id,
+                    output=str(tmp_path),
+                    quiet=True,
+                    progress=_on_progress,
+                )
+            else:
+                result = gdown.download(
+                    url=url,
+                    output=str(tmp_path),
+                    quiet=True,
+                    progress=_on_progress,
+                )
+
+        if result is None:
+            raise OSError(f"gdown failed for {origin}")
+
+        if not tmp_path.is_file() or tmp_path.stat().st_size == 0:
+            raise OSError(f"download produced an empty file: {tmp_path}")
+
+        os.replace(tmp_path, destination)
+        return destination
+
+    except KeyboardInterrupt:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    except Exception as err:  # noqa: BLE001
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+        # Google Drive ids have no urllib equivalent; only retry plain URLs.
+        if url is None:
+            raise
+
+        log_event(
+            "download",
+            f"gdown failed for {destination.name} ({err}); retrying via urllib",
+            level=Verbosity.VERBOSE,
+        )
+        return _download_with_urllib(url, destination, force=force)
+
+
+def _download_url(url: str, destination: Path, *, force: bool) -> Path:
+    """Download a public URL via urllib.
+
+    Public monkeypatch seam used by tests. Keep this urllib-backed so tests and
+    callers can monkeypatch urllib.request.urlopen and still exercise partial
+    file cleanup. Google Drive downloads use gdown's progress callback via
+    _download_google_drive.
+    """
+    return _download_with_urllib(url, destination, force=force)
+
+
+def _download_google_drive(file_id: str, destination: Path, *, force: bool) -> Path:
+    """Download a Google Drive asset by id.
+
+    Public monkeypatch seam used by tests.
+    """
+    return _download_with_gdown(destination, file_id=file_id, force=force)
 
 
 def _safe_extract_target(destination: Path, member_name: str) -> Path:
@@ -915,13 +1024,18 @@ def format_list_table(sources: T.Sequence[SourceAsset]) -> str:
         source = asset.source_display
         if asset.is_manual:
             source = f"manual ({asset.filename})"
+        kind = (
+            "download-only"
+            if asset.dataset in DOWNLOAD_ONLY_DATASETS
+            else asset.kind_marker
+        )
         rows.append(
             (
                 asset.dataset,
                 asset.name,
                 source,
                 asset.checksum_marker,
-                asset.kind_marker,
+                kind,
             )
         )
     widths = [
@@ -946,28 +1060,60 @@ def _asset_progress_line(index: int, total: int, asset: SourceAsset) -> str:
     return f"{index:02d}/{total:02d} {asset.dataset} | {asset.name}"
 
 
+def _process_one_asset_with_status(
+    index: int, total: int, asset: SourceAsset, args: argparse.Namespace
+) -> dict[str, T.Any]:
+    # Durable breadcrumb before any long download/extract/subprocess call.
+    log_event("download", _asset_progress_line(index, total, asset))
+    result = _process_asset(asset, args)
+    status = str(result.get("status", "unknown"))
+    # Keep the completion line compact. Detailed reuse/extract paths remain
+    # under --log-level verbose.
+    log_event(
+        "download",
+        f"{index:02d}/{total:02d} done | {asset.dataset} | {status}",
+        level=Verbosity.INFO,
+        status=status,
+        dataset=asset.dataset,
+        asset=asset.name,
+    )
+    return result
+
+
 def _process_assets_with_status(
-    sources: T.Sequence[SourceAsset], args: argparse.Namespace
+    sources: T.Sequence[SourceAsset],
+    args: argparse.Namespace,
+    *,
+    workers: int = 1,
 ) -> list[dict[str, T.Any]]:
     total = len(sources)
-    results: list[dict[str, T.Any]] = []
-    for index, asset in enumerate(sources, start=1):
-        # Durable breadcrumb before any long download/extract/subprocess call.
-        log_event("download", _asset_progress_line(index, total, asset))
-        result = _process_asset(asset, args)
-        status = str(result.get("status", "unknown"))
-        # Keep the completion line compact. Detailed reuse/extract paths remain
-        # under --log-level verbose.
-        log_event(
-            "download",
-            f"{index:02d}/{total:02d} done | {asset.dataset} | {status}",
-            level=Verbosity.INFO,
-            status=status,
-            dataset=asset.dataset,
-            asset=asset.name,
-        )
-        results.append(result)
-    return results
+    indexed = list(enumerate(sources, start=1))
+    worker_count = resolve_worker_count(workers, total)
+    if worker_count <= 1 or total <= 1:
+        return [
+            _process_one_asset_with_status(index, total, asset, args)
+            for index, asset in indexed
+        ]
+
+    # Downloads/extracts are I/O bound and each asset writes to its own
+    # archives/extracted paths, so concurrent workers do not contend. A single
+    # shared Rich progress renders one row per active transfer (or progress is
+    # suppressed off-TTY) so bars never fight over the terminal. Results are
+    # restored to the requested source order for a stable summary/registry.
+    results: list[dict[str, T.Any] | None] = [None] * total
+    with (
+        concurrent_progress(),
+        ThreadPoolExecutor(max_workers=worker_count) as executor,
+    ):
+        future_to_pos = {
+            executor.submit(
+                _process_one_asset_with_status, index, total, asset, args
+            ): pos
+            for pos, (index, asset) in enumerate(indexed)
+        }
+        for future in as_completed(future_to_pos):
+            results[future_to_pos[future]] = future.result()
+    return [result for result in results if result is not None]
 
 
 def download_datasets(
@@ -979,6 +1125,7 @@ def download_datasets(
     skip_checksum: bool = False,
     include_alternates: bool = False,
     keep_going: bool = True,
+    workers: int = 1,
 ) -> tuple[list[dict[str, T.Any]], dict[str, T.Any]]:
     """Programmatic download entry point used by the preparation orchestrator.
 
@@ -993,7 +1140,7 @@ def download_datasets(
         skip_checksum=skip_checksum,
         keep_going=keep_going,
     )
-    results = _process_assets_with_status(sources, args)
+    results = _process_assets_with_status(sources, args, workers=workers)
     _write_summary(results, output_root)
     write_registry(results, output_root)
     return results, load_registry(output_root) or build_registry(results, output_root)
@@ -1045,6 +1192,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--keep-going", action="store_true", help="Continue after a failed download."
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel datasets/sources to download and extract at once. 1 keeps "
+            "the current serial behavior; <=0 uses all CPUs. The download/extract "
+            "step is I/O bound, so concurrency mainly overlaps network and disk."
+        ),
     )
     parser.add_argument(
         "--list", action="store_true", help="List configured sources and exit."
@@ -1106,7 +1263,9 @@ def _run(args: argparse.Namespace) -> int:
         print(format_list_table(sources))
         return 0
 
-    results = _process_assets_with_status(sources, args)
+    results = _process_assets_with_status(
+        sources, args, workers=getattr(args, "workers", 1)
+    )
     summary = _write_summary(results, Path(args.output_root))
     registry = write_registry(results, Path(args.output_root))
     log_event("download", f"summary {summary}")

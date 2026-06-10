@@ -103,6 +103,9 @@ class _PlainTrack(T.Generic[_T]):
     def update(self, n: int | float = 1) -> None:
         self.n += n
 
+    def set_total(self, total: int | None) -> None:
+        self.total = total
+
     def close(self) -> None:
         return None
 
@@ -139,22 +142,14 @@ class _RichTrack(T.Generic[_T]):
         assert BarColumn is not None
         assert TimeElapsedColumn is not None
         assert TimeRemainingColumn is not None
+        assert TaskProgressColumn is not None
+        assert MofNCompleteColumn is not None
 
-        percent_column = (
-            TextColumn("{task.percentage:>5.1f}%")
-            if self.total is not None
-            else TextColumn("")
-        )
-        count_column = (
-            TextColumn("{task.completed}/{task.total}")
-            if self.total is not None
-            else TextColumn("{task.completed}")
-        )
         self._progress = Progress(
             TextColumn("[bold blue]{task.description}[/bold blue]"),
             BarColumn(bar_width=None),
-            percent_column,
-            count_column,
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             console=Console(
@@ -200,6 +195,11 @@ class _RichTrack(T.Generic[_T]):
         self.n += n
         if self._progress is not None and self._task_id is not None:
             self._progress.advance(self._task_id, n)
+
+    def set_total(self, total: int | None) -> None:
+        self.total = total
+        if self._progress is not None and self._task_id is not None:
+            self._progress.update(self._task_id, total=total)
 
     def close(self) -> None:
         if self._progress is not None:
@@ -270,6 +270,12 @@ class _SharedTaskTrack(T.Generic[_T]):
             with contextlib.suppress(Exception):
                 self._progress.advance(self._task_id, n)
 
+    def set_total(self, total: int | None) -> None:
+        self.total = total
+        if self._task_id is not None:
+            with contextlib.suppress(Exception):
+                self._progress.update(self._task_id, total=total)
+
     def close(self) -> None:
         if self._task_id is not None:
             with contextlib.suppress(Exception):
@@ -318,6 +324,30 @@ def progress_group(*, transient: bool = True) -> T.Iterator[T.Any]:
     finally:
         _SHARED_PROGRESS = None
         progress.stop()
+
+
+@contextlib.contextmanager
+def concurrent_progress() -> T.Iterator[T.Any]:
+    """Wrap a concurrent block: own one shared Progress, or suppress per-call bars.
+
+    Yields the shared Progress when a live display can be owned (so the caller can
+    add an overall task and every inner ``track()`` loop becomes a row). When no
+    display can be owned (non-TTY/captured logs, no Rich, or progress disabled),
+    yields ``None`` after disabling progress for the block so worker threads do
+    not interleave bars into the output; the prior enabled-state is restored on
+    exit. Either way concurrent loops never start competing live displays.
+    """
+    global _PROGRESS_ENABLED
+    with progress_group() as group:
+        if group is not None:
+            yield group
+            return
+        prior = _PROGRESS_ENABLED
+        _PROGRESS_ENABLED = False
+        try:
+            yield None
+        finally:
+            _PROGRESS_ENABLED = prior
 
 
 def track(
