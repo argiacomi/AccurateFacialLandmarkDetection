@@ -553,6 +553,21 @@ def _crop_image_and_remap_points(
     if not np.isfinite(side) or side <= 1:
         raise ValueError(f"invalid crop side for {image_path}: {side}")
 
+    virtual_w = max(1.0, right - left)
+    virtual_h = max(1.0, bottom - top)
+    max_virtual_side = 4096.0
+    max_virtual_pixels = 4096.0 * 4096.0
+    if (
+        virtual_w > max_virtual_side
+        or virtual_h > max_virtual_side
+        or virtual_w * virtual_h > max_virtual_pixels
+    ):
+        raise ValueError(
+            "unreasonable crop bbox for "
+            f"{image_path}: bbox={(left, top, right, bottom)} "
+            f"virtual_shape=({virtual_h:.1f}, {virtual_w:.1f})"
+        )
+
     ix1 = int(np.floor(max(0.0, left)))
     iy1 = int(np.floor(max(0.0, top)))
     ix2 = int(np.ceil(min(float(width), right)))

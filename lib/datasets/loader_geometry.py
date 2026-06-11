@@ -33,6 +33,68 @@ def image_hw(path: str | Path) -> tuple[int, int]:
     return int(h), int(w)
 
 
+def _resolve_path(base_dir: Path, value: T.Any) -> Path:
+    raw = str(value or "")
+    p = Path(raw)
+    return p if p.is_absolute() else (base_dir / p).resolve()
+
+
+def prepared_image_is_usable(path: str | Path) -> bool:
+    """Return True only when the training loader would use ``prepared_image``."""
+
+    try:
+        return image_hw(path) == (LOADER_IMAGE_SIZE, LOADER_IMAGE_SIZE)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def resolve_loader_source_hw(
+    sample: T.Mapping[str, T.Any],
+    *,
+    base_dir: str | Path = ".",
+) -> tuple[tuple[int, int] | None, str, str | None]:
+    """Resolve the image size the training loader will use for geometry.
+
+    The real loader only takes the prepared fast path when ``prepared_image`` is
+    readable and exactly 256x256 and ``prepared_image_orig_hw`` is present.
+    Otherwise it falls back to the native image path. This helper mirrors that
+    choice so validators do not validate against stale prepared metadata.
+    """
+
+    base = Path(base_dir)
+
+    prepared = sample.get("prepared_image")
+    prepared_orig_hw = sample.get("prepared_image_orig_hw")
+    if prepared and prepared_orig_hw:
+        prepared_path = _resolve_path(base, prepared)
+        if prepared_image_is_usable(prepared_path):
+            try:
+                hw = (int(prepared_orig_hw[0]), int(prepared_orig_hw[1]))
+            except Exception as err:  # noqa: BLE001
+                return (
+                    None,
+                    "prepared_image_orig_hw",
+                    f"invalid_prepared_image_orig_hw:{err}",
+                )
+            if hw[0] <= 0 or hw[1] <= 0:
+                return (
+                    None,
+                    "prepared_image_orig_hw",
+                    f"invalid_prepared_image_orig_hw:{hw}",
+                )
+            return hw, "prepared_image", None
+
+    image_value = sample.get("image") or sample.get("image_path") or sample.get("path")
+    if not image_value:
+        return None, "image", "missing_image"
+
+    image_path = _resolve_path(base, image_value)
+    try:
+        return image_hw(image_path), "image", None
+    except Exception as err:  # noqa: BLE001
+        return None, "image", f"unreadable_image:{err}"
+
+
 def _as_xy(points: T.Any) -> np.ndarray:
     arr = np.asarray(points, dtype=np.float32)
     if arr.ndim != 2 or arr.shape[1] < 2:
@@ -55,7 +117,7 @@ def _loader_scaled_points(
     if lmk.size and float(np.nanmax(lmk)) <= 1.5:
         # Mirrors LandmarkDataset exactly. Normalized labels are assumed to be
         # normalized to the 256x256 training frame, not source image dimensions.
-        lmk *= float(LOADER_IMAGE_SIZE)
+        lmk *= 255.0
 
     if h != LOADER_IMAGE_SIZE or w != LOADER_IMAGE_SIZE:
         lmk[:, 0] *= float(LOADER_IMAGE_SIZE) / float(w)

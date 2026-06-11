@@ -28,3 +28,12 @@ def test_loader_geometry_flags_unreasonable_padding():
     assert diag["reason"] == "unreasonable_loader_padding"
     assert diag["landmarks_outside_image"] is True
     assert diag["padded_shape"][0] > 2048 or diag["padded_shape"][1] > 2048
+
+
+def test_loader_geometry_normalized_uses_255_scale():
+    pts = np.ones((106, 2), dtype=np.float32)
+    diag = simulate_loader_geometry(pts, (256, 256))
+
+    assert diag["ok"] is True
+    assert diag["rb"] == [255.0, 255.0]
+    assert diag["padding"] == 4.0

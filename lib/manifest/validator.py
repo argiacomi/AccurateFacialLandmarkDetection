@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from lib.datasets.loader_geometry import (
-    image_hw as loader_image_hw,
+    resolve_loader_source_hw,
     simulate_loader_geometry,
 )
 
@@ -325,42 +325,23 @@ def validate_training_manifest(
                     errors.append("invalid_landmarks")
 
         if landmarks is not None:
-            geometry_hw = None
-            geometry_source = ""
-            prepared_orig_hw = sample.get("prepared_image_orig_hw")
-            if prepared_orig_hw:
-                try:
-                    geometry_hw = (int(prepared_orig_hw[0]), int(prepared_orig_hw[1]))
-                    geometry_source = "prepared_image_orig_hw"
-                except Exception as err:  # noqa: BLE001
-                    report["geometry"]["invalid_geometry"] += 1
-                    _example(
-                        report,
-                        "invalid_geometry",
-                        {
-                            "sample_id": sample_id,
-                            "error": f"invalid_prepared_image_orig_hw:{err}",
-                        },
-                        max_examples,
-                    )
-                    errors.append("invalid_geometry")
-            elif image_path is not None and image_path.is_file():
-                try:
-                    geometry_hw = loader_image_hw(image_path)
-                    geometry_source = "image"
-                except Exception as err:  # noqa: BLE001
-                    report["geometry"]["invalid_geometry"] += 1
-                    _example(
-                        report,
-                        "invalid_geometry",
-                        {
-                            "sample_id": sample_id,
-                            "path": str(image_path),
-                            "error": f"unreadable_image:{err}",
-                        },
-                        max_examples,
-                    )
-                    errors.append("invalid_geometry")
+            geometry_hw, geometry_source, geometry_error = resolve_loader_source_hw(
+                sample,
+                base_dir=manifest_path.parent,
+            )
+            if geometry_error:
+                report["geometry"]["invalid_geometry"] += 1
+                _example(
+                    report,
+                    "invalid_geometry",
+                    {
+                        "sample_id": sample_id,
+                        "source": geometry_source,
+                        "error": geometry_error,
+                    },
+                    max_examples,
+                )
+                errors.append("invalid_geometry")
 
             if geometry_hw is not None:
                 diag = simulate_loader_geometry(

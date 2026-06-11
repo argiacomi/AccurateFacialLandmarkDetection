@@ -52,6 +52,7 @@ def test_stage_crops_sample_level_geometry_validation(tmp_path):
         manifest,
         out_manifest=out_manifest,
         validate_geometry=True,
+        drop_invalid_geometry=True,
         workers=1,
     )
 
@@ -65,4 +66,4 @@ def test_stage_crops_sample_level_geometry_validation(tmp_path):
     staged = json.loads(out_manifest.read_text(encoding="utf-8"))["samples"]
     by_id = {sample["sample_id"]: sample for sample in staged}
     assert "prepared_image" in by_id["good"]
-    assert "prepared_image" not in by_id["bad"]
+    assert "bad" not in by_id
