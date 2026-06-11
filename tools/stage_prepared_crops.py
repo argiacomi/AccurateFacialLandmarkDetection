@@ -134,6 +134,210 @@ def _prepared_image_and_landmarks(crop_path: str, landmarks_path: str, orig_hw):
     return img, lmk
 
 
+def _normalize_dataset_label(value: str) -> str:
+    label = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    while "__" in label:
+        label = label.replace("__", "_")
+    return label.strip("_")
+
+
+def _load_landmark_array(path: str) -> np.ndarray:
+    raw = np.load(path).astype(np.float32)
+    if raw.ndim == 1:
+        if raw.size % 2 != 0:
+            raise ValueError(f"flat landmark array has odd length: {raw.shape}")
+        raw = raw.reshape(-1, 2)
+    if raw.ndim != 2 or raw.shape[1] < 2:
+        raise ValueError(f"expected landmark array [N,2+], got {raw.shape}")
+    return raw
+
+
+def _stage_tight_face_crop_for_entry(
+    entry: dict,
+    *,
+    index: int,
+    base_dir: Path,
+    out_base: Path,
+    images_subdir: str,
+    landmarks_subdir: str,
+    force: bool,
+    target_span: float,
+) -> tuple[str, dict[str, T.Any] | None]:
+    """Stage one sample as a tight 256x256 face crop with remapped landmarks.
+
+    Unlike the default staging path, this intentionally changes the training image
+    policy: it uses valid landmark coordinates to define a square face crop, writes
+    transformed landmarks in that crop's 256x256 coordinate frame, and points both
+    ``image`` and ``prepared_image`` at the new crop. This keeps fallback behavior
+    safe because the manifest no longer pairs crop-frame landmarks with the native
+    full-frame image.
+    """
+
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    existing = metadata.get("stage_face_crop")
+    if isinstance(existing, dict) and existing.get("enabled"):
+        return "skipped_existing", None
+
+    image_value = entry.get("image")
+    landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
+    if not image_value or not landmarks_value:
+        return "failed", {
+            "index": index,
+            "sample_id": entry.get("sample_id") or entry.get("id") or index,
+            "dataset": entry.get("dataset", ""),
+            "reason": "missing_image_or_landmarks",
+        }
+
+    image_path = _resolve(base_dir, image_value)
+    landmarks_path = _resolve(base_dir, landmarks_value)
+
+    img_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        return "failed", {
+            "index": index,
+            "sample_id": entry.get("sample_id") or entry.get("id") or index,
+            "dataset": entry.get("dataset", ""),
+            "reason": f"unreadable_image:{image_path}",
+        }
+
+    try:
+        raw = _load_landmark_array(landmarks_path)
+    except Exception as err:  # noqa: BLE001
+        return "failed", {
+            "index": index,
+            "sample_id": entry.get("sample_id") or entry.get("id") or index,
+            "dataset": entry.get("dataset", ""),
+            "reason": f"invalid_landmarks:{err}",
+        }
+
+    pts = raw[:, :2].copy()
+
+    # These whole-frame datasets should be native-pixel annotations. If we see
+    # normalized landmarks here, do not guess a native mapping.
+    if float(np.nanmax(pts)) <= 1.5:
+        return "failed", {
+            "index": index,
+            "sample_id": entry.get("sample_id") or entry.get("id") or index,
+            "dataset": entry.get("dataset", ""),
+            "reason": "normalized_landmarks_not_supported_for_tight_face_crop",
+        }
+
+    h, w = img_bgr.shape[:2]
+    mask = landmark_mask_from_entry(entry, metadata, int(pts.shape[0]))
+    valid = np.isfinite(pts).all(axis=1) & (np.asarray(mask, dtype=np.float32) > 0.5)
+    if not valid.any():
+        return "failed", {
+            "index": index,
+            "sample_id": entry.get("sample_id") or entry.get("id") or index,
+            "dataset": entry.get("dataset", ""),
+            "reason": "no_valid_landmarks_for_tight_face_crop",
+        }
+
+    valid_pts = pts[valid]
+    mn = valid_pts.min(axis=0)
+    mx = valid_pts.max(axis=0)
+    center = (mn + mx) * 0.5
+    face_span = float(max(mx[0] - mn[0], mx[1] - mn[1]))
+
+    if not np.isfinite(face_span) or face_span < 2.0:
+        return "failed", {
+            "index": index,
+            "sample_id": entry.get("sample_id") or entry.get("id") or index,
+            "dataset": entry.get("dataset", ""),
+            "reason": f"degenerate_face_span:{face_span}",
+        }
+
+    # Target roughly 170px face span in the 256px model input, matching the
+    # healthy tight-crop datasets. This gives side ~= 1.5 * landmark span.
+    target_span = float(target_span)
+    crop_side = max(face_span * 256.0 / target_span, face_span + 10.0, 16.0)
+    scale = 256.0 / crop_side
+    x0 = float(center[0] - crop_side * 0.5)
+    y0 = float(center[1] - crop_side * 0.5)
+    x1 = float(center[0] + crop_side * 0.5)
+    y1 = float(center[1] + crop_side * 0.5)
+
+    warp = np.asarray(
+        [
+            [scale, 0.0, -x0 * scale],
+            [0.0, scale, -y0 * scale],
+        ],
+        dtype=np.float32,
+    )
+    crop_bgr = cv2.warpAffine(
+        img_bgr,
+        warp,
+        (256, 256),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+
+    transformed = raw.copy()
+    transformed[:, 0] = (pts[:, 0] - x0) * scale
+    transformed[:, 1] = (pts[:, 1] - y0) * scale
+
+    dataset_label = _normalize_dataset_label(entry.get("dataset", "")) or "dataset"
+    sample_id = _sanitize(entry.get("sample_id") or entry.get("id") or index)
+    image_id = _sanitize(entry.get("image_id") or Path(image_path).stem)
+
+    digest_src = (
+        f"{image_path}|{landmarks_path}|{sample_id}|{target_span:.6f}|"
+        f"{x0:.6f}|{y0:.6f}|{x1:.6f}|{y1:.6f}"
+    )
+    digest = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:8]
+
+    rel_img = (
+        Path(images_subdir)
+        / dataset_label
+        / f"{image_id}_{sample_id}_{digest}_face.png"
+    )
+    rel_lmk = (
+        Path(landmarks_subdir)
+        / dataset_label
+        / f"{image_id}_{sample_id}_{digest}_landmarks.npy"
+    )
+
+    img_out = out_base / rel_img
+    lmk_out = out_base / rel_lmk
+    img_out.parent.mkdir(parents=True, exist_ok=True)
+    lmk_out.parent.mkdir(parents=True, exist_ok=True)
+
+    if force or not img_out.exists():
+        if not cv2.imwrite(str(img_out), crop_bgr):
+            raise RuntimeError(f"failed to write tight face crop {img_out}")
+    if force or not lmk_out.exists():
+        np.save(str(lmk_out), transformed.astype(np.float32))
+
+    metadata = dict(metadata)
+    metadata["stage_face_crop"] = {
+        "enabled": True,
+        "policy": "landmark_bbox_square",
+        "target_face_span_px": target_span,
+        "source_image": image_value,
+        "source_landmarks": landmarks_value,
+        "source_image_hw": [int(h), int(w)],
+        "native_landmark_bbox_xyxy": [
+            float(mn[0]),
+            float(mn[1]),
+            float(mx[0]),
+            float(mx[1]),
+        ],
+        "crop_xyxy_native": [x0, y0, x1, y1],
+        "crop_side_native": float(crop_side),
+        "scale_to_256": float(scale),
+        "valid_landmark_count": int(valid.sum()),
+    }
+
+    entry["metadata"] = metadata
+    entry["image"] = str(rel_img)
+    entry["landmarks"] = str(rel_lmk)
+    entry["prepared_image"] = str(rel_img)
+    entry["prepared_image_orig_hw"] = [256, 256]
+
+    return "cropped", None
+
+
 def _sample_loader_geometry(
     entry: dict,
     *,
@@ -186,6 +390,9 @@ def stage_crops(
     drop_suspicious_geometry: bool = False,
     geometry_overlay_dir: str | Path | None = None,
     max_geometry_overlays: int = 200,
+    face_crop_datasets: T.Iterable[str] | None = ("300vw", "wflw_v", "merl_rav"),
+    face_crop_target_span: float = 170.0,
+    face_crop_landmarks_subdir: str = "_face_cropped_landmarks",
 ) -> dict:
     """Write 256x256 crops and record prepared references on a manifest.
 
@@ -223,7 +430,7 @@ def stage_crops(
     )
 
     dataset_filter = (
-        {str(d).strip().lower() for d in datasets if str(d).strip()}
+        {_normalize_dataset_label(d) for d in datasets if str(d).strip()}
         if datasets
         else None
     )
@@ -242,6 +449,78 @@ def stage_crops(
         if geometry_overlay_dir
         else out_base / "geometry_review"
     )
+
+    face_crop_dataset_filter = (
+        {
+            _normalize_dataset_label(value)
+            for value in face_crop_datasets
+            if str(value).strip()
+        }
+        if face_crop_datasets is not None
+        else set()
+    )
+    face_cropped = 0
+    face_crop_skipped_existing = 0
+    face_crop_failed = 0
+    face_crop_failures: list[dict[str, T.Any]] = []
+
+    if face_crop_dataset_filter:
+        face_iter = track(
+            entries,
+            desc="Stage tight face crops",
+            total=len(entries),
+            unit="sample",
+            leave=True,
+            disable=False,
+        )
+        for index, entry in enumerate(face_iter):
+            if not isinstance(entry, dict):
+                continue
+            dataset = _normalize_dataset_label(entry.get("dataset", ""))
+            if dataset_filter is not None and dataset not in dataset_filter:
+                continue
+            if dataset not in face_crop_dataset_filter:
+                continue
+
+            status, failure = _stage_tight_face_crop_for_entry(
+                entry,
+                index=index,
+                base_dir=base_dir,
+                out_base=out_base,
+                images_subdir=images_subdir,
+                landmarks_subdir=face_crop_landmarks_subdir,
+                force=force,
+                target_span=face_crop_target_span,
+            )
+            if status == "cropped":
+                face_cropped += 1
+            elif status == "skipped_existing":
+                face_crop_skipped_existing += 1
+            elif failure is not None:
+                face_crop_failed += 1
+                face_crop_failures.append(failure)
+
+        if face_cropped or face_crop_skipped_existing or face_crop_failed:
+            log_event(
+                "prepare",
+                (
+                    f"stage tight face crops | datasets {sorted(face_crop_dataset_filter)} | "
+                    f"cropped {face_cropped} | existing {face_crop_skipped_existing} | "
+                    f"failed {face_crop_failed} | target span {face_crop_target_span:.1f}px"
+                ),
+                level=Verbosity.INFO,
+                face_cropped=face_cropped,
+                face_crop_existing=face_crop_skipped_existing,
+                face_crop_failed=face_crop_failed,
+                face_crop_datasets=sorted(face_crop_dataset_filter),
+                face_crop_target_span=float(face_crop_target_span),
+            )
+
+        if face_crop_failures and strict:
+            raise ValueError(
+                "tight face crop staging failed; first failure="
+                f"{face_crop_failures[0]}"
+            )
 
     def _write_issue_overlay(entry: dict, issue: dict[str, T.Any]) -> None:
         nonlocal geometry_overlays_written
@@ -508,7 +787,8 @@ def stage_crops(
     log_event(
         "prepare",
         (
-            f"stage crops done | crops {staged} unique | reused {reused} | "
+            f"stage crops done | crops {staged} unique | face cropped {face_cropped} | "
+            f"reused {reused} | "
             f"skipped 256x256 {skipped_already_256} | "
             f"skipped missing {skipped_no_image} | mismatches {len(mismatches)} | "
             f"geometry invalid {len(geometry_issues)} | "
@@ -517,6 +797,9 @@ def stage_crops(
         ),
         level=Verbosity.INFO,
         staged=staged,
+        face_cropped=face_cropped,
+        face_crop_existing=face_crop_skipped_existing,
+        face_crop_failed=face_crop_failed,
         reused=reused,
         skipped_already_256=skipped_already_256,
         skipped_no_image=skipped_no_image,
@@ -535,6 +818,10 @@ def stage_crops(
         "out_manifest": str(out_manifest),
         "images_root": str(images_root),
         "staged": staged,
+        "face_cropped": face_cropped,
+        "face_crop_existing": face_crop_skipped_existing,
+        "face_crop_failed": face_crop_failed,
+        "face_crop_failures": face_crop_failures,
         "reused": reused,
         "skipped_already_256": skipped_already_256,
         "skipped_no_image": skipped_no_image,
@@ -563,6 +850,11 @@ def stage_manifest(args: argparse.Namespace) -> int:
         drop_suspicious_geometry=getattr(args, "drop_suspicious_geometry", False),
         geometry_overlay_dir=args.geometry_overlay_dir or None,
         max_geometry_overlays=args.max_geometry_overlays,
+        face_crop_datasets=args.face_crop_datasets.split(",")
+        if args.face_crop_datasets is not None
+        else None,
+        face_crop_target_span=args.face_crop_target_span,
+        face_crop_landmarks_subdir=args.face_crop_landmarks_subdir,
     )
 
     staged, reused = stats["staged"], stats["reused"]
@@ -572,6 +864,13 @@ def stage_manifest(args: argparse.Namespace) -> int:
     print(f"out manifest    : {stats['out_manifest']}")
     print(f"crops dir       : {stats['images_root']}")
     print(f"staged crops    : {staged} (unique native images)")
+    if stats.get("face_cropped") or stats.get("face_crop_existing") or stats.get("face_crop_failed"):
+        print(
+            "tight face crops: "
+            f"{stats.get('face_cropped', 0)} cropped, "
+            f"{stats.get('face_crop_existing', 0)} existing, "
+            f"{stats.get('face_crop_failed', 0)} failed"
+        )
     print(f"reused crops    : {reused} (samples sharing a native image)")
     print(
         f"skipped 256x256 : {stats['skipped_already_256']} (native path already cheap)"
@@ -682,6 +981,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=200,
         help="Cap on review overlay PNGs written per run (default: 200).",
+    )
+    parser.add_argument(
+        "--face-crop-datasets",
+        default="300vw,wflw_v,merl_rav",
+        help=(
+            "Comma-separated datasets to stage as tight landmark-bbox face crops "
+            "instead of whole-frame 256x256 resizes. Use an empty string to disable."
+        ),
+    )
+    parser.add_argument(
+        "--face-crop-target-span",
+        type=float,
+        default=170.0,
+        help=(
+            "Target landmark bbox span in the 256x256 face crop for "
+            "--face-crop-datasets (default: 170)."
+        ),
+    )
+    parser.add_argument(
+        "--face-crop-landmarks-subdir",
+        default="_face_cropped_landmarks",
+        help=(
+            "Directory relative to the output manifest for remapped face-crop "
+            "landmark .npy files."
+        ),
     )
     parser.add_argument(
         "--workers",
