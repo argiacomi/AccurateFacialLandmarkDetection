@@ -278,9 +278,6 @@ def _build_cofw68_original(
 
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    image_index = _build_combined_image_index(
-        [Path(image_root) if image_root else root]
-    )
     sio: T.Any | None = None
     for mat_path, declared_split in mat_files:
         try:
@@ -341,21 +338,36 @@ def _build_cofw68_original(
             sample_id = f"cofw68_original/{declared_split}/{mat_path.stem}_{index:04d}"
             try:
                 points29 = normalize_landmark_array(points, schema="2d_29")
-                if index < len(images):
-                    image_path = _write_cofw68_original_image(
-                        output_dir, sample_id, images[index]
+                if index >= len(images):
+                    # The old fallback stem-matched the .mat filename, pairing
+                    # every overflow row with one (wrong) image; those samples
+                    # are wrong-coordinate-frame by construction.
+                    raise ValueError(
+                        f"annotation row {index} has no corresponding image in "
+                        f"{mat_path.name} ({len(images)} images)"
                     )
-                else:
-                    image = _matching_image(
-                        mat_path,
-                        root=Path(image_root) if image_root else root,
-                        image_index=image_index,
+                image_path = _write_cofw68_original_image(
+                    output_dir, sample_id, images[index]
+                )
+                # The HDF5 reader transposes MATLAB planes into the annotation
+                # frame; verify rather than assume the orientation by checking
+                # the landmarks actually fit the written image.
+                geometry = _simulate_loader_geometry(image_path, points29)
+                if not geometry.get("ok") or geometry.get("suspicious"):
+                    _write_geometry_review_overlay(
+                        output_dir,
+                        dataset="cofw29",
+                        sample_id=sample_id,
+                        image_path=image_path,
+                        points=points29,
+                        source_image_hw=None,
+                        diag=geometry,
                     )
-                    if image is None:
-                        raise FileNotFoundError(
-                            "cofw68 original image not found in MAT or image root"
-                        )
-                    image_path = image
+                    raise ValueError(
+                        "landmarks do not fit decoded COFW image "
+                        f"(orientation/frame mismatch?): {geometry.get('reason')} "
+                        f"(padding={geometry.get('padding')})"
+                    )
             except Exception as err:  # noqa: BLE001
                 skipped.append({"sample_id": sample_id, "reason": str(err)})
                 continue

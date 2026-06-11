@@ -49,8 +49,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.datasets.loader_geometry import (
+    landmark_mask_from_entry,
     resolve_loader_source_hw,
     simulate_loader_geometry,
+    write_geometry_overlay,
 )
 from lib.datasets.parallel import parallel_map
 from lib.logging_utils import Verbosity, log_event
@@ -154,10 +156,14 @@ def _sample_loader_geometry(
             "geometry_source": source,
         }
 
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    # Loader parity: use the same mask MakeLMKInsideImage receives so masked-out
+    # sentinel coordinates (e.g. MERL-RAV zeroed self-occluded points) are not
+    # reported as out-of-frame landmarks.
     diag = simulate_loader_geometry(
         points,
         hw,
-        landmark_mask=entry.get("landmark_mask"),
+        landmark_mask=landmark_mask_from_entry(entry, metadata, int(points.shape[0])),
     )
     diag["geometry_source"] = source
     return diag
@@ -176,6 +182,8 @@ def stage_crops(
     validate_geometry: bool = False,
     geometry_strict: bool = False,
     drop_invalid_geometry: bool = False,
+    geometry_overlay_dir: str | Path | None = None,
+    max_geometry_overlays: int = 200,
 ) -> dict:
     """Write 256x256 crops and record prepared references on a manifest.
 
@@ -221,8 +229,51 @@ def stage_crops(
     staged = skipped_already_256 = skipped_no_image = reused = 0
     mismatches: list[str] = []
     geometry_issues: list[dict[str, T.Any]] = []
+    suspicious_geometry: list[dict[str, T.Any]] = []
     invalid_geometry_entries: set[int] = set()
     geometry_dropped = 0
+    geometry_overlays_written = 0
+    # Flagged samples always get a review overlay; default the directory next
+    # to the output manifest unless the caller chooses another location.
+    overlay_dir = (
+        Path(geometry_overlay_dir)
+        if geometry_overlay_dir
+        else out_base / "geometry_review"
+    )
+
+    def _write_issue_overlay(entry: dict, issue: dict[str, T.Any]) -> None:
+        nonlocal geometry_overlays_written
+        if geometry_overlays_written >= max_geometry_overlays:
+            return
+        landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
+        diag = issue.get("diagnostics") or {}
+        source_hw = diag.get("source_image_hw")
+        if not landmarks_value or not source_hw:
+            return
+        try:
+            points = np.load(_resolve(base_dir, landmarks_value)).astype(np.float32)
+        except Exception:  # noqa: BLE001
+            return
+        image_value = entry.get("image")
+        metadata = (
+            entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        )
+        safe_name = (
+            str(issue["sample_id"]).replace("/", "_").replace("#", "_") or "sample"
+        )
+        written = write_geometry_overlay(
+            overlay_dir / (issue["dataset"] or "dataset") / f"{safe_name}.png",
+            _resolve(base_dir, image_value) if image_value else None,
+            points[:, :2],
+            (int(source_hw[0]), int(source_hw[1])),
+            landmark_mask=landmark_mask_from_entry(
+                entry, metadata, int(points.shape[0])
+            ),
+            diag=diag,
+        )
+        if written is not None:
+            issue["overlay"] = str(written)
+            geometry_overlays_written += 1
 
     if validate_geometry:
         for index, entry in enumerate(entries):
@@ -232,7 +283,7 @@ def stage_crops(
             if dataset_filter is not None and dataset.lower() not in dataset_filter:
                 continue
             diag = _sample_loader_geometry(entry, base_dir=base_dir)
-            if diag.get("ok"):
+            if diag.get("ok") and not diag.get("suspicious"):
                 continue
             issue = {
                 "index": index,
@@ -241,8 +292,26 @@ def stage_crops(
                 "reason": diag.get("reason") or "invalid_geometry",
                 "diagnostics": diag,
             }
+            if diag.get("ok"):
+                # Quarantine for review: trainable, but the overflow is large
+                # enough that a wrong coordinate frame is the likely cause.
+                suspicious_geometry.append(issue)
+                _write_issue_overlay(entry, issue)
+                continue
             geometry_issues.append(issue)
             invalid_geometry_entries.add(id(entry))
+            _write_issue_overlay(entry, issue)
+        if suspicious_geometry:
+            log_event(
+                "prepare",
+                (
+                    f"stage crops geometry: {len(suspicious_geometry)} suspicious "
+                    f"sample(s) quarantined for review; overlays in {overlay_dir}"
+                ),
+                level=Verbosity.INFO,
+                suspicious=len(suspicious_geometry),
+                overlay_dir=str(overlay_dir),
+            )
         if geometry_issues:
             first = geometry_issues[0]
             if geometry_strict or not drop_invalid_geometry:
@@ -416,6 +485,7 @@ def stage_crops(
             f"skipped 256x256 {skipped_already_256} | "
             f"skipped missing {skipped_no_image} | mismatches {len(mismatches)} | "
             f"geometry invalid {len(geometry_issues)} | "
+            f"geometry suspicious {len(suspicious_geometry)} | "
             f"geometry dropped {geometry_dropped} | {_stage_elapsed:.1f}s"
         ),
         level=Verbosity.INFO,
@@ -425,6 +495,7 @@ def stage_crops(
         skipped_no_image=skipped_no_image,
         mismatches=len(mismatches),
         geometry_invalid=len(geometry_issues),
+        geometry_suspicious=len(suspicious_geometry),
         geometry_dropped=geometry_dropped,
         duration_seconds=_stage_elapsed,
         manifest=str(manifest_path),
@@ -442,7 +513,10 @@ def stage_crops(
         "skipped_no_image": skipped_no_image,
         "mismatches": mismatches,
         "geometry_issues": geometry_issues,
+        "suspicious_geometry": suspicious_geometry,
         "geometry_dropped": geometry_dropped,
+        "geometry_overlay_dir": str(overlay_dir),
+        "geometry_overlays_written": geometry_overlays_written,
     }
 
 
@@ -459,6 +533,8 @@ def stage_manifest(args: argparse.Namespace) -> int:
         validate_geometry=args.validate_geometry,
         geometry_strict=args.geometry_strict,
         drop_invalid_geometry=getattr(args, "drop_invalid_geometry", False),
+        geometry_overlay_dir=args.geometry_overlay_dir or None,
+        max_geometry_overlays=args.max_geometry_overlays,
     )
 
     staged, reused = stats["staged"], stats["reused"]
@@ -480,14 +556,23 @@ def stage_manifest(args: argparse.Namespace) -> int:
             print(f"  - {path}")
     if geometry_issues:
         dropped = stats.get("geometry_dropped", 0)
-        label = (
-            "dropped"
-            if dropped
-            else "invalid; manifest not written unless strict/drop policy changed"
-        )
-        print(f"invalid geometry ({label}): {len(geometry_issues)}")
+        if dropped:
+            print(f"invalid geometry (dropped): {len(geometry_issues)}")
+        else:
+            print(f"invalid geometry: {len(geometry_issues)}")
         for issue in geometry_issues[:10]:
             print(f"  - {issue['sample_id']}: {issue['reason']}")
+    suspicious = stats.get("suspicious_geometry", [])
+    if suspicious:
+        print(f"suspicious geometry (kept, review overlays): {len(suspicious)}")
+        for issue in suspicious[:10]:
+            pad = (issue.get("diagnostics") or {}).get("padding")
+            print(f"  - {issue['sample_id']}: padding={pad}")
+    if stats.get("geometry_overlays_written"):
+        print(
+            f"review overlays : {stats['geometry_overlays_written']} -> "
+            f"{stats['geometry_overlay_dir']}"
+        )
     return 0
 
 
@@ -544,6 +629,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "When --validate-geometry finds invalid samples, remove them "
             "from the output manifest instead of failing."
         ),
+    )
+    parser.add_argument(
+        "--geometry-overlay-dir",
+        default="",
+        help=(
+            "Directory for review overlay PNGs of geometry-flagged samples. "
+            "Default: <out-manifest dir>/geometry_review."
+        ),
+    )
+    parser.add_argument(
+        "--max-geometry-overlays",
+        type=int,
+        default=200,
+        help="Cap on review overlay PNGs written per run (default: 200).",
     )
     parser.add_argument(
         "--workers",

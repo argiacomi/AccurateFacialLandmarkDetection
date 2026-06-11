@@ -45,6 +45,7 @@ from lib.datasets.loader_geometry import (
     image_hw as loader_image_hw,
     loader_padding_for_points as _shared_loader_padding_for_points,
     simulate_loader_geometry,
+    write_geometry_overlay,
 )
 from lib.datasets.parallel import parallel_map
 from lib.datasets.progress import track as _dataset_progress_track
@@ -587,24 +588,29 @@ def _crop_image_and_remap_points(
             crop, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT
         )
 
-    # Ensure exact virtual crop size before resize.
-    virtual_w = max(1.0, right - left)
-    virtual_h = max(1.0, bottom - top)
-    scale_x = float(output_size) / virtual_w
-    scale_y = float(output_size) / virtual_h
+    # Remap with the frame of the crop that was actually assembled. The pixel
+    # crop uses floor/ceil indices plus integer-rounded padding, so its origin
+    # and size differ from the virtual float bbox by up to ~2px; scaling points
+    # with the virtual frame would skew them relative to the resized pixels.
+    actual_left = float(ix1 - pad_left)
+    actual_top = float(iy1 - pad_top)
+    actual_w = float(crop.shape[1])
+    actual_h = float(crop.shape[0])
+    scale_x = float(output_size) / max(actual_w, 1.0)
+    scale_y = float(output_size) / max(actual_h, 1.0)
 
     crop_resized = cv2.resize(
         crop, (output_size, output_size), interpolation=cv2.INTER_LINEAR
     )
 
     remapped = np.asarray(points68, dtype=np.float32).copy()
-    remapped[:, 0] = (remapped[:, 0] - float(left)) * scale_x
-    remapped[:, 1] = (remapped[:, 1] - float(top)) * scale_y
+    remapped[:, 0] = (remapped[:, 0] - actual_left) * scale_x
+    remapped[:, 1] = (remapped[:, 1] - actual_top) * scale_y
 
     return (
         crop_resized,
         remapped.astype(np.float32),
-        [float(left), float(top), float(right), float(bottom)],
+        [actual_left, actual_top, actual_left + actual_w, actual_top + actual_h],
     )
 
 
@@ -730,6 +736,39 @@ def _simulate_loader_geometry(
     return simulate_loader_geometry(points, hw, landmark_mask=landmark_mask)
 
 
+def _write_geometry_review_overlay(
+    output_dir: Path,
+    *,
+    dataset: str,
+    sample_id: str,
+    image_path: Path | None,
+    points: np.ndarray,
+    source_image_hw: tuple[int, int] | None,
+    diag: T.Mapping[str, T.Any] | None = None,
+) -> Path | None:
+    """Write a review overlay PNG for a geometry-flagged builder sample.
+
+    Quarantined samples are skipped from the manifest but must stay reviewable;
+    the overlay shows where the loader-scaled landmarks land relative to the
+    256 crop. Best-effort: returns None instead of failing the build.
+    """
+
+    if source_image_hw is None:
+        if image_path is None:
+            return None
+        try:
+            source_image_hw = loader_image_hw(image_path)
+        except (FileNotFoundError, OSError):
+            return None
+    out = (
+        output_dir
+        / "geometry_review"
+        / _dataset(dataset)
+        / f"{_artifact_stem(dataset, sample_id)}.png"
+    )
+    return write_geometry_overlay(out, image_path, points, source_image_hw, diag=diag)
+
+
 def _crop_sample_image(
     *,
     output_dir: Path,
@@ -789,6 +828,19 @@ def _build_combined_image_index(roots: T.Iterable[Path]) -> dict[str, list[Path]
     return index
 
 
+def _distinct_paths(paths: T.Iterable[Path]) -> list[Path]:
+    """Deduplicate by resolved location, shortest path first."""
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for path in sorted(paths, key=lambda item: (len(item.parts), item.as_posix())):
+        key = path.resolve().as_posix()
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
 def _matching_image(
     landmarks: Path,
     *,
@@ -804,16 +856,22 @@ def _matching_image(
         if candidate.is_file():
             return candidate
     if image_index is not None:
-        matches = image_index.get(landmarks.stem.lower(), [])
+        matches = _distinct_paths(image_index.get(landmarks.stem.lower(), []))
+        if len(matches) > 1:
+            rendered = ", ".join(str(path) for path in matches[:5])
+            raise ValueError(f"ambiguous image match for {landmarks.name}: {rendered}")
         if matches:
-            return sorted(matches, key=lambda item: len(item.parts))[0]
+            return matches[0]
     if root is not None:
         # Fallback for less common builders/callers that have not precomputed an
         # image index. Hot paths should still pass image_index explicitly.
         fallback_index = _build_combined_image_index((root,))
-        matches = fallback_index.get(landmarks.stem.lower(), [])
+        matches = _distinct_paths(fallback_index.get(landmarks.stem.lower(), []))
+        if len(matches) > 1:
+            rendered = ", ".join(str(path) for path in matches[:5])
+            raise ValueError(f"ambiguous image match for {landmarks.name}: {rendered}")
         if matches:
-            return sorted(matches, key=lambda item: len(item.parts))[0]
+            return matches[0]
     return None
 
 
@@ -1957,9 +2015,15 @@ def _build_directory(
             return ("skip", {"sample_id": landmark_path.as_posix(), "reason": str(err)})
         # Cheap co-located / ``images/`` lookup first; only fall back to the
         # (lazily built) recursive index when that misses.
-        image = _matching_image(landmark_path)
-        if image is None:
-            image = _matching_image(landmark_path, image_index=_image_index())
+        try:
+            image = _matching_image(landmark_path)
+            if image is None:
+                image = _matching_image(landmark_path, image_index=_image_index())
+        except ValueError as err:
+            return (
+                "skip",
+                {"sample_id": landmark_path.as_posix(), "reason": str(err)},
+            )
         if image is None:
             return (
                 "skip",
@@ -2219,9 +2283,16 @@ def _find_named_image(
 
     if image_index is not None:
         key = raw.stem.lower() if raw.suffix.lower() in IMAGE_EXTS else raw.name.lower()
-        matches = image_index.get(key, [])
+        matches = _distinct_paths(image_index.get(key, []))
+        if len(matches) > 1:
+            # Picking the shortest path silently pairs landmarks with whichever
+            # same-stem image sorts first -- the cleanest route to a wrong
+            # coordinate frame. Callers wrap lookups in try/except and record
+            # the skip reason.
+            rendered = ", ".join(str(path) for path in matches[:5])
+            raise ValueError(f"ambiguous image match for {image_name}: {rendered}")
         if matches:
-            return sorted(matches, key=lambda item: len(item.parts))[0]
+            return matches[0]
     return None
 
 

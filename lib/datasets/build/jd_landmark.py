@@ -63,17 +63,36 @@ def _jd_resolve_loader_geometry_path(
     """
 
     native = _simulate_loader_geometry(image, points)
+    # The loader's 2048 crash guard alone is too lax for path selection: a
+    # wrong-coordinate-frame annotation (e.g. corrected landmarks 150px outside
+    # a 240px-tall image) pads to ~590px and trains silently. The suspicious
+    # threshold sends such samples through the bbox-crop fallback or, failing
+    # that, quarantines them with a review overlay.
+    native_fits = bool(native.get("ok")) and not native.get("suspicious")
     meta: dict[str, T.Any] = {
-        "loader_geometry_policy": "native_fit" if native.get("ok") else "invalid",
+        "loader_geometry_policy": "native_fit" if native_fits else "invalid",
         "loader_geometry_native": native,
     }
-    if native.get("ok"):
+    if native_fits:
         return image, points.astype(np.float32), meta
 
-    if bbox is None:
-        raise ValueError(
-            f"invalid loader geometry: native={native.get('reason')}; no bbox fallback"
+    def _quarantine(reason: str) -> ValueError:
+        overlay = _write_geometry_review_overlay(
+            output_dir,
+            dataset="jd-landmark",
+            sample_id=sample_id,
+            image_path=image,
+            points=points,
+            source_image_hw=None,
+            diag=native,
         )
+        message = f"invalid loader geometry: {reason}"
+        if overlay is not None:
+            message += f"; review overlay: {overlay}"
+        return ValueError(message)
+
+    if bbox is None:
+        raise _quarantine(f"native={native.get('reason')}; no bbox fallback")
 
     try:
         crop_image, crop_points, crop_meta = _crop_sample_image(
@@ -86,17 +105,16 @@ def _jd_resolve_loader_geometry_path(
             bbox_source=bbox_source,
         )
     except Exception as err:  # noqa: BLE001
-        raise ValueError(
-            f"invalid loader geometry: native={native.get('reason')}; bbox crop failed: {err}"
+        raise _quarantine(
+            f"native={native.get('reason')}; bbox crop failed: {err}"
         ) from err
 
     crop_diag = _simulate_loader_geometry(crop_image, crop_points)
     meta["loader_geometry_bbox_crop"] = crop_diag
-    if not crop_diag.get("ok"):
+    if not crop_diag.get("ok") or crop_diag.get("suspicious"):
         with contextlib.suppress(OSError):
             crop_image.unlink()
-        raise ValueError(
-            "invalid loader geometry: "
+        raise _quarantine(
             f"native={native.get('reason')}; bbox_crop={crop_diag.get('reason')}"
         )
 

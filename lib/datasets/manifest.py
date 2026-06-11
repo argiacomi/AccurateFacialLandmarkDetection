@@ -12,6 +12,10 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
 
+from lib.datasets.loader_geometry import (
+    as_bool_landmark_mask,
+    landmark_mask_from_entry,
+)
 from lib.core.schema import (
     canonicalize_schema,
     flip_map_for_schema,
@@ -208,76 +212,11 @@ class ManifestContractError(ValueError):
 
 
 def _as_bool_landmark_mask(value, landmark_count=68):
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        # Accept dicts keyed by landmark index.
-        arr = [
-            value.get(str(i), value.get(i, True)) for i in range(int(landmark_count))
-        ]
-    else:
-        arr = value
-    if isinstance(arr, np.ndarray):
-        arr = arr.tolist()
-    if not isinstance(arr, (list, tuple)) or len(arr) != int(landmark_count):
-        return None
-
-    out = []
-    for item in arr:
-        if isinstance(item, str):
-            label = _normalize_label(item)
-            out.append(
-                label
-                not in {
-                    "",
-                    "0",
-                    "false",
-                    "none",
-                    "invalid",
-                    "missing",
-                    "self_occluded",
-                    "selfoccluded",
-                }
-            )
-        else:
-            out.append(bool(item))
-    return np.asarray(out, dtype=np.float32)
+    return as_bool_landmark_mask(value, landmark_count)
 
 
 def _landmark_mask_from_entry(entry, metadata, landmark_count=68):
-    # Priority matters. For MERL-RAV, coordinate-valid includes visible plus externally
-    # occluded estimated points, and excludes only true no-coordinate self-occlusion.
-    for key in (
-        "landmark_mask",
-        "landmark_coordinate_valid_mask",
-        "landmark_source_valid_mask",
-        "landmark_in_image_mask",
-        "coordinate_valid_mask",
-        "source_valid_mask",
-        "valid_mask",
-    ):
-        mask = _as_bool_landmark_mask(entry.get(key), landmark_count)
-        if mask is not None:
-            return mask
-        mask = _as_bool_landmark_mask(metadata.get(key), landmark_count)
-        if mask is not None:
-            return mask
-
-    # Lower priority: visibility often means score-visible only, which would drop
-    # externally occluded but coordinate-valid MERL-RAV points.
-    for key in (
-        "visibility",
-        "landmark_score_visibility_mask",
-        "score_visibility_mask",
-    ):
-        mask = _as_bool_landmark_mask(entry.get(key), landmark_count)
-        if mask is not None:
-            return mask
-        mask = _as_bool_landmark_mask(metadata.get(key), landmark_count)
-        if mask is not None:
-            return mask
-
-    return np.ones((int(landmark_count),), dtype=np.float32)
+    return landmark_mask_from_entry(entry, metadata, landmark_count)
 
 
 def _as_visibility_target(value, landmark_count):

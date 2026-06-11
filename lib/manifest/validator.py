@@ -12,8 +12,12 @@ from pathlib import Path
 import numpy as np
 
 from lib.datasets.loader_geometry import (
+    LOADER_IMAGE_SIZE,
+    landmark_mask_from_entry,
+    points_look_normalized,
     resolve_loader_source_hw,
     simulate_loader_geometry,
+    write_geometry_overlay,
 )
 
 from lib.core.schema import (
@@ -164,6 +168,8 @@ def validate_training_manifest(
     allow_legacy_missing_contract_fields: bool = False,
     max_examples: int = 25,
     raise_on_error: bool = False,
+    geometry_overlay_dir: str | Path | None = None,
+    max_geometry_overlays: int = 200,
 ) -> dict[str, T.Any]:
     """Validate a mixed-schema landmark training manifest.
 
@@ -215,13 +221,19 @@ def validate_training_manifest(
             "leakage": [],
             "landmarks_outside_image": [],
             "unreasonable_loader_padding": [],
+            "suspicious_loader_padding": [],
+            "normalized_landmarks_non_256_source": [],
             "invalid_geometry": [],
         },
         "geometry": {
             "checked_samples": 0,
             "landmarks_outside_image": 0,
             "unreasonable_loader_padding": 0,
+            "suspicious_loader_padding": 0,
+            "normalized_landmarks_non_256_source": 0,
             "invalid_geometry": 0,
+            "overlays_written": 0,
+            "overlay_dir": str(geometry_overlay_dir) if geometry_overlay_dir else None,
         },
         "legacy_68_projection_samples": 0,
         "leakage": {"checked_fields": list(IDENTITY_FIELDS), "violations": []},
@@ -344,10 +356,18 @@ def validate_training_manifest(
                 errors.append("invalid_geometry")
 
             if geometry_hw is not None:
+                points_xy = np.asarray(landmarks)[:, :2]
+                # Loader parity: simulate with the same mask MakeLMKInsideImage
+                # receives, so masked-out sentinel coordinates (e.g. MERL-RAV
+                # self-occluded points zeroed by the builder) are not reported
+                # as out-of-frame landmarks.
+                loader_mask = landmark_mask_from_entry(
+                    sample, metadata, int(points_xy.shape[0])
+                )
                 diag = simulate_loader_geometry(
-                    np.asarray(landmarks)[:, :2],
+                    points_xy,
                     geometry_hw,
-                    landmark_mask=sample.get("landmark_mask"),
+                    landmark_mask=loader_mask,
                 )
                 report["geometry"]["checked_samples"] += 1
                 diag_example = {
@@ -357,6 +377,7 @@ def validate_training_manifest(
                     "source": geometry_source,
                     "diagnostics": diag,
                 }
+                needs_overlay = False
                 if diag.get("landmarks_outside_image"):
                     report["geometry"]["landmarks_outside_image"] += 1
                     _example(
@@ -365,6 +386,21 @@ def validate_training_manifest(
                         diag_example,
                         max_examples,
                     )
+                if points_look_normalized(points_xy) and tuple(geometry_hw) != (
+                    LOADER_IMAGE_SIZE,
+                    LOADER_IMAGE_SIZE,
+                ):
+                    # The loader scales [0,1] points by 255 and assumes the 256
+                    # training frame; normalized points on a non-256 source are
+                    # silently misplaced even though they stay in-bounds.
+                    report["geometry"]["normalized_landmarks_non_256_source"] += 1
+                    _example(
+                        report,
+                        "normalized_landmarks_non_256_source",
+                        diag_example,
+                        max_examples,
+                    )
+                    needs_overlay = True
                 if not diag.get("ok"):
                     report["geometry"]["invalid_geometry"] += 1
                     reason = str(diag.get("reason") or "invalid_geometry")
@@ -379,6 +415,46 @@ def validate_training_manifest(
                     else:
                         _example(report, "invalid_geometry", diag_example, max_examples)
                     errors.append(reason)
+                    needs_overlay = True
+                elif diag.get("suspicious"):
+                    # Quarantine, not a hard failure: large-but-trainable
+                    # overflow usually means a wrong coordinate frame, but
+                    # heavy crops/profiles can legitimately overflow.
+                    report["geometry"]["suspicious_loader_padding"] += 1
+                    _example(
+                        report,
+                        "suspicious_loader_padding",
+                        diag_example,
+                        max_examples,
+                    )
+                    needs_overlay = True
+
+                if (
+                    needs_overlay
+                    and geometry_overlay_dir is not None
+                    and report["geometry"]["overlays_written"] < max_geometry_overlays
+                ):
+                    overlay_image = (
+                        _resolve(manifest_path, sample.get("prepared_image"))
+                        if geometry_source == "prepared_image"
+                        else _resolve(manifest_path, image_value)
+                        if image_value
+                        else None
+                    )
+                    safe_name = (
+                        str(sample_id).replace("/", "_").replace("#", "_") or "sample"
+                    )
+                    written = write_geometry_overlay(
+                        Path(geometry_overlay_dir) / dataset / f"{safe_name}.png",
+                        overlay_image,
+                        points_xy,
+                        geometry_hw,
+                        landmark_mask=loader_mask,
+                        diag=diag,
+                    )
+                    if written is not None:
+                        report["geometry"]["overlays_written"] += 1
+                        diag_example["overlay"] = str(written)
 
         source_schema = None
         target_schema = None

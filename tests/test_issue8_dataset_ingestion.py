@@ -460,7 +460,7 @@ def test_cofw68_original_mat_parser_preserves_29_point_visibility_and_occlusion(
     source.mkdir()
     output = tmp_path / "out"
     points = _points(29).reshape(1, 58)
-    images = np.full((1, 64, 64, 3), 127, dtype=np.uint8)
+    images = np.full((1, 256, 256, 3), 127, dtype=np.uint8)
     occlusions = np.zeros((1, 29), dtype=np.uint8)
     occlusions[0, 3] = 1
     scipy.savemat(
@@ -505,7 +505,7 @@ def test_cofw68_original_hdf5_mat_parser_reads_native_caltech_color_release(tmp_
     phis[:29, 0] = points[:, 0]
     phis[29:58, 0] = points[:, 1]
     phis[58 + 3, 0] = 1.0
-    image = np.full((3, 64, 64), 127, dtype=np.uint8)
+    image = np.full((3, 256, 256), 127, dtype=np.uint8)
 
     with h5py.File(source / "COFW_train_color.mat", "w") as handle:
         image_ds = handle.create_dataset("image_0000", data=image)

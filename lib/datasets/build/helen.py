@@ -92,6 +92,41 @@ def _build_helen(
                 context="HELEN 300W",
                 image_index=helen_image_index,
             )
+            # The dense annotations declare the dimensions of the image they
+            # were made on; the resolved 300W-cache copy can be a different
+            # resolution, leaving valid-looking landmarks outside the resolved
+            # image's coordinate frame. Rescale into the resolved frame when
+            # declared dims are present, then gate on loader geometry.
+            actual_h, actual_w = loader_image_hw(image)
+            declared_w = int(width) if width else None
+            declared_h = int(height) if height else None
+            landmarks_rescaled = False
+            if (
+                declared_w
+                and declared_h
+                and (declared_w, declared_h) != (actual_w, actual_h)
+            ):
+                points = points.copy()
+                points[:, 0] *= float(actual_w) / float(declared_w)
+                points[:, 1] *= float(actual_h) / float(declared_h)
+                landmarks_rescaled = True
+            geometry = simulate_loader_geometry(points, (actual_h, actual_w))
+            if not geometry.get("ok") or geometry.get("suspicious"):
+                _write_geometry_review_overlay(
+                    output_dir,
+                    dataset="helen",
+                    sample_id=f"helen/{Path(image_name).stem}",
+                    image_path=image,
+                    points=points,
+                    source_image_hw=(actual_h, actual_w),
+                    diag=geometry,
+                )
+                raise ValueError(
+                    "landmarks do not fit resolved HELEN image: "
+                    f"{geometry.get('reason')} (padding={geometry.get('padding')}, "
+                    f"declared={declared_w}x{declared_h}, "
+                    f"resolved={actual_w}x{actual_h})"
+                )
         except Exception as err:  # noqa: BLE001
             skipped.append({"sample_id": sample_id, "reason": str(err)})
             continue
@@ -112,6 +147,18 @@ def _build_helen(
             metadata["image_width"] = int(width)
         if height is not None:
             metadata["image_height"] = int(height)
+        metadata["resolved_image_hw"] = [int(actual_h), int(actual_w)]
+        if landmarks_rescaled:
+            metadata["landmarks_rescaled_from_declared_dims"] = True
+            metadata["landmarks_rescale_factors"] = [
+                float(actual_w) / float(declared_w),
+                float(actual_h) / float(declared_h),
+            ]
+        metadata["loader_geometry"] = {
+            "ok": bool(geometry.get("ok")),
+            "suspicious": bool(geometry.get("suspicious")),
+            "padding": geometry.get("padding"),
+        }
         samples.append(
             _with_split(
                 _sample(

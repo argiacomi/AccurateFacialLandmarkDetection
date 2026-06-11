@@ -29,6 +29,16 @@ def main() -> int:
     )
     parser.add_argument("--skip-image-exists-check", action="store_true")
     parser.add_argument("--max-examples", type=int, default=25)
+    parser.add_argument(
+        "--geometry-overlay-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Write review overlay PNGs (loader-scaled landmarks over the 256 "
+            "crop) for samples flagged by the geometry checks."
+        ),
+    )
+    parser.add_argument("--max-geometry-overlays", type=int, default=200)
     args = parser.parse_args()
 
     report = validate_training_manifest(
@@ -40,6 +50,8 @@ def main() -> int:
         allow_legacy_missing_contract_fields=args.allow_legacy_missing_contract_fields,
         max_examples=args.max_examples,
         raise_on_error=False,
+        geometry_overlay_dir=args.geometry_overlay_dir,
+        max_geometry_overlays=args.max_geometry_overlays,
     )
     print(
         json.dumps(
@@ -52,6 +64,7 @@ def main() -> int:
                 "schemas": report["schemas"],
                 "heads": report["heads"],
                 "leakage_violations": report["leakage"]["violation_count"],
+                "geometry": report["geometry"],
                 "report": str(args.report) if args.report else None,
             },
             indent=2,

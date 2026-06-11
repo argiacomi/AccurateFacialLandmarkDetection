@@ -37,6 +37,45 @@ def _candidate_frame_indices_from_stem(stem: str) -> tuple[int, ...]:
     return tuple(values)
 
 
+def _directory_frame_numbering_bases(paths: T.Sequence[Path]) -> dict[Path, int]:
+    """Detect each annotation directory's frame-numbering base (0- or 1-based).
+
+    Registering every file under both ``raw`` and ``raw - 1`` lets ``setdefault``
+    collision order decide the mapping, which pairs 1-based annotation releases
+    (300VW ships ``000001.pts`` for the first frame) with the *previous* video
+    frame for every frame except 0. When a directory's numeric stems clearly
+    start at 0 or 1, commit to that base so extracted zero-based frame ``i``
+    maps to file ``i + base`` exactly; directories without a clear convention
+    keep the permissive dual registration.
+    """
+
+    by_dir: dict[Path, list[int | None]] = {}
+    for path in paths:
+        tokens = re.findall(r"\d+", path.stem)
+        by_dir.setdefault(path.parent, []).append(int(tokens[-1]) if tokens else None)
+    bases: dict[Path, int] = {}
+    for parent, values in by_dir.items():
+        if len(values) < 2 or any(value is None for value in values):
+            continue
+        base = min(T.cast("list[int]", values))
+        if base in (0, 1):
+            bases[parent] = base
+    return bases
+
+
+def _frame_indices_for_landmark_path(
+    path: Path, directory_bases: T.Mapping[Path, int]
+) -> tuple[int, ...]:
+    base = directory_bases.get(path.parent)
+    if base is None:
+        return _candidate_frame_indices_from_stem(path.stem)
+    tokens = re.findall(r"\d+", path.stem)
+    if not tokens:
+        return ()
+    frame_index = int(tokens[-1]) - base
+    return (frame_index,) if frame_index >= 0 else ()
+
+
 def _frame_landmark_files(root: Path) -> T.Iterator[Path]:
     for suffix in LANDMARK_EXTS:
         yield from root.rglob(f"*{suffix}")
@@ -127,17 +166,22 @@ def _build_frame_landmark_index(root: Path) -> dict[tuple[str, int], Path]:
         return index
 
     structured_roots = {"annotations", "landmarks", "labels"}
-    for path in sorted(
-        _frame_landmark_files(root), key=lambda item: (len(item.parts), item.as_posix())
-    ):
-        if not path.is_file():
-            continue
+    landmark_files = [
+        path
+        for path in sorted(
+            _frame_landmark_files(root),
+            key=lambda item: (len(item.parts), item.as_posix()),
+        )
+        if path.is_file()
+    ]
+    directory_bases = _directory_frame_numbering_bases(landmark_files)
+    for path in landmark_files:
         try:
             rel = path.relative_to(root)
         except ValueError:
             rel = path
         parts = rel.parts
-        frame_indices = _candidate_frame_indices_from_stem(path.stem)
+        frame_indices = _frame_indices_for_landmark_path(path, directory_bases)
         if not frame_indices:
             continue
 
