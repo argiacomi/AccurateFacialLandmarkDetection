@@ -95,6 +95,21 @@ def test_write_geometry_overlay_writes_review_png(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _helen_source(tmp_path, entry):
+    """Create a tiny HELEN annotations.json source plus matching 300W cache root."""
+    source = tmp_path / "helen_source"
+    cache = tmp_path / "300w_cache"
+    output = tmp_path / "out"
+
+    source.mkdir(parents=True, exist_ok=True)
+    (source / "annotations.json").write_text(
+        json.dumps([entry]),
+        encoding="utf-8",
+    )
+
+    return source, cache, output
+
+
 def _manifest_sample(tmp_path: Path, points: np.ndarray, **extra) -> dict:
     image = _write_image(tmp_path / "images" / f"{extra.get('sample_id', 's')}.png")
     lmk_path = tmp_path / "landmarks" / f"{extra.get('sample_id', 's')}.npy"
@@ -135,13 +150,14 @@ def test_validator_quarantines_suspicious_geometry_with_overlay(tmp_path):
         manifest_path,
         allow_legacy_missing_contract_fields=True,
         allow_missing_projection_audit=True,
+        allow_suspicious_geometry=True,
         geometry_overlay_dir=overlay_dir,
     )
 
     assert report["geometry"]["checked_samples"] == 2
     assert report["geometry"]["suspicious_loader_padding"] == 1
     assert report["geometry"]["unreasonable_loader_padding"] == 0
-    # Quarantine, not failure: the suspicious sample stays valid.
+    # Explicit allow mode: suspicious geometry is reported and overlaid, but not invalid.
     assert report["invalid_samples"] == 0
     assert report["geometry"]["overlays_written"] == 1
     written = list(overlay_dir.rglob("*.png"))
@@ -195,7 +211,7 @@ def test_validator_flags_normalized_landmarks_on_non_256_source(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_stage_crops_quarantines_suspicious_with_overlay(tmp_path):
+def test_stage_crops_drops_suspicious_with_overlay(tmp_path):
     image = _write_image(tmp_path / "native.png", size=(512, 512))
     good_lmk = tmp_path / "good.npy"
     np.save(good_lmk, _points(68) * 2.0)  # in the 512 frame
@@ -221,37 +237,26 @@ def test_stage_crops_quarantines_suspicious_with_overlay(tmp_path):
         ]
     }
     manifest_path = tmp_path / "manifest.json"
+    staged_path = tmp_path / "staged.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     stats = stage_crops(
         manifest_path,
-        out_manifest=tmp_path / "staged.json",
+        out_manifest=staged_path,
         validate_geometry=True,
         drop_invalid_geometry=True,
     )
 
-    assert stats["geometry_dropped"] == 0
-    assert [issue["sample_id"] for issue in stats["suspicious_geometry"]] == ["bad"]
-    assert stats["geometry_overlays_written"] == 1
-    overlay = Path(stats["suspicious_geometry"][0]["overlay"])
-    assert overlay.is_file()
-    # Suspicious samples stay in the output manifest (quarantine, not drop).
-    staged = json.loads((tmp_path / "staged.json").read_text(encoding="utf-8"))
-    assert len(staged["samples"]) == 2
+    assert stats["geometry_dropped"] == 1
+    assert len(stats["suspicious_geometry"]) == 1
+    assert stats["suspicious_geometry"][0]["sample_id"] == "bad"
 
+    staged = json.loads(staged_path.read_text(encoding="utf-8"))
+    assert [sample["sample_id"] for sample in staged["samples"]] == ["good"]
 
-# ---------------------------------------------------------------------------
-# HELEN: declared-dims rescale and wrong-frame quarantine.
-# ---------------------------------------------------------------------------
-
-
-def _helen_source(tmp_path: Path, entry: dict) -> tuple[Path, Path, Path]:
-    source = tmp_path / "source"
-    cache = tmp_path / "300w" / "data" / "300w" / "300w"
-    output = tmp_path / "out"
-    (source / "annotations.json").parent.mkdir(parents=True, exist_ok=True)
-    (source / "annotations.json").write_text(json.dumps([entry]), encoding="utf-8")
-    return source, cache, output
+    overlay_dir = tmp_path / "geometry_review"
+    overlays = list(overlay_dir.rglob("*.png")) + list(overlay_dir.rglob("*.jpg"))
+    assert overlays
 
 
 def test_helen_rescales_landmarks_from_declared_dims(tmp_path):
@@ -324,9 +329,7 @@ def test_jd_quarantines_suspicious_native_geometry_without_bbox(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "out"
     name = "AFW_55555_1_0.jpg"
-    _write_image(
-        source / "Training_data" / "AFW" / "picture" / name, size=(256, 256)
-    )
+    _write_image(source / "Training_data" / "AFW" / "picture" / name, size=(256, 256))
     # Wrong-frame style: y far beyond the 256 image but under the 2048 guard.
     points = _points(106)
     points[:, 1] += 300.0

@@ -182,6 +182,7 @@ def stage_crops(
     validate_geometry: bool = False,
     geometry_strict: bool = False,
     drop_invalid_geometry: bool = False,
+    drop_suspicious_geometry: bool = False,
     geometry_overlay_dir: str | Path | None = None,
     max_geometry_overlays: int = 200,
 ) -> dict:
@@ -293,10 +294,13 @@ def stage_crops(
                 "diagnostics": diag,
             }
             if diag.get("ok"):
-                # Quarantine for review: trainable, but the overflow is large
-                # enough that a wrong coordinate frame is the likely cause.
+                # Trainable, but suspicious loader padding usually means the
+                # landmarks are in a wrong coordinate frame. Keep the review
+                # overlay, but do not let train-safe manifests retain it.
                 suspicious_geometry.append(issue)
                 _write_issue_overlay(entry, issue)
+                if drop_invalid_geometry or drop_suspicious_geometry:
+                    invalid_geometry_entries.add(id(entry))
                 continue
             geometry_issues.append(issue)
             invalid_geometry_entries.add(id(entry))
@@ -306,12 +310,24 @@ def stage_crops(
                 "prepare",
                 (
                     f"stage crops geometry: {len(suspicious_geometry)} suspicious "
-                    f"sample(s) quarantined for review; overlays in {overlay_dir}"
+                    f"sample(s) {'dropped' if (drop_invalid_geometry or drop_suspicious_geometry) else 'quarantined for review'}; "
+                    f"overlays in {overlay_dir}"
                 ),
                 level=Verbosity.INFO,
                 suspicious=len(suspicious_geometry),
+                dropped=bool(drop_invalid_geometry or drop_suspicious_geometry),
                 overlay_dir=str(overlay_dir),
             )
+            if geometry_strict or not (
+                drop_invalid_geometry or drop_suspicious_geometry
+            ):
+                first = suspicious_geometry[0]
+                raise ValueError(
+                    "stage crop geometry validation failed: "
+                    f"{len(suspicious_geometry)} suspicious sample(s); first={first}. "
+                    "Use --drop-suspicious-geometry or --drop-invalid-geometry "
+                    "to write a train-safe manifest with suspicious samples removed."
+                )
         if geometry_issues:
             first = geometry_issues[0]
             if geometry_strict or not drop_invalid_geometry:
@@ -321,6 +337,7 @@ def stage_crops(
                     "Use --drop-invalid-geometry to write a train-safe manifest "
                     "with invalid samples removed."
                 )
+        if invalid_geometry_entries:
             before_drop = len(entries)
             entries[:] = [
                 entry for entry in entries if id(entry) not in invalid_geometry_entries
@@ -533,6 +550,7 @@ def stage_manifest(args: argparse.Namespace) -> int:
         validate_geometry=args.validate_geometry,
         geometry_strict=args.geometry_strict,
         drop_invalid_geometry=getattr(args, "drop_invalid_geometry", False),
+        drop_suspicious_geometry=getattr(args, "drop_suspicious_geometry", False),
         geometry_overlay_dir=args.geometry_overlay_dir or None,
         max_geometry_overlays=args.max_geometry_overlays,
     )
@@ -564,7 +582,9 @@ def stage_manifest(args: argparse.Namespace) -> int:
             print(f"  - {issue['sample_id']}: {issue['reason']}")
     suspicious = stats.get("suspicious_geometry", [])
     if suspicious:
-        print(f"suspicious geometry (kept, review overlays): {len(suspicious)}")
+        dropped = stats.get("geometry_dropped", 0)
+        status = "dropped" if dropped else "review overlays"
+        print(f"suspicious geometry ({status}): {len(suspicious)}")
         for issue in suspicious[:10]:
             pad = (issue.get("diagnostics") or {}).get("padding")
             print(f"  - {issue['sample_id']}: padding={pad}")
@@ -627,7 +647,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "When --validate-geometry finds invalid samples, remove them "
-            "from the output manifest instead of failing."
+            "from the output manifest instead of failing. Also removes "
+            "suspicious geometry so the output manifest is train-safe."
+        ),
+    )
+    parser.add_argument(
+        "--drop-suspicious-geometry",
+        action="store_true",
+        help=(
+            "When --validate-geometry finds trainable-but-suspicious samples, "
+            "remove them from the output manifest instead of failing."
         ),
     )
     parser.add_argument(

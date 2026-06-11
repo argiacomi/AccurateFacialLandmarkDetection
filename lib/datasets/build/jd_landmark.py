@@ -45,8 +45,7 @@ def _jd_training_roots(root: Path) -> list[Path]:
         if not candidate.is_dir():
             continue
         if not any(
-            (candidate / subset / "landmark").is_dir()
-            for subset in JD_TRAINING_SUBSETS
+            (candidate / subset / "landmark").is_dir() for subset in JD_TRAINING_SUBSETS
         ):
             continue
         resolved = candidate.resolve()
@@ -116,6 +115,7 @@ def _jd_resolve_loader_geometry_path(
     points: np.ndarray,
     bbox: T.Sequence[float] | None,
     bbox_source: str,
+    corrected_annotation: bool = False,
 ) -> tuple[Path, np.ndarray, dict[str, T.Any]]:
     """Choose a JD sample geometry path.
 
@@ -153,6 +153,12 @@ def _jd_resolve_loader_geometry_path(
         if overlay is not None:
             message += f"; review overlay: {overlay}"
         return ValueError(message)
+
+    if corrected_annotation and not native_fits:
+        raise _quarantine(
+            f"native={native.get('reason')}; corrected annotation is not "
+            "eligible for bbox fallback"
+        )
 
     if bbox is None:
         raise _quarantine(f"native={native.get('reason')}; no bbox fallback")
@@ -357,6 +363,7 @@ def _build_jd_landmark(
                         bbox_source=str(bbox_path.resolve())
                         if bbox_path is not None
                         else "jd_bbox",
+                        corrected_annotation=corrected_path is not None,
                     )
                 )
             except ValueError as err:

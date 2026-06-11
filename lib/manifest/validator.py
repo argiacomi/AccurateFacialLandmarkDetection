@@ -166,6 +166,8 @@ def validate_training_manifest(
     allow_legacy_68_projection: bool = False,
     allow_missing_projection_audit: bool = False,
     allow_legacy_missing_contract_fields: bool = False,
+    allow_suspicious_geometry: bool = False,
+    allow_normalized_non_256: bool = False,
     max_examples: int = 25,
     raise_on_error: bool = False,
     geometry_overlay_dir: str | Path | None = None,
@@ -400,6 +402,8 @@ def validate_training_manifest(
                         diag_example,
                         max_examples,
                     )
+                    if not allow_normalized_non_256:
+                        errors.append("normalized_landmarks_non_256_source")
                     needs_overlay = True
                 if not diag.get("ok"):
                     report["geometry"]["invalid_geometry"] += 1
@@ -417,9 +421,10 @@ def validate_training_manifest(
                     errors.append(reason)
                     needs_overlay = True
                 elif diag.get("suspicious"):
-                    # Quarantine, not a hard failure: large-but-trainable
-                    # overflow usually means a wrong coordinate frame, but
-                    # heavy crops/profiles can legitimately overflow.
+                    # Large-but-trainable overflow usually means a wrong
+                    # coordinate frame. Treat it as invalid by default so
+                    # manifests cannot validate as OK while silently retaining
+                    # bad geometry; callers may explicitly allow it for review.
                     report["geometry"]["suspicious_loader_padding"] += 1
                     _example(
                         report,
@@ -427,6 +432,8 @@ def validate_training_manifest(
                         diag_example,
                         max_examples,
                     )
+                    if not allow_suspicious_geometry:
+                        errors.append("suspicious_loader_padding")
                     needs_overlay = True
 
                 if (

@@ -374,12 +374,16 @@ def _validate(
     *,
     require_images: bool,
     manifest_payload: T.Mapping[str, T.Any] | None = None,
+    allow_suspicious_geometry: bool = False,
+    allow_normalized_non_256: bool = False,
 ) -> dict[str, T.Any]:
     return validate_training_manifest(
         manifest,
         manifest_payload=manifest_payload,
         require_images=require_images,
         raise_on_error=False,
+        allow_suspicious_geometry=allow_suspicious_geometry,
+        allow_normalized_non_256=allow_normalized_non_256,
     )
 
 
@@ -1080,6 +1084,9 @@ def _stage_combined_crops(
         force=getattr(args, "force_stage_crops", False),
         strict=False,
         workers=getattr(args, "workers", 1),
+        validate_geometry=True,
+        drop_invalid_geometry=True,
+        drop_suspicious_geometry=True,
     )
     elapsed = time.time() - started_at
     identical = stats["staged"] + stats["reused"]
@@ -1289,6 +1296,8 @@ def prepare(args: argparse.Namespace) -> int:
             combined_manifest,
             require_images=not args.skip_image_exists_check,
             manifest_payload=combined_payload,
+            allow_suspicious_geometry=bool(getattr(args, "stage_crops", False)),
+            allow_normalized_non_256=bool(getattr(args, "stage_crops", False)),
         )
 
     # Crop staging runs after validation (so a malformed manifest is never
@@ -1303,6 +1312,18 @@ def prepare(args: argparse.Namespace) -> int:
         combined_payload = _stage_combined_crops(
             combined_manifest, args, combined_payload
         )
+        if not args.skip_validate:
+            log_event(
+                "prepare",
+                f"validate staged manifest begin | manifest {combined_manifest}",
+                level=Verbosity.INFO,
+                manifest=str(combined_manifest),
+            )
+            report = _validate(
+                combined_manifest,
+                require_images=not args.skip_image_exists_check,
+                manifest_payload=combined_payload,
+            )
 
     _print_summary(
         results, report, output_root, datasets, manifest_payload=combined_payload

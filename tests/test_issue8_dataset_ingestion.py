@@ -299,9 +299,7 @@ def test_jd_landmark_corrected_only_source_has_no_bundled_images(tmp_path):
         source / "Corrected_landmark" / "AFW_134212_1_0.jpg.txt", _points(106)
     )
 
-    with pytest.raises(
-        ValueError, match="no JD-landmark native release samples built"
-    ):
+    with pytest.raises(ValueError, match="no JD-landmark native release samples built"):
         builder.build(
             _builder_args(
                 "--dataset",
