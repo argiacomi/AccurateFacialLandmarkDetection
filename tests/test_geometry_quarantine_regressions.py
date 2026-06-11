@@ -38,7 +38,7 @@ def _write_counted_txt(path: Path, points: np.ndarray) -> Path:
     return path
 
 
-def test_stage_crops_drop_invalid_geometry_removes_suspicious_samples(
+def test_stage_crops_drop_invalid_geometry_keeps_suspicious_samples(
     tmp_path, monkeypatch
 ):
     image = _write_image(tmp_path / "image.jpg")
@@ -96,9 +96,73 @@ def test_stage_crops_drop_invalid_geometry_removes_suspicious_samples(
     )
 
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert payload["samples"] == []
-    assert stats["geometry_dropped"] == 1
+    assert [sample["sample_id"] for sample in payload["samples"]] == ["suspicious"]
     assert len(stats["suspicious_geometry"]) == 1
+    assert stats["geometry_dropped"] == 0
+
+
+def test_stage_crops_drop_suspicious_geometry_removes_suspicious_samples(
+    tmp_path, monkeypatch
+):
+    image = _write_image(tmp_path / "image.jpg")
+    landmarks = tmp_path / "landmarks.npy"
+    np.save(landmarks, _points(106))
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "samples": [
+                    {
+                        "sample_id": "suspicious",
+                        "dataset": "jd-landmark",
+                        "image": str(image),
+                        "landmarks": str(landmarks),
+                        "source_schema": "2d_106",
+                        "target_schema": "2d_106",
+                        "landmark_count": 106,
+                        "head_name": "landmarks_106",
+                        "normalizer": 100.0,
+                        "split": "train",
+                        "split_safe_id": "suspicious",
+                        "condition": "jd_landmark",
+                        "conditions": ["jd_landmark", "trainset"],
+                        "source": {"dataset": "jd-landmark", "source_id": "suspicious"},
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        stage_mod,
+        "_sample_loader_geometry",
+        lambda entry, *, base_dir: {
+            "ok": True,
+            "suspicious": True,
+            "reason": "suspicious_loader_padding",
+            "padding": 96.0,
+            "source_image_hw": [256, 256],
+        },
+    )
+
+    stats = stage_mod.stage_crops(
+        manifest,
+        out_manifest=manifest,
+        validate_geometry=True,
+        drop_invalid_geometry=True,
+        drop_suspicious_geometry=True,
+        workers=1,
+        max_geometry_overlays=0,
+    )
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["samples"] == []
+    assert len(stats["suspicious_geometry"]) == 1
+    assert stats["geometry_dropped"] == 1
 
 
 def test_validator_fails_suspicious_geometry_by_default(tmp_path, monkeypatch):

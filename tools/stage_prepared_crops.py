@@ -55,6 +55,7 @@ from lib.datasets.loader_geometry import (
     write_geometry_overlay,
 )
 from lib.datasets.parallel import parallel_map
+from lib.datasets.progress import track
 from lib.logging_utils import Verbosity, log_event
 
 
@@ -277,7 +278,15 @@ def stage_crops(
             geometry_overlays_written += 1
 
     if validate_geometry:
-        for index, entry in enumerate(entries):
+        geometry_iter = track(
+            entries,
+            desc="Validate stage geometry",
+            total=len(entries),
+            unit="sample",
+            leave=True,
+            disable=False,
+        )
+        for index, entry in enumerate(geometry_iter):
             if not isinstance(entry, dict):
                 continue
             dataset = str(entry.get("dataset") or "").strip()
@@ -294,12 +303,13 @@ def stage_crops(
                 "diagnostics": diag,
             }
             if diag.get("ok"):
-                # Trainable, but suspicious loader padding usually means the
-                # landmarks are in a wrong coordinate frame. Keep the review
-                # overlay, but do not let train-safe manifests retain it.
+                # Trainable, but suspicious loader padding can mean either a
+                # wrong coordinate frame or a legitimate truncated/out-of-frame
+                # face. Keep the review overlay, and only drop these when the
+                # caller explicitly requests suspicious-geometry dropping.
                 suspicious_geometry.append(issue)
                 _write_issue_overlay(entry, issue)
-                if drop_invalid_geometry or drop_suspicious_geometry:
+                if drop_suspicious_geometry:
                     invalid_geometry_entries.add(id(entry))
                 continue
             geometry_issues.append(issue)
@@ -310,12 +320,12 @@ def stage_crops(
                 "prepare",
                 (
                     f"stage crops geometry: {len(suspicious_geometry)} suspicious "
-                    f"sample(s) {'dropped' if (drop_invalid_geometry or drop_suspicious_geometry) else 'quarantined for review'}; "
+                    f"sample(s) {'dropped' if drop_suspicious_geometry else 'kept with review overlays'}; "
                     f"overlays in {overlay_dir}"
                 ),
                 level=Verbosity.INFO,
                 suspicious=len(suspicious_geometry),
-                dropped=bool(drop_invalid_geometry or drop_suspicious_geometry),
+                dropped=bool(drop_suspicious_geometry),
                 overlay_dir=str(overlay_dir),
             )
             if geometry_strict or not (

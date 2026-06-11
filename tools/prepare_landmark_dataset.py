@@ -1086,7 +1086,9 @@ def _stage_combined_crops(
         workers=getattr(args, "workers", 1),
         validate_geometry=True,
         drop_invalid_geometry=True,
-        drop_suspicious_geometry=True,
+        drop_suspicious_geometry=bool(
+            getattr(args, "drop_suspicious_stage_geometry", False)
+        ),
     )
     elapsed = time.time() - started_at
     identical = stats["staged"] + stats["reused"]
@@ -1323,6 +1325,8 @@ def prepare(args: argparse.Namespace) -> int:
                 combined_manifest,
                 require_images=not args.skip_image_exists_check,
                 manifest_payload=combined_payload,
+                allow_suspicious_geometry=bool(getattr(args, "stage_crops", False)),
+                allow_normalized_non_256=bool(getattr(args, "stage_crops", False)),
             )
 
     _print_summary(
@@ -1539,6 +1543,15 @@ def _parser() -> argparse.ArgumentParser:
         "--force-stage-crops",
         action="store_true",
         help="Rewrite staged crop PNGs even when they already exist.",
+    )
+    parser.add_argument(
+        "--drop-suspicious-stage-geometry",
+        action="store_true",
+        help=(
+            "During --stage-crops, drop samples with suspicious-but-trainable "
+            "geometry. By default only invalid geometry is dropped; suspicious "
+            "samples are kept and review overlays are written."
+        ),
     )
     parser.add_argument(
         "--keep-going",

@@ -211,7 +211,7 @@ def test_validator_flags_normalized_landmarks_on_non_256_source(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_stage_crops_drops_suspicious_with_overlay(tmp_path):
+def test_stage_crops_keeps_suspicious_with_overlay_by_default(tmp_path):
     image = _write_image(tmp_path / "native.png", size=(512, 512))
     good_lmk = tmp_path / "good.npy"
     np.save(good_lmk, _points(68) * 2.0)  # in the 512 frame
@@ -245,6 +245,55 @@ def test_stage_crops_drops_suspicious_with_overlay(tmp_path):
         out_manifest=staged_path,
         validate_geometry=True,
         drop_invalid_geometry=True,
+    )
+
+    assert stats["geometry_dropped"] == 0
+    assert len(stats["suspicious_geometry"]) == 1
+    assert stats["suspicious_geometry"][0]["sample_id"] == "bad"
+
+    staged = json.loads(staged_path.read_text(encoding="utf-8"))
+    assert [sample["sample_id"] for sample in staged["samples"]] == ["good", "bad"]
+
+    overlay_dir = tmp_path / "geometry_review"
+    overlays = list(overlay_dir.rglob("*.png")) + list(overlay_dir.rglob("*.jpg"))
+    assert overlays
+
+
+def test_stage_crops_drops_suspicious_when_explicitly_requested(tmp_path):
+    image = _write_image(tmp_path / "native.png", size=(512, 512))
+    good_lmk = tmp_path / "good.npy"
+    np.save(good_lmk, _points(68) * 2.0)  # in the 512 frame
+    bad_lmk = tmp_path / "bad.npy"
+    bad = _points(68) * 2.0
+    bad[:, 1] += 400.0  # ~200px overflow after the 256 rescale
+    np.save(bad_lmk, bad)
+
+    manifest = {
+        "samples": [
+            {
+                "sample_id": "good",
+                "dataset": "unittest",
+                "image": str(image),
+                "landmarks": str(good_lmk),
+            },
+            {
+                "sample_id": "bad",
+                "dataset": "unittest",
+                "image": str(image),
+                "landmarks": str(bad_lmk),
+            },
+        ]
+    }
+    manifest_path = tmp_path / "manifest.json"
+    staged_path = tmp_path / "staged.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    stats = stage_crops(
+        manifest_path,
+        out_manifest=staged_path,
+        validate_geometry=True,
+        drop_invalid_geometry=True,
+        drop_suspicious_geometry=True,
     )
 
     assert stats["geometry_dropped"] == 1
