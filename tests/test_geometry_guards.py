@@ -322,13 +322,17 @@ def test_helen_quarantines_wrong_frame_annotation(tmp_path):
 
 def test_jd_quarantines_suspicious_native_geometry_without_bbox(tmp_path):
     source = tmp_path / "source"
-    cache = tmp_path / "300w" / "data" / "300w" / "300w"
     output = tmp_path / "out"
-    _write_image(cache / "afw" / "55555_1.jpg", size=(256, 256))
+    name = "AFW_55555_1_0.jpg"
+    _write_image(
+        source / "Training_data" / "AFW" / "picture" / name, size=(256, 256)
+    )
     # Wrong-frame style: y far beyond the 256 image but under the 2048 guard.
     points = _points(106)
     points[:, 1] += 300.0
-    _write_counted_txt(source / "Corrected_landmark" / "AFW_55555_1_0.jpg.txt", points)
+    _write_counted_txt(
+        source / "Training_data" / "AFW" / "landmark" / f"{name}.txt", points
+    )
 
     with pytest.raises(ValueError, match="no JD-landmark native release samples"):
         builder.build(
@@ -338,8 +342,6 @@ def test_jd_quarantines_suspicious_native_geometry_without_bbox(tmp_path):
                     "jd-landmark",
                     "--source-dir",
                     str(source),
-                    "--image-root",
-                    str(cache),
                     "--output-dir",
                     str(output),
                 ]

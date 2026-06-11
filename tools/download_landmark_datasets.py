@@ -213,6 +213,16 @@ SOURCES: tuple[SourceAsset, ...] = (
     ),
     SourceAsset(
         dataset="jd-landmark",
+        name="JD-landmark Training_data",
+        filename="Training_data.zip",
+        google_drive_file_id="1gD4xcUUKQo6-70KgBUbODSdQtb_tnuvu",
+        note=(
+            "JD-landmark training release (AFW/HELEN/IBUG/LFPW with bundled "
+            "landmark/picture pairs); replaces the 300W image cache."
+        ),
+    ),
+    SourceAsset(
+        dataset="jd-landmark",
         name="JD-landmark Test_data1",
         filename="Test_data1.zip",
         google_drive_file_id="12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm",

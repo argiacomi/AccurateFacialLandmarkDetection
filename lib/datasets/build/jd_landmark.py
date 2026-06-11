@@ -4,7 +4,56 @@
 from __future__ import annotations
 
 from lib.datasets.build.core import *  # noqa: F403
-from lib.datasets.build.w300 import *  # noqa: F403
+
+JD_TRAINING_SUBSETS = ("AFW", "HELEN", "IBUG", "LFPW")
+
+
+def _jd_base_subset(image_name: str) -> str | None:
+    prefix = Path(image_name).stem.split("_", 1)[0].lower()
+    return prefix if prefix in {"afw", "helen", "lfpw", "ibug"} else None
+
+
+def _jd_bbox_dirs(root: Path) -> tuple[Path, ...]:
+    candidates = [
+        root / "Test_data1" / "rect",
+        root
+        / "training_dataset_face_detection_bounding_box_v1"
+        / "training_dataset_face_detection_bounding_box",
+    ]
+    candidates.extend(
+        path
+        for path in root.rglob("training_dataset_face_detection_bounding_box")
+        if path.is_dir() and "__MACOSX" not in path.parts
+    )
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(candidate)
+    return tuple(out)
+
+
+def _jd_training_roots(root: Path) -> list[Path]:
+    candidates = [root, root / "Training_data", root / "Training_data.zip"]
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        if not any(
+            (candidate / subset / "landmark").is_dir()
+            for subset in JD_TRAINING_SUBSETS
+        ):
+            continue
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(candidate)
+    return out
 
 
 def _jd_landmark_sources(
@@ -26,6 +75,20 @@ def _jd_landmark_sources(
                     "test_data1",
                 )
             )
+
+    for training_root in _jd_training_roots(root):
+        for subset in JD_TRAINING_SUBSETS:
+            landmark_dir = training_root / subset / "landmark"
+            if landmark_dir.is_dir():
+                out.append(
+                    (
+                        landmark_dir,
+                        training_root / subset / "picture",
+                        None,
+                        "train",
+                        "training_data",
+                    )
+                )
 
     corrected_roots = [root / "Corrected_landmark"]
     if root.name == "Corrected_landmark":
@@ -156,6 +219,12 @@ def _build_jd_landmark(
         if source_name == "test_data1"
         for path in landmark_dir.glob("*.txt")
     }
+    training_landmark_names = {
+        path.name
+        for landmark_dir, _, _, _, source_name in sources
+        if source_name == "training_data"
+        for path in landmark_dir.glob("*.txt")
+    }
     corrected_by_name = {
         path.name: path
         for corrected_root in (
@@ -166,12 +235,14 @@ def _build_jd_landmark(
         for path in corrected_root.glob("*.txt")
     }
     global_bbox_dirs = _jd_bbox_dirs(root)
-    jd_image_index = _build_combined_image_index(
-        _candidate_300w_cache_roots(root, image_root)
-    )
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
     for landmark_dir, image_dir, bbox_dir, source_split, source_name in sources:
+        source_image_index = (
+            _build_image_index(image_dir)
+            if image_dir is not None and image_dir.is_dir()
+            else None
+        )
         jd_landmark_files = sorted(landmark_dir.glob("*.txt"))
         for landmark_path in track(
             jd_landmark_files,
@@ -179,17 +250,22 @@ def _build_jd_landmark(
             total=len(jd_landmark_files),
             unit="file",
         ):
-            if (
-                source_name == "corrected_landmark"
-                and landmark_path.name in test_data1_landmark_names
-            ):
-                skipped.append(
-                    {
-                        "sample_id": landmark_path.as_posix(),
-                        "reason": "superseded by test_data1 corrected override",
-                    }
+            if source_name == "corrected_landmark":
+                superseded_by = (
+                    "test_data1"
+                    if landmark_path.name in test_data1_landmark_names
+                    else "training_data"
+                    if landmark_path.name in training_landmark_names
+                    else None
                 )
-                continue
+                if superseded_by is not None:
+                    skipped.append(
+                        {
+                            "sample_id": landmark_path.as_posix(),
+                            "reason": f"superseded by {superseded_by} corrected override",
+                        }
+                    )
+                    continue
             image_name = _image_name_from_landmark_name(landmark_path)
             corrected_path = corrected_by_name.get(landmark_path.name)
             annotation_path = (
@@ -201,18 +277,19 @@ def _build_jd_landmark(
                     raise ValueError(
                         f"JD-landmark expected 2d_106, got {detected_schema}"
                     )
-                try:
-                    image = _resolve_jd_300w_image(
-                        root, image_root, image_name, image_index=jd_image_index
+                if image_dir is None:
+                    raise FileNotFoundError(
+                        f"JD-landmark {source_name} ships no picture directory for "
+                        f"{image_name}; corrected landmarks only apply as overrides "
+                        "to Training_data/Test_data1 samples"
                     )
-                    image_source = "300w_cache"
-                except FileNotFoundError:
-                    if image_dir is None:
-                        raise
-                    image = _resolve_unique_image(
-                        (image_dir,), image_name, context="JD-landmark Test_data1"
-                    )
-                    image_source = "test_data1_picture"
+                image = _resolve_unique_image(
+                    (image_dir,),
+                    image_name,
+                    context=f"JD-landmark {source_name}",
+                    image_index=source_image_index,
+                )
+                image_source = f"{source_name}_picture"
             except Exception as err:  # noqa: BLE001
                 skipped.append(
                     {"sample_id": landmark_path.as_posix(), "reason": str(err)}
@@ -245,10 +322,7 @@ def _build_jd_landmark(
                     "source_image_name": image_name,
                     "source_image": str(image.resolve()),
                     "resolved_image_source": image_source,
-                    "resolved_300w_image_path": str(image.resolve())
-                    if image_source == "300w_cache"
-                    else None,
-                    "base_subset": _jd_300w_base_subset(image_name),
+                    "base_subset": _jd_base_subset(image_name),
                 }
             )
             if corrected_path is not None:

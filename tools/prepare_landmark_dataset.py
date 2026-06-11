@@ -59,7 +59,7 @@ from tools.stage_prepared_crops import stage_crops
 
 VIDEO_DATASETS = frozenset({"300vw", "wflw-v"})
 # Datasets that are annotation layers over the existing 300W image cache.
-DATASETS_NEEDING_300W_IMAGES = frozenset({"jd-landmark", "helen"})
+DATASETS_NEEDING_300W_IMAGES = frozenset({"helen"})
 # Datasets that are annotation layers over the native AFLW image cache.
 DATASETS_NEEDING_AFLW_IMAGES = frozenset({"merl-rav"})
 
@@ -91,19 +91,10 @@ def _find_dir_named(root: Path, name: str) -> Path | None:
     if not root.is_dir():
         return None
     for candidate in sorted(root.rglob(name)):
-        if candidate.is_dir():
+        # macOS zip extraction mirrors the tree under __MACOSX with AppleDouble
+        # junk files; matching there would stage resource forks, not data.
+        if candidate.is_dir() and "__MACOSX" not in candidate.parts:
             return candidate
-    return None
-
-
-def _find_dir_with_child(root: Path, child: str) -> Path | None:
-    if not root.is_dir():
-        return None
-    if (root / child).is_dir():
-        return root
-    for candidate in sorted(root.rglob(child)):
-        if candidate.is_dir() and candidate.parent.is_dir():
-            return candidate.parent
     return None
 
 
@@ -145,7 +136,7 @@ def _resolve_300w_image_cache(
     """Find the actual 300W image root containing afw/helen/lfpw/ibug.
 
     The downloader registry may point at an extraction wrapper directory such as
-    data/datasets/300w/extracted/300w.tar.gz. HELEN/JD builders need the nested
+    data/datasets/300w/extracted/300w.tar.gz. The HELEN builder needs the nested
     image cache root, not just the extraction wrapper.
     """
 
@@ -230,13 +221,52 @@ def _symlink(link: Path, target: Path) -> None:
     link.symlink_to(target.resolve())
 
 
+_JD_TRAINING_SUBSETS = ("AFW", "HELEN", "IBUG", "LFPW")
+
+
+def _jd_find_training_data(extracted: Path) -> Path | None:
+    """Find the Training_data root holding AFW/HELEN/IBUG/LFPW subset folders."""
+    candidates = [extracted / "Training_data", extracted / "Training_data.zip"]
+    candidates.extend(
+        path.parent
+        for subset in _JD_TRAINING_SUBSETS
+        for path in sorted(extracted.rglob(subset))
+    )
+    for candidate in candidates:
+        if "__MACOSX" in candidate.parts:
+            continue
+        if any(
+            (candidate / subset / "landmark").is_dir()
+            for subset in _JD_TRAINING_SUBSETS
+        ):
+            return candidate
+    return None
+
+
+def _jd_find_test_data1(extracted: Path) -> Path | None:
+    """Find the Test_data1 root, skipping Training_data subset landmark dirs."""
+    if (extracted / "Test_data1" / "landmark").is_dir():
+        return extracted / "Test_data1"
+    for landmark_dir in sorted(extracted.rglob("landmark")):
+        if not landmark_dir.is_dir():
+            continue
+        candidate = landmark_dir.parent
+        if "__MACOSX" in candidate.parts:
+            continue
+        if candidate.name in _JD_TRAINING_SUBSETS:
+            continue
+        return candidate
+    return None
+
+
 def _stage_jd_landmark(
     data_root: Path, registry: dict[str, T.Any] | None
 ) -> Path | None:
-    """Stage Test_data1, Corrected_landmark, and bbox dirs under one source root.
+    """Stage Training_data, Test_data1, Corrected_landmark, and bbox dirs.
 
-    The JD-landmark builder expects ``<root>/Test_data1`` and
-    ``<root>/Corrected_landmark`` plus a discoverable training bbox directory.
+    The JD-landmark builder expects ``<root>/Training_data`` (AFW/HELEN/IBUG/LFPW
+    with bundled landmark/picture pairs) and ``<root>/Test_data1`` plus
+    ``<root>/Corrected_landmark`` and a discoverable training bbox directory.
     The downloader extracts each archive into its own folder, so we link the
     discovered artifacts into a single staging directory the builder can consume.
     """
@@ -246,7 +276,10 @@ def _stage_jd_landmark(
     staged = Path(data_root) / "jd-landmark" / "staged"
     staged.mkdir(parents=True, exist_ok=True)
 
-    test_data1 = _find_dir_with_child(extracted, "landmark")
+    training_data = _jd_find_training_data(extracted)
+    if training_data is not None:
+        _symlink(staged / "Training_data", training_data)
+    test_data1 = _jd_find_test_data1(extracted)
     if test_data1 is not None:
         _symlink(staged / "Test_data1", test_data1)
     corrected = _find_dir_named(extracted, "Corrected_landmark")

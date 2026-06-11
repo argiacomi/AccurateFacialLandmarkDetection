@@ -244,11 +244,17 @@ def test_resolve_source_dir_falls_back_without_registry(tmp_path):
 def test_jd_landmark_source_artifacts_configured():
     jd = [s for s in downloader.SOURCES if s.dataset == "jd-landmark"]
     names = {s.name for s in jd}
+    assert "JD-landmark Training_data" in names
     assert "JD-landmark Test_data1" in names
     assert "JD-landmark corrected landmarks" in names
     assert "JD-landmark training bbox" in names
 
     by_name = {s.name: s for s in jd}
+    assert (
+        by_name["JD-landmark Training_data"].google_drive_file_id
+        == "1gD4xcUUKQo6-70KgBUbODSdQtb_tnuvu"
+    )
+    assert by_name["JD-landmark Training_data"].filename == "Training_data.zip"
     assert (
         by_name["JD-landmark Test_data1"].google_drive_file_id
         == "12wRlDARRKe0u-lzFPRw-klG2MUa_JBQm"
@@ -309,6 +315,9 @@ def test_stage_jd_landmark_links_artifacts(tmp_path):
     data_root = tmp_path / "data"
     extracted = data_root / "jd-landmark" / "extracted"
     # Each artifact lands in its own archive-named subfolder, as the downloader extracts them.
+    for subset in ("AFW", "HELEN", "IBUG", "LFPW"):
+        (extracted / "Training_data.zip" / subset / "landmark").mkdir(parents=True)
+        (extracted / "Training_data.zip" / subset / "picture").mkdir(parents=True)
     (extracted / "Test_data1.zip" / "Test_data1" / "landmark").mkdir(parents=True)
     (extracted / "Test_data1.zip" / "Test_data1" / "picture").mkdir(parents=True)
     (extracted / "Corrected_landmark.zip" / "Corrected_landmark").mkdir(parents=True)
@@ -317,6 +326,8 @@ def test_stage_jd_landmark_links_artifacts(tmp_path):
 
     staged = prepare._stage_jd_landmark(data_root, None)
     assert staged is not None
+    assert (staged / "Training_data" / "AFW" / "landmark").is_dir()
+    assert (staged / "Training_data" / "LFPW" / "picture").is_dir()
     assert (staged / "Test_data1").is_dir()
     assert (staged / "Test_data1" / "landmark").is_dir()
     assert (staged / "Corrected_landmark").is_dir()

@@ -64,7 +64,7 @@ folders because those identifiers are preserved for leakage checks.
 | --------------- | ----------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | HELEN dense     | `2d_194`          | `https://github.com/argiacomi/faceswap/issues/99`                                           | `python tools/build_quality_dataset.py --dataset helen --source-dir <annotations-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_helen`    |
 | LaPa            | `2d_106`          | Google Drive file id `1XOBoRGSraP50_pS1YPB8_i8Wmw_5L-NG`                                    | `python tools/build_quality_dataset.py --dataset lapa --source-dir <root> --output-dir runs/landmarks/build_lapa`                                                           |
-| JD-landmark     | `2d_106`          | `https://github.com/argiacomi/faceswap/issues/98`                                           | `python tools/build_quality_dataset.py --dataset jd-landmark --source-dir <jd-root> --image-root <300w-cache>/data/300w/300w --output-dir runs/landmarks/build_jd_landmark` |
+| JD-landmark     | `2d_106`          | Google Drive file id `1gD4xcUUKQo6-70KgBUbODSdQtb_tnuvu`                                    | `python tools/build_quality_dataset.py --dataset jd-landmark --source-dir <jd-root> --output-dir runs/landmarks/build_jd_landmark`                                          |
 | fll2            | `2d_106`          | Google Drive file id `16fiVoBaTtOevQa4mH34rWggfkNKNEL2A`                                    | `python tools/build_quality_dataset.py --dataset fll2 --source-dir <root> --output-dir runs/landmarks/build_fll2`                                                           |
 | FLL3            | `2d_106`          | Google Drive file id `1F_UnmpRnUnNS3Wk3V6CkJiIUYmG5Wjdr`                                    | `python tools/build_quality_dataset.py --dataset fll3 --source-dir <root> --output-dir runs/landmarks/build_fll3`                                                           |
 | cofw68 original | `2d_29`           | `https://data.caltech.edu/records/bc0bf-nc666/files/COFW_color.zip?download=1`              | `python tools/build_quality_dataset.py --dataset cofw29 --source-dir <root> --output-dir runs/landmarks/build_cofw68_original`                                              |
@@ -89,12 +89,17 @@ The `registry.json` records whether each asset was `downloaded`, `reused`,
 When preparing multiple datasets, `--audit-overlay-limit` applies per dataset,
 and overlays are written under `visual_audit/overlays/<dataset>/<schema>/`.
 
-HELEN dense and JD-landmark are annotation layers over the 300W image cache.
-HELEN expects `annotations.json` from the linked S3 source and resolves images
-under `<300w-cache>/data/300w/300w/helen/{trainset,testset}`. JD-landmark
-resolves corrected/test annotation names back to 300W subsets, for example
-`AFW_134212_1_0.jpg.txt` resolves to `afw/134212_1.jpg`; ambiguous or missing
-300W matches are reported as staging errors.
+HELEN dense is an annotation layer over the 300W image cache. HELEN expects
+`annotations.json` from the linked S3 source and resolves images under
+`<300w-cache>/data/300w/300w/helen/{trainset,testset}`.
+
+JD-landmark ships its own images. `Training_data.zip` (Google Drive file id
+`1gD4xcUUKQo6-70KgBUbODSdQtb_tnuvu`) contains `AFW/HELEN/IBUG/LFPW` subset
+folders, each with paired `landmark/<name>.jpg.txt` and `picture/<name>.jpg`
+files, so the builder no longer resolves names against the 300W cache.
+`Corrected_landmark.zip` entries apply as annotation overrides over matching
+Training_data/Test_data1 filenames; corrected entries without a bundled image
+are skipped and reported.
 
 ## Video Layout
 

@@ -243,27 +243,26 @@ def test_jd_landmark_test_data_parser_pairs_jpg_txt_images_and_rects(tmp_path):
     assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
 
 
-def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_corrected_override(
+def test_jd_landmark_training_data_pairs_bundled_pictures_and_applies_corrected_override(
     tmp_path,
 ):
     source = tmp_path / "source"
-    cache = tmp_path / "300w" / "data" / "300w" / "300w"
     output = tmp_path / "out"
-    image_path = _write_image(cache / "afw" / "134212_1.jpg")
     original = _points(106)
     corrected = original + 7.0
-    name = "AFW_134212_1_0.jpg.txt"
-    _write_counted_txt(source / "Test_data1" / "landmark" / name, original)
-    _write_counted_txt(source / "Corrected_landmark" / name, corrected)
+    name = "AFW_134212_1_0.jpg"
+    image_path = _write_image(source / "Training_data" / "AFW" / "picture" / name)
+    _write_counted_txt(
+        source / "Training_data" / "AFW" / "landmark" / f"{name}.txt", original
+    )
+    _write_counted_txt(source / "Corrected_landmark" / f"{name}.txt", corrected)
     bbox_dir = (
         source
         / "training_dataset_face_detection_bounding_box_v1"
         / "training_dataset_face_detection_bounding_box"
     )
     bbox_dir.mkdir(parents=True)
-    (bbox_dir / "AFW_134212_1_0.jpg.rect").write_text(
-        "10 20 210 220\n", encoding="utf-8"
-    )
+    (bbox_dir / f"{name}.rect").write_text("10 20 210 220\n", encoding="utf-8")
 
     manifest_path = builder.build(
         _builder_args(
@@ -271,8 +270,6 @@ def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_correct
             "jd-landmark",
             "--source-dir",
             str(source),
-            "--image-root",
-            str(cache),
             "--output-dir",
             str(output),
         )
@@ -285,8 +282,9 @@ def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_correct
     assert len(manifest["samples"]) == 1
     assert np.allclose(saved_points, corrected)
     assert sample["image"] == str(image_path.resolve())
-    assert sample["metadata"]["resolved_image_source"] == "300w_cache"
-    assert sample["metadata"]["resolved_300w_image_path"] == str(image_path.resolve())
+    assert sample["metadata"]["source_release"] == "training_data"
+    assert sample["metadata"]["source_split"] == "train"
+    assert sample["metadata"]["resolved_image_source"] == "training_data_picture"
     assert sample["metadata"]["base_subset"] == "afw"
     assert sample["metadata"]["corrected_annotation"].endswith(
         "Corrected_landmark/AFW_134212_1_0.jpg.txt"
@@ -294,45 +292,22 @@ def test_jd_landmark_maps_afw_annotation_names_to_300w_cache_and_applies_correct
     assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
 
 
-def test_jd_landmark_corrected_annotations_require_300w_cache_images(tmp_path):
+def test_jd_landmark_corrected_only_source_has_no_bundled_images(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "out"
     _write_counted_txt(
         source / "Corrected_landmark" / "AFW_134212_1_0.jpg.txt", _points(106)
     )
 
-    with pytest.raises(ValueError, match="JD-landmark requires a 300W image cache"):
+    with pytest.raises(
+        ValueError, match="no JD-landmark native release samples built"
+    ):
         builder.build(
             _builder_args(
                 "--dataset",
                 "jd-landmark",
                 "--source-dir",
                 str(source),
-                "--output-dir",
-                str(output),
-            )
-        )
-
-
-def test_jd_landmark_rejects_ambiguous_300w_cache_matches(tmp_path):
-    source = tmp_path / "source"
-    cache = tmp_path / "300w" / "data" / "300w" / "300w"
-    output = tmp_path / "out"
-    _write_counted_txt(
-        source / "Corrected_landmark" / "LFPW_image_test_0237_0.jpg.txt", _points(106)
-    )
-    _write_image(cache / "lfpw" / "trainset" / "image_0237.png")
-    _write_image(cache / "lfpw" / "testset" / "image_0237.png")
-
-    with pytest.raises(ValueError, match="ambiguous"):
-        builder.build(
-            _builder_args(
-                "--dataset",
-                "jd-landmark",
-                "--source-dir",
-                str(source),
-                "--image-root",
-                str(cache),
                 "--output-dir",
                 str(output),
             )
