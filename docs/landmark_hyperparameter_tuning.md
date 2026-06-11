@@ -75,7 +75,7 @@ The pruner and `--search-epochs` apply here too, but the learning rate is exclud
 sqlite:///<output-dir>/optuna_study.db
 ```
 
-Under `--execute` the orchestrator uses an interleaved `study.ask()` → run (with live `trial.report`/`trial.should_prune`) → `study.tell()` loop, persisting scores and pruned states back to the study. Dry-run planning and the `--disable-optuna` fallback use a pre-planned `study.ask()` batch with no pruning.
+Under `--execute` the orchestrator uses an interleaved `study.ask()` → run (with live `trial.report`/`trial.should_prune`) → `study.tell()` loop, persisting scores and pruned states back to the study. A pruned trial's whole process group is terminated, including torchrun rank workers. Dry-run planning and the `--disable-optuna` fallback use deterministic sampling and never write to the study, so a later `--execute` run starts from a clean trial ledger.
 
 Useful options:
 

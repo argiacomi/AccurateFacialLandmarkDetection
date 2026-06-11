@@ -541,6 +541,109 @@ def test_execute_with_pruning_terminates_pruned_trial(tmp_path):
     assert status["last_epoch"] < 19
 
 
+def test_execute_with_pruning_kills_whole_process_group(tmp_path):
+    """A pruned torchrun-style launcher must not leave grandchildren alive."""
+    import time
+
+    args = tuner.build_arg_parser().parse_args(
+        ["--output-dir", str(tmp_path), "--prune-poll-seconds", "0.5"]
+    )
+    metrics_path = tmp_path / "metrics.json"
+    marker_path = tmp_path / "grandchild_heartbeat.txt"
+    grandchild = (
+        "import sys,time\n"
+        "while True:\n"
+        "    open(sys.argv[1],'a').write('x')\n"
+        "    time.sleep(0.1)\n"
+    )
+    parent = (
+        "import json,subprocess,sys,time\n"
+        "metrics, marker, grandchild = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "subprocess.Popen([sys.executable, '-c', grandchild, marker])\n"
+        "for e in range(60):\n"
+        "    json.dump({'epoch': e, 'model': {'overall': {'nme': 0.05}}}, open(metrics,'w'))\n"
+        "    time.sleep(0.3)\n"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        parent,
+        str(metrics_path),
+        str(marker_path),
+        grandchild,
+    ]
+
+    trial = _PruningTrial(prune_at_epoch=2)
+    status = tuner._execute_with_pruning(
+        args, command, metrics_path, trial=trial, baseline_metrics=None
+    )
+
+    assert status["pruned"] is True
+    # Give any surviving grandchild time to heartbeat, then confirm it is dead.
+    time.sleep(0.5)
+    size_after_kill = marker_path.stat().st_size if marker_path.exists() else 0
+    time.sleep(1.0)
+    size_later = marker_path.stat().st_size if marker_path.exists() else 0
+    assert size_later == size_after_kill
+
+
+def test_dry_run_planning_does_not_ask_real_optuna(tmp_path, monkeypatch):
+    fake_optuna = _FakeOptuna()
+    monkeypatch.setattr(
+        tuner.importlib,
+        "import_module",
+        lambda name: fake_optuna if name == "optuna" else None,
+    )
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--dry-run",
+            "--optuna-trials",
+            "3",
+        ]
+    )
+
+    runs = tuner.generate_loss_search(args, tuner.baseline_config(args))
+
+    # Planning must not leave asked-but-never-told trials in the study.
+    assert fake_optuna.created_kwargs is None
+    assert len(fake_optuna.study.asked) == 0
+    assert len(runs) == 3
+    assert {run["optuna_source"] for run in runs} == {"deterministic_fallback"}
+
+
+def test_run_one_removes_stale_metrics_before_execute(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--execute",
+            "--train-command",
+            f"{sys.executable} -c pass",
+        ]
+    )
+    run = tuner.make_run_config(
+        stage="optuna_loss_search",
+        params=tuner.baseline_config(args),
+        seed=17,
+        index=0,
+    )
+    run_dir = tmp_path / "runs" / run["id"]
+    run_dir.mkdir(parents=True)
+    stale = run_dir / args.metrics_file_name
+    stale.write_text(
+        '{"epoch": 99, "model": {"overall": {"nme": 0.01}}}', encoding="utf-8"
+    )
+
+    # The no-op trainer writes no metrics; if the stale file survived, run_one
+    # would score it and return a result instead of skipping.
+    result = tuner.run_one(args, run, baseline_metrics=None)
+
+    assert result is None
+    assert not stale.exists()
+
+
 def test_execute_with_pruning_runs_to_completion_when_not_pruned(tmp_path):
     args = tuner.build_arg_parser().parse_args(
         ["--output-dir", str(tmp_path), "--prune-poll-seconds", "0.5"]

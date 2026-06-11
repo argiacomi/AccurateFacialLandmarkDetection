@@ -42,6 +42,7 @@ import math
 import os
 import random
 import shlex
+import signal
 import statistics
 import subprocess
 import sys
@@ -559,7 +560,13 @@ def generate_loss_search(
     plan.setdefault("trials", [])
 
     if len(plan["trials"]) < int(args.optuna_trials):
-        study = create_or_load_optuna_study(args)
+        # Pure dry-run planning must not call study.ask(): asked-but-never-told
+        # trials would persist as "running" in the SQLite study and pollute a
+        # later --execute run. Plan with deterministic sampling instead.
+        planning_only = bool(getattr(args, "dry_run", False)) and not bool(
+            getattr(args, "mock_metrics", False)
+        )
+        study = None if planning_only else create_or_load_optuna_study(args)
         rng = random.Random(int(args.optuna_seed))
         if study is not None:
             plan["uses_real_optuna"] = True
@@ -725,6 +732,33 @@ def _intermediate_score(
     return int(epoch), float(score)
 
 
+def _signal_process_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the child's whole process group, falling back to the child alone.
+
+    Launchers like torchrun spawn per-rank workers; signaling only the parent can
+    orphan GPU workers that hold memory and break the next trial.
+    """
+
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        if sig == signal.SIGKILL:
+            proc.kill()
+        else:
+            proc.terminate()
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    _signal_process_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(proc, signal.SIGKILL)
+        proc.wait()
+
+
 def _execute_with_pruning(
     args: argparse.Namespace,
     command: list[str],
@@ -736,14 +770,19 @@ def _execute_with_pruning(
     """Run a training subprocess, reporting per-epoch scores to Optuna.
 
     Polls the evolving eval report; on each new epoch it calls ``trial.report``
-    and ``trial.should_prune``. A pruned trial terminates the child process so we
-    stop paying for an obviously-weak configuration. Returns a status dict.
+    and ``trial.should_prune``. A pruned trial terminates the child's whole
+    process group (torchrun rank workers included) so we stop paying for an
+    obviously-weak configuration. Returns a status dict.
     """
 
     import time
 
     poll_seconds = max(float(getattr(args, "prune_poll_seconds", 10.0)), 0.5)
-    proc = subprocess.Popen(command, cwd=args.cwd or None, env=os.environ.copy())
+    # start_new_session puts the child in its own process group so pruning can
+    # kill the full tree (e.g. torchrun and its per-rank workers) via killpg.
+    proc = subprocess.Popen(
+        command, cwd=args.cwd or None, env=os.environ.copy(), start_new_session=True
+    )
     reported_epoch = -1
     pruned = False
     last_epoch = -1
@@ -771,13 +810,7 @@ def _execute_with_pruning(
                 break
             time.sleep(poll_seconds)
     finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+        _terminate_process_tree(proc)
     return {
         "returncode": proc.returncode,
         "pruned": pruned,
@@ -829,6 +862,13 @@ def run_one(
 
     metrics_path = run_dir / args.metrics_file_name
     prunable = study is not None and trial is not None
+    if args.execute and not args.mock_metrics:
+        # Remove leftovers from a previous failed/pruned attempt so the pruning
+        # poller cannot read a stale epoch score before the new child's first
+        # eval. (Completed runs never reach here; already_done() skips them.)
+        for stale in (metrics_path, run_dir / "runtime_metrics.jsonl"):
+            if stale.exists():
+                stale.unlink()
     if args.mock_metrics:
         metrics = synthetic_metrics_for_config(run["params"], seed=int(run["seed"]))
         write_json(metrics_path, metrics)
