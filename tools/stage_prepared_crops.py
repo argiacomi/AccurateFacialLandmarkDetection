@@ -532,7 +532,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--geometry-strict",
         action="store_true",
-        help="Fail if --validate-geometry finds any invalid sample.",
+        help=(
+            "Force failure if --validate-geometry finds invalid samples, "
+            "even when --drop-invalid-geometry is also set."
+        ),
+    )
+    parser.add_argument(
+        "--drop-invalid-geometry",
+        action="store_true",
+        help=(
+            "When --validate-geometry finds invalid samples, remove them "
+            "from the output manifest instead of failing."
+        ),
     )
     parser.add_argument(
         "--workers",
