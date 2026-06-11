@@ -312,6 +312,99 @@ def test_jd_landmark_corrected_only_source_has_no_bundled_images(tmp_path):
         )
 
 
+def test_jd_landmark_direct_builder_discovers_archive_wrapped_training_artifacts(
+    tmp_path,
+):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+
+    original = _points(106)
+    corrected = original + 9.0
+    name = "LFPW_image_train_0497_0.jpg"
+
+    _write_image(
+        source / "Training_data.zip" / "Training_data" / "LFPW" / "picture" / name
+    )
+    _write_counted_txt(
+        source
+        / "Training_data.zip"
+        / "Training_data"
+        / "LFPW"
+        / "landmark"
+        / f"{name}.txt",
+        original,
+    )
+    _write_counted_txt(
+        source / "Corrected_landmark.zip" / "Corrected_landmark" / f"{name}.txt",
+        corrected,
+    )
+    bbox_dir = (
+        source / "training_bbox.zip" / "training_dataset_face_detection_bounding_box"
+    )
+    bbox_dir.mkdir(parents=True)
+    (bbox_dir / f"{name}.rect").write_text("10 20 210 220\n", encoding="utf-8")
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "jd-landmark",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    manifest = _load_manifest(manifest_path)
+    assert len(manifest["samples"]) == 1
+    sample = manifest["samples"][0]
+    saved_points = np.load(output / sample["landmarks"])
+
+    assert np.allclose(saved_points, corrected)
+    assert sample["metadata"]["source_release"] == "training_data"
+    assert sample["metadata"]["resolved_image_source"] == "training_data_picture"
+    assert sample["metadata"]["corrected_annotation_applied"] is True
+    assert sample["metadata"]["corrected_annotation"].endswith(
+        "Corrected_landmark.zip/Corrected_landmark/LFPW_image_train_0497_0.jpg.txt"
+    )
+    assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
+
+
+def test_jd_landmark_direct_builder_discovers_archive_wrapped_test_data1(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "out"
+
+    points = _points(106)
+    name = "sample.jpg"
+
+    _write_image(source / "Test_data1.zip" / "Test_data1" / "picture" / name)
+    _write_counted_txt(
+        source / "Test_data1.zip" / "Test_data1" / "landmark" / f"{name}.txt",
+        points,
+    )
+    (source / "Test_data1.zip" / "Test_data1" / "rect").mkdir(parents=True)
+    (source / "Test_data1.zip" / "Test_data1" / "rect" / f"{name}.rect").write_text(
+        "10 20 210 220\n", encoding="utf-8"
+    )
+
+    manifest_path = builder.build(
+        _builder_args(
+            "--dataset",
+            "jd-landmark",
+            "--source-dir",
+            str(source),
+            "--output-dir",
+            str(output),
+        )
+    )
+
+    sample = _load_manifest(manifest_path)["samples"][0]
+    assert sample["split"] == "test"
+    assert sample["metadata"]["source_release"] == "test_data1"
+    assert sample["metadata"]["resolved_image_source"] == "test_data1_picture"
+    assert sample["metadata"]["bbox_xyxy"] == [10.0, 20.0, 210.0, 220.0]
+
+
 @pytest.mark.parametrize(
     ("dataset", "landmark_rel", "image_rel", "bbox_rel"),
     [

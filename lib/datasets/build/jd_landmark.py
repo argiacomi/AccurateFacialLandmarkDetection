@@ -38,10 +38,38 @@ def _jd_bbox_dirs(root: Path) -> tuple[Path, ...]:
 
 
 def _jd_training_roots(root: Path) -> list[Path]:
-    candidates = [root, root / "Training_data", root / "Training_data.zip"]
+    candidates = [
+        root,
+        root / "Training_data",
+        root / "Training_data.zip",
+        root / "Training_data.zip" / "Training_data",
+    ]
+
+    if root.is_dir():
+        candidates.extend(
+            path
+            for path in root.rglob("Training_data")
+            if path.is_dir() and "__MACOSX" not in path.parts
+        )
+        candidates.extend(
+            path
+            for path in root.rglob("Training_data.zip")
+            if path.is_dir() and "__MACOSX" not in path.parts
+        )
+        # Discover archive-wrapped layouts by walking from subset/landmark dirs
+        # back to the common root containing AFW/HELEN/IBUG/LFPW.
+        for landmark_dir in root.rglob("landmark"):
+            if "__MACOSX" in landmark_dir.parts:
+                continue
+            subset_dir = landmark_dir.parent
+            if subset_dir.name in JD_TRAINING_SUBSETS:
+                candidates.append(subset_dir.parent)
+
     out: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
+        if "__MACOSX" in candidate.parts:
+            continue
         if not candidate.is_dir():
             continue
         if not any(
@@ -55,14 +83,39 @@ def _jd_training_roots(root: Path) -> list[Path]:
     return out
 
 
+def _jd_find_dirs_named(root: Path, name: str) -> list[Path]:
+    """Find extracted JD artifact directories, including archive-named wrappers.
+
+    The downloader extracts each source archive under directories such as
+    ``Test_data1.zip/Test_data1`` and
+    ``Corrected_landmark.zip/Corrected_landmark``. Direct builder invocations may
+    receive the common extraction root rather than the staged symlink root, so the
+    JD builder needs the same discovery behavior as prepare_landmark_dataset.py.
+    """
+    candidates = [root] if root.name == name else [root / name]
+    if root.is_dir():
+        candidates.extend(path for path in root.rglob(name) if path.is_dir())
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if "__MACOSX" in candidate.parts:
+            continue
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(candidate)
+    return out
+
+
 def _jd_landmark_sources(
     root: Path,
 ) -> list[tuple[Path, Path | None, Path | None, str, str]]:
     out: list[tuple[Path, Path | None, Path | None, str, str]] = []
-    test_roots = [root / "Test_data1"]
-    if root.name == "Test_data1":
-        test_roots.insert(0, root)
-    for test_root in test_roots:
+    for test_root in _jd_find_dirs_named(root, "Test_data1"):
         landmark_dir = test_root / "landmark"
         if landmark_dir.is_dir():
             out.append(
@@ -89,10 +142,7 @@ def _jd_landmark_sources(
                     )
                 )
 
-    corrected_roots = [root / "Corrected_landmark"]
-    if root.name == "Corrected_landmark":
-        corrected_roots.insert(0, root)
-    for corrected_root in corrected_roots:
+    for corrected_root in _jd_find_dirs_named(root, "Corrected_landmark"):
         if corrected_root.is_dir():
             out.append((corrected_root, None, None, "corrected", "corrected_landmark"))
     return out
@@ -233,11 +283,7 @@ def _build_jd_landmark(
     }
     corrected_by_name = {
         path.name: path
-        for corrected_root in (
-            root / "Corrected_landmark",
-            root if root.name == "Corrected_landmark" else root / "__missing__",
-        )
-        if corrected_root.is_dir()
+        for corrected_root in _jd_find_dirs_named(root, "Corrected_landmark")
         for path in corrected_root.glob("*.txt")
     }
     global_bbox_dirs = _jd_bbox_dirs(root)
