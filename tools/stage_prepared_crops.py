@@ -290,6 +290,10 @@ def stage_crops(
         workers=workers,
         desc="Stage crops",
         unit="image",
+        # One bar over unique native images (the parallel work unit); forced
+        # visible and persistent to match the pre-parallel serial loop.
+        leave=True,
+        disable=False,
     )
 
     # Parent applies each result to every sample in the image's group and writes

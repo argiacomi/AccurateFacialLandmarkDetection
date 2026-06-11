@@ -2006,6 +2006,10 @@ def _build_directory(
             workers=workers,
             desc=f"Build {dataset}",
             unit="file",
+            # The serial path forces "Build ..." bars visible+persistent via the
+            # track() wrapper; keep parity on the parallel path.
+            leave=True,
+            disable=False,
         ):
             if kind == "sample":
                 samples.append(T.cast("dict[str, T.Any]", payload))

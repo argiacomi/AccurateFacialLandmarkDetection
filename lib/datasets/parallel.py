@@ -38,6 +38,8 @@ def parallel_map(
     workers: int | None,
     desc: str,
     unit: str = "it",
+    leave: bool = False,
+    disable: bool | None = None,
     use_processes: bool = False,
 ) -> list[_R]:
     """Map ``func`` over ``items`` with a bounded pool, preserving input order.
@@ -49,12 +51,24 @@ def parallel_map(
     Threads are used by default because the pipeline's parallel steps spend
     their time in GIL-releasing native code (OpenCV) and disk IO; pass
     ``use_processes=True`` only for CPU-bound, picklable work.
+
+    ``leave`` and ``disable`` are forwarded to ``track`` so callers can keep a
+    forced-visible, persistent bar (``leave=True, disable=False``) when going
+    parallel, matching the serial loop they replaced.
     """
     items = list(items)
     worker_count = resolve_worker_count(workers, len(items))
     if worker_count <= 1 or len(items) <= 1:
         return [
-            func(item) for item in track(items, desc=desc, total=len(items), unit=unit)
+            func(item)
+            for item in track(
+                items,
+                desc=desc,
+                total=len(items),
+                unit=unit,
+                leave=leave,
+                disable=disable,
+            )
         ]
 
     executor_cls = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
@@ -64,7 +78,12 @@ def parallel_map(
             executor.submit(func, item): index for index, item in enumerate(items)
         }
         for future in track(
-            as_completed(future_to_index), desc=desc, total=len(items), unit=unit
+            as_completed(future_to_index),
+            desc=desc,
+            total=len(items),
+            unit=unit,
+            leave=leave,
+            disable=disable,
         ):
             results[future_to_index[future]] = future.result()
     return results
