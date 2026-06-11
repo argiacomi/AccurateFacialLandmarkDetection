@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import types
 from pathlib import Path
 
@@ -217,7 +218,7 @@ class _FakeTrial:
         self.number = number
         self.params = {}
 
-    def suggest_float(self, name, low, high):
+    def suggest_float(self, name, low, high, log=False):
         value = (float(low) + float(high)) / 2.0
         self.params[name] = value
         return value
@@ -255,7 +256,16 @@ class _FakeOptuna:
             MedianPruner=lambda n_startup_trials=0, n_warmup_steps=0: {
                 "startup": n_startup_trials,
                 "warmup": n_warmup_steps,
-            }
+            },
+            SuccessiveHalvingPruner=lambda min_resource=1, reduction_factor=3: {
+                "min_resource": min_resource,
+                "reduction_factor": reduction_factor,
+            },
+            HyperbandPruner=lambda min_resource=1, reduction_factor=3: {
+                "min_resource": min_resource,
+                "reduction_factor": reduction_factor,
+            },
+            NopPruner=lambda: {"nop": True},
         )
 
     def create_study(self, **kwargs):
@@ -332,7 +342,7 @@ def test_tell_optuna_result_reports_completed_score(tmp_path, monkeypatch):
     assert fake_optuna.study.told == [(3, 0.123)]
 
 
-def test_pipeline_mock_metrics_writes_recommendation_and_run_artifacts(tmp_path):
+def test_legacy_pipeline_mock_metrics_writes_recommendation_and_run_artifacts(tmp_path):
     args = tuner.build_arg_parser().parse_args(
         [
             "--output-dir",
@@ -340,6 +350,7 @@ def test_pipeline_mock_metrics_writes_recommendation_and_run_artifacts(tmp_path)
             "--dry-run",
             "--mock-metrics",
             "--disable-optuna",
+            "--legacy-staged-search",
             "--star-bracket",
             "0,0.01",
             "--optuna-trials",
@@ -368,6 +379,188 @@ def test_pipeline_mock_metrics_writes_recommendation_and_run_artifacts(tmp_path)
     assert (tmp_path / "best_training_hyperparameters.json").exists()
     assert any((tmp_path / "runs").iterdir())
     assert (tmp_path / "optuna_study.json").exists()
+
+
+def test_joint_pipeline_mock_metrics_optimizes_lr_and_loss(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--dry-run",
+            "--mock-metrics",
+            "--disable-optuna",
+            "--optuna-trials",
+            "6",
+            "--loss-top-k",
+            "1",
+            "--loss-finalist-seeds",
+            "17,29",
+        ]
+    )
+
+    recommendation = tuner.run_pipeline(args)
+
+    # The joint search owns the learning rate, so the recommendation carries an
+    # lr and the separate LR-sweep artifacts are not produced.
+    assert "lr" in recommendation["recommended"]
+    assert recommendation["recommended"]["lr"] > 0.0
+    assert (tmp_path / "ranked_loss_candidates.json").exists()
+    assert (tmp_path / "loss_finalist_summary.json").exists()
+    assert not (tmp_path / "ranked_lr_candidates.json").exists()
+    assert not (tmp_path / "lr_finalist_summary.json").exists()
+    assert (tmp_path / "best_training_hyperparameters.json").exists()
+
+
+def test_interactive_search_interleaves_ask_run_tell(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--dry-run",
+            "--mock-metrics",
+            "--optuna-trials",
+            "3",
+        ]
+    )
+    study = _FakeStudy()
+    base = tuner.baseline_config(args)
+
+    tuner._run_interactive_search(
+        args, base, None, study=study, ranges=tuner.optuna_ranges(args)
+    )
+
+    # One ask and one tell per trial, with the score told before the next ask.
+    assert len(study.asked) == 3
+    assert len(study.told) == 3
+    assert tuner._finished_optuna_trials(tmp_path) == 3
+
+
+def test_optuna_ranges_includes_lr_by_default_and_excludes_in_legacy(tmp_path):
+    joint = tuner.build_arg_parser().parse_args(["--output-dir", str(tmp_path)])
+    legacy = tuner.build_arg_parser().parse_args(
+        ["--output-dir", str(tmp_path), "--legacy-staged-search"]
+    )
+
+    assert "lr" in tuner.optuna_ranges(joint)
+    assert "lr" not in tuner.optuna_ranges(legacy)
+
+
+def test_search_epochs_only_budgets_search_stage_runs(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        ["--output-dir", str(tmp_path), "--search-epochs", "25"]
+    )
+    params = tuner.baseline_config(args)
+
+    search_run = tuner.make_run_config(
+        stage="optuna_loss_search", params=params, seed=17, index=0
+    )
+    finalist_run = tuner.make_run_config(
+        stage="loss_finalist_seed", params=params, seed=17, index=0
+    )
+    search_cmd = tuner.build_train_command(
+        args, search_run, tmp_path / "runs" / search_run["id"]
+    )
+    finalist_cmd = tuner.build_train_command(
+        args, finalist_run, tmp_path / "runs" / finalist_run["id"]
+    )
+
+    assert "--epoch" in search_cmd
+    assert search_cmd[search_cmd.index("--epoch") + 1] == "25"
+    assert "--epoch" not in finalist_cmd
+
+
+def test_intermediate_score_reads_per_epoch_eval(tmp_path):
+    args = tuner.build_arg_parser().parse_args(["--output-dir", str(tmp_path)])
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        '{"epoch": 7, "model": {"overall": {"nme": 0.05}}}', encoding="utf-8"
+    )
+
+    observation = tuner._intermediate_score(args, metrics_path, baseline_metrics=None)
+
+    assert observation is not None
+    epoch, score = observation
+    assert epoch == 7
+    # Slice-free fast eval scores on overall NME alone.
+    assert score == pytest.approx(0.05)
+
+
+def test_intermediate_score_handles_missing_and_partial_files(tmp_path):
+    args = tuner.build_arg_parser().parse_args(["--output-dir", str(tmp_path)])
+    missing = tmp_path / "nope.json"
+    assert tuner._intermediate_score(args, missing, baseline_metrics=None) is None
+
+    no_epoch = tmp_path / "no_epoch.json"
+    no_epoch.write_text('{"model": {"overall": {"nme": 0.05}}}', encoding="utf-8")
+    assert tuner._intermediate_score(args, no_epoch, baseline_metrics=None) is None
+
+    half_written = tmp_path / "partial.json"
+    half_written.write_text('{"epoch": 3, "model": {"over', encoding="utf-8")
+    assert tuner._intermediate_score(args, half_written, baseline_metrics=None) is None
+
+
+class _PruningTrial:
+    """Trial stub that prunes once a reported epoch reaches a threshold."""
+
+    def __init__(self, prune_at_epoch):
+        self.number = 0
+        self.reported = []
+        self._prune_at = prune_at_epoch
+        self._last_epoch = -1
+
+    def report(self, value, step):
+        self.reported.append((int(step), float(value)))
+        self._last_epoch = int(step)
+
+    def should_prune(self):
+        return self._prune_at is not None and self._last_epoch >= self._prune_at
+
+
+def test_execute_with_pruning_terminates_pruned_trial(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        ["--output-dir", str(tmp_path), "--prune-poll-seconds", "0.5"]
+    )
+    metrics_path = tmp_path / "metrics.json"
+    script = (
+        "import json,sys,time\n"
+        "p=sys.argv[1]\n"
+        "for e in range(20):\n"
+        "    json.dump({'epoch': e, 'model': {'overall': {'nme': 0.05}}}, open(p,'w'))\n"
+        "    time.sleep(0.3)\n"
+    )
+    command = [sys.executable, "-c", script, str(metrics_path)]
+
+    trial = _PruningTrial(prune_at_epoch=2)
+    status = tuner._execute_with_pruning(
+        args, command, metrics_path, trial=trial, baseline_metrics=None
+    )
+
+    assert status["pruned"] is True
+    assert status["last_epoch"] >= 2
+    # The child was killed well before all 20 epochs were written.
+    assert status["last_epoch"] < 19
+
+
+def test_execute_with_pruning_runs_to_completion_when_not_pruned(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        ["--output-dir", str(tmp_path), "--prune-poll-seconds", "0.5"]
+    )
+    metrics_path = tmp_path / "metrics.json"
+    script = (
+        "import json,sys\n"
+        "p=sys.argv[1]\n"
+        "for e in range(3):\n"
+        "    json.dump({'epoch': e, 'model': {'overall': {'nme': 0.05}}}, open(p,'w'))\n"
+    )
+    command = [sys.executable, "-c", script, str(metrics_path)]
+
+    trial = _PruningTrial(prune_at_epoch=None)
+    status = tuner._execute_with_pruning(
+        args, command, metrics_path, trial=trial, baseline_metrics=None
+    )
+
+    assert status["pruned"] is False
+    assert status["returncode"] == 0
 
 
 def test_plain_dry_run_generates_commands_without_metrics(tmp_path, capsys):

@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """Stage landmark-training hyperparameter tuning runs.
 
-This script implements issue #7's staged plan:
+The default plan reaches a good configuration with as little training as possible:
 
 1. Baseline run.
-2. Manual STARLoss_v2 bracket.
-3. Optuna narrow search over STAR, schema consistency, and auxiliary loss.
-4. Multi-seed reruns for top loss-weight finalists.
-5. Learning-rate sweep with selected loss weights frozen.
-6. Multi-seed reruns for top LR finalists.
-7. best_training_hyperparameters.json recommendation.
+2. One joint Optuna search over STAR, schema consistency, auxiliary loss, and the
+   learning rate (log scale). TPE adapts to results between trials, and the
+   ASHA/successive-halving pruner stops weak trials early. Pair with
+   ``--search-epochs`` to search at a reduced proxy budget.
+3. Multi-seed confirmation reruns of the top finalist(s) at the full ``--epoch``
+   budget.
+4. best_training_hyperparameters.json recommendation.
 
-The script is intentionally usable in two modes:
+``--legacy-staged-search`` reproduces the original staged plan instead: a manual
+STARLoss_v2 bracket, a loss-only Optuna search, multi-seed loss finalists, then a
+separate learning-rate grid with multi-seed LR finalists.
+
+The script is usable in two modes:
 
 - dry-run planning, which writes reproducible configs and command lines without
   launching training;
-- execute mode, which runs commands and reads metrics JSON emitted by training or
-  evaluation.
+- execute mode (``--execute``), which launches training, polls each trial's
+  evolving eval report for pruning decisions, and reads the final metrics JSON.
 
-The loss-weight search uses a persisted Optuna study when Optuna is installed.
-The normal repository dependency set includes Optuna. For minimal environments,
---disable-optuna falls back to deterministic sampled trials, while --require-optuna
-turns a missing Optuna install into a hard error.
+The search uses a persisted Optuna study when Optuna is installed (the normal
+dependency set includes it). ``--disable-optuna`` falls back to deterministic
+sampled trials (no pruning), while ``--require-optuna`` turns a missing install
+into a hard error.
 
 Metrics are expected as JSON files in each run directory. The objective minimizes
 heldout 68-point NME plus weighted hard-slice NME terms and regression penalties.
@@ -53,11 +58,20 @@ DEFAULT_STAR_BRACKET = [0.0, 0.005, 0.01, 0.02, 0.05]
 DEFAULT_LR_SWEEP = [3e-5, 5e-5, 1e-4, 2e-4, 3e-4]
 DEFAULT_LOSS_SEEDS = [17, 29, 43]
 DEFAULT_LR_SEEDS = [17, 29, 43]
+# Loss-weight-only ranges. The default joint search additionally folds in ``lr``
+# (see ``optuna_ranges``); ``DEFAULT_OPTUNA_RANGES`` stays loss-only for the
+# legacy staged search where the learning rate is swept on a separate grid.
 DEFAULT_OPTUNA_RANGES = {
     "star_loss_weight": (0.0, 0.03),
     "schema_consistency_weight": (0.0, 0.08),
     "auxiliary_loss_weight": (0.0, 0.1),
 }
+DEFAULT_LR_RANGE = (3e-5, 3e-4)
+# Parameters sampled on a log scale (e.g. learning rate spans orders of magnitude).
+LOG_SCALE_PARAMS = frozenset({"lr"})
+# Stages that run at the reduced ``--search-epochs`` proxy budget. Finalist and
+# baseline runs always train at the full ``--epoch`` budget for confirmation.
+SEARCH_STAGES = frozenset({"optuna_loss_search", "star_bracket", "lr_sweep"})
 HARD_SLICE_KEYS = (
     "profile_nme",
     "occlusion_nme",
@@ -116,6 +130,48 @@ def optuna_storage_url(args: argparse.Namespace) -> str:
     return f"sqlite:///{db_path.resolve()}"
 
 
+def optuna_ranges(args: argparse.Namespace) -> dict[str, tuple[float, float]]:
+    """Search space for the Optuna stage.
+
+    The default joint search optimizes the loss weights and the learning rate
+    together so TPE+ASHA can exploit their interaction in one sample-efficient
+    pass. ``--legacy-staged-search`` reverts to the loss-only space with the LR
+    tuned afterward on a separate grid.
+    """
+
+    ranges: dict[str, tuple[float, float]] = dict(DEFAULT_OPTUNA_RANGES)
+    if not getattr(args, "legacy_staged_search", False):
+        low = float(getattr(args, "lr_search_low", DEFAULT_LR_RANGE[0]))
+        high = float(getattr(args, "lr_search_high", DEFAULT_LR_RANGE[1]))
+        ranges["lr"] = (low, high)
+    return ranges
+
+
+def _build_pruner(optuna, args: argparse.Namespace):
+    """Construct the configured pruner, degrading gracefully for old Optuna."""
+
+    kind = str(getattr(args, "pruner", "successive_halving"))
+    min_resource = max(int(getattr(args, "optuna_min_pruning_epoch", 5)), 1)
+    reduction = max(int(getattr(args, "prune_reduction_factor", 3)), 2)
+    pruners = optuna.pruners
+    if kind == "none" and hasattr(pruners, "NopPruner"):
+        return pruners.NopPruner()
+    if kind == "successive_halving" and hasattr(pruners, "SuccessiveHalvingPruner"):
+        return pruners.SuccessiveHalvingPruner(
+            min_resource=min_resource, reduction_factor=reduction
+        )
+    if kind == "hyperband" and hasattr(pruners, "HyperbandPruner"):
+        return pruners.HyperbandPruner(
+            min_resource=min_resource, reduction_factor=reduction
+        )
+    # Fall back to the median pruner (always present) for "median" or when the
+    # requested pruner is unavailable in the installed/fake Optuna build.
+    return pruners.MedianPruner(
+        n_startup_trials=int(getattr(args, "optuna_pruner_startup_trials", 5)),
+        n_warmup_steps=min_resource,
+    )
+
+
 def create_or_load_optuna_study(args: argparse.Namespace):
     if getattr(args, "disable_optuna", False):
         return None
@@ -123,10 +179,7 @@ def create_or_load_optuna_study(args: argparse.Namespace):
     if optuna is None:
         return None
     sampler = optuna.samplers.TPESampler(seed=int(args.optuna_seed))
-    pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=int(args.optuna_pruner_startup_trials),
-        n_warmup_steps=int(args.optuna_min_pruning_epoch),
-    )
+    pruner = _build_pruner(optuna, args)
     study = optuna.create_study(
         study_name=str(args.optuna_study_name),
         storage=optuna_storage_url(args),
@@ -137,8 +190,11 @@ def create_or_load_optuna_study(args: argparse.Namespace):
     )
     try:
         study.set_user_attr("objective", "heldout_68_nme_plus_hard_slices")
-        study.set_user_attr("search_space", DEFAULT_OPTUNA_RANGES)
+        study.set_user_attr("search_space", optuna_ranges(args))
         study.set_user_attr("min_pruning_epoch", int(args.optuna_min_pruning_epoch))
+        study.set_user_attr(
+            "pruner", str(getattr(args, "pruner", "successive_halving"))
+        )
         study.set_user_attr("workers", int(args.optuna_workers))
     except Exception:
         # Older/fake Optuna implementations used in tests may not expose attrs.
@@ -231,6 +287,14 @@ def build_train_command(
     ]
     if args.extra_train_args:
         cmd += shlex.split(args.extra_train_args)
+    search_epochs = int(getattr(args, "search_epochs", 0) or 0)
+    if search_epochs > 0 and run.get("stage") in SEARCH_STAGES:
+        # Search trials train at a reduced proxy budget; ASHA prunes the weak
+        # ones early and finalists re-train at the full --epoch budget. Appended
+        # after --extra-train-args so a full-budget --epoch there (used by
+        # finalist/baseline runs) cannot override the proxy budget (argparse
+        # last-wins).
+        cmd += ["--epoch", str(search_epochs)]
     return cmd
 
 
@@ -450,7 +514,8 @@ def _trial_suggest_params(
 ) -> dict[str, float]:
     params = dict(base)
     for name, (low, high) in ranges.items():
-        params[name] = float(trial.suggest_float(name, low, high))
+        log = name in LOG_SCALE_PARAMS and low > 0.0
+        params[name] = float(trial.suggest_float(name, low, high, log=log))
     return params
 
 
@@ -459,7 +524,10 @@ def _fallback_trial_params(
 ) -> dict[str, float]:
     params = dict(base)
     for name, (low, high) in ranges.items():
-        params[name] = _sample_range(rng, low, high)
+        if name in LOG_SCALE_PARAMS and low > 0.0:
+            params[name] = 10 ** _sample_range(rng, math.log10(low), math.log10(high))
+        else:
+            params[name] = _sample_range(rng, low, high)
     return params
 
 
@@ -483,7 +551,7 @@ def _load_loss_search_plan(args: argparse.Namespace) -> dict[str, T.Any]:
 def generate_loss_search(
     args: argparse.Namespace, base: dict[str, float]
 ) -> list[dict[str, T.Any]]:
-    ranges = dict(DEFAULT_OPTUNA_RANGES)
+    ranges = optuna_ranges(args)
     plan = _load_loss_search_plan(args)
     plan["study_name"] = args.optuna_study_name
     plan["storage"] = optuna_storage_url(args)
@@ -613,11 +681,138 @@ def generate_lr_finalists(
     return out
 
 
+def _intermediate_score(
+    args: argparse.Namespace,
+    metrics_path: Path,
+    *,
+    baseline_metrics: dict[str, T.Any] | None,
+) -> tuple[int, float] | None:
+    """Read the latest per-epoch eval report and return ``(epoch, score)``.
+
+    The trainer overwrites the ``--eval-report-json`` file every evaluated epoch
+    with an ``epoch`` field and the ``model.overall.nme`` report. We score it with
+    the same objective used for the final selection so the pruner ranks trials on
+    the metric we actually optimize. Slice-free fast evals score on overall NME
+    alone, which is the dominant objective term, so they remain comparable.
+    """
+
+    if not metrics_path.exists():
+        return None
+    try:
+        raw = read_json(metrics_path)
+    except (json.JSONDecodeError, OSError, ValueError):
+        # The trainer may be mid-write; skip this poll and try again.
+        return None
+    if not isinstance(raw, dict):
+        return None
+    epoch = raw.get("epoch")
+    if epoch is None and isinstance(raw.get("model"), dict):
+        epoch = raw["model"].get("epoch")
+    if epoch is None:
+        return None
+    metrics = normalize_metrics(raw)
+    try:
+        score, _ = objective_score(
+            metrics,
+            baseline_metrics=baseline_metrics,
+            hard_slice_weight=float(args.hard_slice_weight),
+            regression_penalty_weight=float(args.regression_penalty_weight),
+            max_easy_regression=float(args.max_easy_regression),
+            required_slices=(),
+        )
+    except TuningError:
+        return None
+    return int(epoch), float(score)
+
+
+def _execute_with_pruning(
+    args: argparse.Namespace,
+    command: list[str],
+    metrics_path: Path,
+    *,
+    trial,
+    baseline_metrics: dict[str, T.Any] | None,
+) -> dict[str, T.Any]:
+    """Run a training subprocess, reporting per-epoch scores to Optuna.
+
+    Polls the evolving eval report; on each new epoch it calls ``trial.report``
+    and ``trial.should_prune``. A pruned trial terminates the child process so we
+    stop paying for an obviously-weak configuration. Returns a status dict.
+    """
+
+    import time
+
+    poll_seconds = max(float(getattr(args, "prune_poll_seconds", 10.0)), 0.5)
+    proc = subprocess.Popen(command, cwd=args.cwd or None, env=os.environ.copy())
+    reported_epoch = -1
+    pruned = False
+    last_epoch = -1
+    try:
+        while True:
+            returncode = proc.poll()
+            observation = _intermediate_score(
+                args, metrics_path, baseline_metrics=baseline_metrics
+            )
+            if observation is not None:
+                epoch, score = observation
+                last_epoch = epoch
+                if epoch > reported_epoch:
+                    reported_epoch = epoch
+                    try:
+                        trial.report(score, epoch)
+                        if trial.should_prune():
+                            pruned = True
+                            break
+                    except Exception:
+                        # A fake/old Optuna without report/should_prune simply
+                        # never prunes; keep training to completion.
+                        pass
+            if returncode is not None:
+                break
+            time.sleep(poll_seconds)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    return {
+        "returncode": proc.returncode,
+        "pruned": pruned,
+        "last_epoch": last_epoch,
+    }
+
+
+def _tell_study(study, trial, score: float) -> None:
+    try:
+        study.tell(trial, float(score))
+    except Exception:
+        try:
+            study.tell(int(getattr(trial, "number", 0)), float(score))
+        except Exception as exc:
+            print(f"warning: could not tell Optuna score: {exc}", file=sys.stderr)
+
+
+def _tell_study_pruned(study, trial) -> None:
+    try:
+        import optuna
+
+        study.tell(trial, state=optuna.trial.TrialState.PRUNED)
+    except Exception:
+        # Best effort: a study that cannot record the pruned state still has the
+        # trial removed from consideration because we never report a score.
+        pass
+
+
 def run_one(
     args: argparse.Namespace,
     run: dict[str, T.Any],
     *,
     baseline_metrics: dict[str, T.Any] | None,
+    trial=None,
+    study=None,
 ) -> dict[str, T.Any] | None:
     output_dir = Path(args.output_dir)
     run_dir = output_dir / "runs" / run["id"]
@@ -633,9 +828,32 @@ def run_one(
         return None
 
     metrics_path = run_dir / args.metrics_file_name
+    prunable = study is not None and trial is not None
     if args.mock_metrics:
         metrics = synthetic_metrics_for_config(run["params"], seed=int(run["seed"]))
         write_json(metrics_path, metrics)
+    elif args.execute and prunable:
+        status = _execute_with_pruning(
+            args, command, metrics_path, trial=trial, baseline_metrics=baseline_metrics
+        )
+        if status["pruned"]:
+            _tell_study_pruned(study, trial)
+            result = {
+                **run,
+                "run_dir": str(run_dir),
+                "command": command,
+                "pruned": True,
+                "pruned_epoch": status["last_epoch"],
+                "score": float("inf"),
+            }
+            write_json(run_dir / "result.json", result)
+            append_result(output_dir / "results.jsonl", result)
+            print("PRUNED", run["id"], f"at epoch {status['last_epoch']}")
+            return result
+        if status["returncode"] != 0:
+            raise TuningError(
+                f"training for {run['id']} exited with code {status['returncode']}"
+            )
     elif args.execute:
         subprocess.run(command, check=True, cwd=args.cwd or None, env=os.environ.copy())
     elif not metrics_path.exists():
@@ -666,7 +884,10 @@ def run_one(
     }
     write_json(run_dir / "result.json", result)
     append_result(output_dir / "results.jsonl", result)
-    tell_optuna_result(args, result)
+    if prunable:
+        _tell_study(study, trial, score)
+    else:
+        tell_optuna_result(args, result)
     return result
 
 
@@ -775,36 +996,182 @@ def write_recommendation(
     return recommendation
 
 
-def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
+def _finished_optuna_trials(output_dir: Path) -> int:
+    return len(result_by_stage(read_results(output_dir), "optuna_loss_search"))
+
+
+def _run_interactive_search(
+    args: argparse.Namespace,
+    base: dict[str, float],
+    baseline_metrics: dict[str, T.Any] | None,
+    *,
+    study,
+    ranges: dict[str, tuple[float, float]],
+) -> None:
+    """Ask -> run (with live pruning) -> tell, one trial at a time.
+
+    Telling each result before the next ask lets TPE adapt to results so far, and
+    reporting per-epoch scores lets ASHA prune weak trials mid-training. Completed
+    and pruned trials persist in ``results.jsonl`` and the Optuna storage, so a
+    re-run resumes toward the remaining ``--optuna-trials`` budget.
+    """
+
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    write_json(output_dir / "tuning_args.json", vars(args))
+    target = int(args.optuna_trials)
+    while _finished_optuna_trials(output_dir) < target:
+        before = _finished_optuna_trials(output_dir)
+        trial = study.ask()
+        params = _trial_suggest_params(trial, base, ranges)
+        number = int(getattr(trial, "number", before))
+        run = make_run_config(
+            stage="optuna_loss_search", params=params, seed=args.seed, index=number
+        )
+        run["optuna_trial_number"] = number
+        run["optuna_study_name"] = args.optuna_study_name
+        run["optuna_storage"] = optuna_storage_url(args)
+        run["optuna_source"] = "optuna"
+        run_one(args, run, baseline_metrics=baseline_metrics, trial=trial, study=study)
+        if _finished_optuna_trials(output_dir) <= before:
+            # No new result recorded (e.g. a dry-run skip); stop to avoid looping.
+            break
 
-    base = baseline_config(args)
-    results = read_results(output_dir)
 
-    baseline_runs = result_by_stage(results, "baseline")
-    baseline_result = baseline_runs[0] if baseline_runs else None
-    if baseline_result is None:
-        run = make_run_config(stage="baseline", params=base, seed=args.seed, index=0)
-        baseline_result = run_one(args, run, baseline_metrics=None)
-        if baseline_result is not None:
-            write_json(output_dir / "baseline_config.json", run)
-            write_json(output_dir / "baseline_result.json", baseline_result)
-    baseline_metrics = baseline_result.get("metrics") if baseline_result else None
+def run_search_stage(
+    args: argparse.Namespace,
+    base: dict[str, float],
+    baseline_metrics: dict[str, T.Any] | None,
+    *,
+    ranges: dict[str, tuple[float, float]],
+) -> None:
+    """Drive the Optuna loss/joint search stage.
 
-    for run in generate_star_bracket(args, base):
-        if not already_done(output_dir, run["id"]):
-            run_one(args, run, baseline_metrics=baseline_metrics)
+    With a real study and live runs (``--execute`` or ``--mock-metrics``) we use
+    the adaptive interleaved loop with pruning. Otherwise we fall back to the
+    plan-based generator used for dry-run planning and the deterministic
+    no-Optuna path.
+    """
 
+    output_dir = Path(args.output_dir)
+    study = create_or_load_optuna_study(args)
+    if study is not None and (args.execute or args.mock_metrics):
+        _run_interactive_search(
+            args, base, baseline_metrics, study=study, ranges=ranges
+        )
+        return
     for run in generate_loss_search(args, base):
         if not already_done(output_dir, run["id"]):
             run_one(args, run, baseline_metrics=baseline_metrics)
 
+
+def _summary_from_ranked(entry: dict[str, T.Any]) -> dict[str, T.Any]:
+    return {
+        "params": entry["params"],
+        "parent_trial": entry["id"],
+        "mean_score": entry["score"],
+        "std_score": 0.0,
+    }
+
+
+def _finalize_recommendation(
+    args: argparse.Namespace,
+    *,
+    baseline_result: dict[str, T.Any] | None,
+    selected_loss: dict[str, T.Any],
+    selected_lr: dict[str, T.Any],
+) -> dict[str, T.Any]:
+    output_dir = Path(args.output_dir)
+    if (
+        baseline_result is not None
+        and selected_loss.get("mean_score") is not None
+        and selected_lr.get("mean_score") is not None
+    ):
+        return write_recommendation(
+            args,
+            baseline_result=baseline_result,
+            selected_loss_summary=selected_loss,
+            selected_lr_summary=selected_lr,
+        )
+    recommendation = {
+        "status": "planned_only",
+        "message": "No metrics available; rerun with --execute or --mock-metrics.",
+    }
+    write_json(output_dir / "best_training_hyperparameters.json", recommendation)
+    return recommendation
+
+
+def _run_joint_pipeline(
+    args: argparse.Namespace,
+    base: dict[str, float],
+    baseline_result: dict[str, T.Any] | None,
+    baseline_metrics: dict[str, T.Any] | None,
+) -> dict[str, T.Any]:
+    """Default path: one joint loss+LR search, then multi-seed confirmation."""
+
+    output_dir = Path(args.output_dir)
+    run_search_stage(args, base, baseline_metrics, ranges=optuna_ranges(args))
+
     results = read_results(output_dir)
-    loss_candidates = result_by_stage(results, "star_bracket") + result_by_stage(
-        results, "optuna_loss_search"
+    candidates = [
+        item
+        for item in result_by_stage(results, "optuna_loss_search")
+        if not item.get("pruned")
+    ]
+    ranked = rank_results(candidates, top_k=max(int(args.loss_top_k), 1))
+    write_json(output_dir / "ranked_loss_candidates.json", ranked)
+
+    for run in generate_loss_finalists(args, ranked):
+        if not already_done(output_dir, run["id"]):
+            run_one(args, run, baseline_metrics=baseline_metrics)
+
+    results = read_results(output_dir)
+    finalist_summaries = aggregate_by_parent(
+        result_by_stage(results, "loss_finalist_seed"),
+        top_k=max(int(args.loss_top_k), 1),
     )
+    write_json(output_dir / "loss_finalist_summary.json", finalist_summaries)
+    if finalist_summaries:
+        selected = finalist_summaries[0]
+    elif ranked:
+        selected = _summary_from_ranked(ranked[0])
+    else:
+        selected = {
+            "params": base,
+            "parent_trial": "baseline",
+            "mean_score": baseline_result.get("score") if baseline_result else None,
+            "std_score": 0.0,
+        }
+    # The learning rate is jointly optimized, so the loss selection is also the LR
+    # selection; the recommendation records the same finalist for both roles.
+    return _finalize_recommendation(
+        args,
+        baseline_result=baseline_result,
+        selected_loss=selected,
+        selected_lr=selected,
+    )
+
+
+def _run_legacy_pipeline(
+    args: argparse.Namespace,
+    base: dict[str, float],
+    baseline_result: dict[str, T.Any] | None,
+    baseline_metrics: dict[str, T.Any] | None,
+) -> dict[str, T.Any]:
+    """Legacy staged path: STAR bracket + loss search, then a separate LR grid."""
+
+    output_dir = Path(args.output_dir)
+    for run in generate_star_bracket(args, base):
+        if not already_done(output_dir, run["id"]):
+            run_one(args, run, baseline_metrics=baseline_metrics)
+
+    run_search_stage(args, base, baseline_metrics, ranges=optuna_ranges(args))
+
+    results = read_results(output_dir)
+    loss_candidates = [
+        item
+        for item in result_by_stage(results, "star_bracket")
+        + result_by_stage(results, "optuna_loss_search")
+        if not item.get("pruned")
+    ]
     ranked_loss = rank_results(loss_candidates, top_k=max(int(args.loss_top_k), 1))
     write_json(output_dir / "ranked_loss_candidates.json", ranked_loss)
 
@@ -821,12 +1188,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
     if loss_finalist_summaries:
         selected_loss = loss_finalist_summaries[0]
     elif ranked_loss:
-        selected_loss = {
-            "params": ranked_loss[0]["params"],
-            "parent_trial": ranked_loss[0]["id"],
-            "mean_score": ranked_loss[0]["score"],
-            "std_score": 0.0,
-        }
+        selected_loss = _summary_from_ranked(ranked_loss[0])
     else:
         selected_loss = {
             "params": base,
@@ -857,34 +1219,39 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
     if lr_finalist_summaries:
         selected_lr = lr_finalist_summaries[0]
     elif ranked_lr:
-        selected_lr = {
-            "params": ranked_lr[0]["params"],
-            "parent_trial": ranked_lr[0]["id"],
-            "mean_score": ranked_lr[0]["score"],
-            "std_score": 0.0,
-        }
+        selected_lr = _summary_from_ranked(ranked_lr[0])
     else:
         selected_lr = selected_loss
 
-    if (
-        baseline_result is not None
-        and selected_loss.get("mean_score") is not None
-        and selected_lr.get("mean_score") is not None
-    ):
-        recommendation = write_recommendation(
-            args,
-            baseline_result=baseline_result,
-            selected_loss_summary=selected_loss,
-            selected_lr_summary=selected_lr,
-        )
-    else:
-        recommendation = {
-            "status": "planned_only",
-            "message": "No metrics available; rerun with --execute or --mock-metrics.",
-        }
-        write_json(output_dir / "best_training_hyperparameters.json", recommendation)
+    return _finalize_recommendation(
+        args,
+        baseline_result=baseline_result,
+        selected_loss=selected_loss,
+        selected_lr=selected_lr,
+    )
 
-    return recommendation
+
+def run_pipeline(args: argparse.Namespace) -> dict[str, T.Any]:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_json(output_dir / "tuning_args.json", vars(args))
+
+    base = baseline_config(args)
+    results = read_results(output_dir)
+
+    baseline_runs = result_by_stage(results, "baseline")
+    baseline_result = baseline_runs[0] if baseline_runs else None
+    if baseline_result is None:
+        run = make_run_config(stage="baseline", params=base, seed=args.seed, index=0)
+        baseline_result = run_one(args, run, baseline_metrics=None)
+        if baseline_result is not None:
+            write_json(output_dir / "baseline_config.json", run)
+            write_json(output_dir / "baseline_result.json", baseline_result)
+    baseline_metrics = baseline_result.get("metrics") if baseline_result else None
+
+    if getattr(args, "legacy_staged_search", False):
+        return _run_legacy_pipeline(args, base, baseline_result, baseline_metrics)
+    return _run_joint_pipeline(args, base, baseline_result, baseline_metrics)
 
 
 def already_done(output_dir: Path, run_id: str) -> bool:
@@ -941,7 +1308,65 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Documented worker count for shared Optuna storage; launch multiple processes with same output dir/storage for parallelism.",
     )
     parser.add_argument("--optuna-pruner-startup-trials", type=int, default=5)
-    parser.add_argument("--optuna-min-pruning-epoch", type=int, default=5)
+    parser.add_argument(
+        "--optuna-min-pruning-epoch",
+        type=int,
+        default=5,
+        help="Minimum epochs before a trial may be pruned (pruner min_resource / warmup).",
+    )
+    parser.add_argument(
+        "--pruner",
+        choices=("successive_halving", "hyperband", "median", "none"),
+        default="successive_halving",
+        help=(
+            "Optuna pruner for the search stage. successive_halving (ASHA) and "
+            "hyperband stop weak trials early for the biggest wall-clock win; "
+            "median is gentler; none disables pruning."
+        ),
+    )
+    parser.add_argument(
+        "--prune-reduction-factor",
+        type=int,
+        default=3,
+        help="Halving/Hyperband reduction factor: keep ~1/N of trials at each rung.",
+    )
+    parser.add_argument(
+        "--prune-poll-seconds",
+        type=float,
+        default=10.0,
+        help="How often to poll a running trial's eval report for pruning decisions.",
+    )
+    parser.add_argument(
+        "--search-epochs",
+        type=int,
+        default=0,
+        help=(
+            "Proxy epoch budget for search-stage trials (0 keeps the trainer "
+            "default). Finalist and baseline runs always use the full --epoch "
+            "budget; pair a short --search-epochs with --pruner successive_halving "
+            "for fast low-fidelity search."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-staged-search",
+        action="store_true",
+        help=(
+            "Use the original staged plan (STAR bracket + loss search, then a "
+            "separate LR grid) instead of the default joint loss+LR Optuna search."
+        ),
+    )
+    parser.add_argument(
+        "--lr-search-low",
+        type=float,
+        default=DEFAULT_LR_RANGE[0],
+        help="Lower bound of the log-uniform LR range in the joint search.",
+    )
+    parser.add_argument(
+        "--lr-search-high",
+        type=float,
+        default=DEFAULT_LR_RANGE[1],
+        help="Upper bound of the log-uniform LR range in the joint search.",
+    )
     parser.add_argument(
         "--require-optuna",
         action="store_true",
