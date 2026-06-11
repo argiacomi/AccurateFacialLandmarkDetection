@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from lib.datasets.progress import track
 from lib.datasets.loader_geometry import (
     LOADER_IMAGE_SIZE,
     landmark_mask_from_entry,
@@ -245,7 +246,16 @@ def validate_training_manifest(
         lambda: defaultdict(set)
     )
 
-    for index, sample in enumerate(samples):
+    for index, sample in enumerate(
+        track(
+            samples,
+            desc=f"Validate {manifest_path.name}",
+            total=len(samples),
+            unit="sample",
+            leave=True,
+            disable=False,
+        )
+    ):
         metadata = _metadata(sample)
         source = _source(sample)
         sample_id = str(sample.get("sample_id") or sample.get("id") or index)
