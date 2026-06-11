@@ -19,11 +19,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.datasets.hard_negative_mining import (
-    BUCKET_PRIORITY,
     BUCKET_WEIGHT,
-    HardNegativeClass,
+    DATASET_DEFAULT_BUCKET,
     annotate_sample,
     classify_hard_negative,
+    default_class_for_dataset,
     source_key,
 )
 from lib.manifest.contract import (
@@ -39,15 +39,6 @@ from lib.logging_utils import (
     verbosity_from_name,
 )
 
-
-DATASET_DEFAULT_BUCKET: dict[str, str] = {
-    "cofw68": "occlusion",
-    "cofw6868": "occlusion",
-    "300w": "anchor",
-    "w300": "anchor",
-    "production_validated": "anchor",
-    "multipie": "profile",
-}
 
 BUCKET_ORDER: tuple[str, ...] = ("profile_occlusion", "profile", "occlusion", "anchor")
 DEFAULT_BUCKET_RATIOS: dict[str, float] = {
@@ -120,18 +111,6 @@ MANIFEST_ARGS: tuple[tuple[str, str], ...] = (
     ("w300_manifest", "300w"),
     ("production_validated_manifest", "production_validated"),
 )
-
-
-def _default_class(dataset: str) -> HardNegativeClass | None:
-    bucket = DATASET_DEFAULT_BUCKET.get(dataset.strip().lower())
-    if bucket is None:
-        return None
-    return HardNegativeClass(
-        bucket=bucket,
-        priority=BUCKET_PRIORITY[bucket],
-        weight=BUCKET_WEIGHT[bucket],
-        reasons=(f"{dataset}_default",),
-    )
 
 
 def _resolve_manifest_relative_path(manifest_path: Path, value: T.Any) -> str:
@@ -419,7 +398,7 @@ def build_hard_negative_manifest(
             classification = classify_hard_negative(sample)
             classification_source = "classified_by_label"
             if classification is None:
-                classification = _default_class(dataset_label)
+                classification = default_class_for_dataset(dataset_label)
                 classification_source = (
                     "dataset_default" if classification is not None else "skipped"
                 )

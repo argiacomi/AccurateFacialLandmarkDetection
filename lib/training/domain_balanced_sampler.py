@@ -108,17 +108,31 @@ def _metadata(sample: T.Mapping[str, T.Any]) -> T.Mapping[str, T.Any]:
     return metadata if isinstance(metadata, T.Mapping) else {}
 
 
+# The real hard-negative buckets. ``condition`` is overloaded (it also carries
+# dataset/source/style tags), so it is only trusted as a bucket when it resolves
+# to one of these; metadata.hard_negative_bucket stays authoritative.
+KNOWN_BUCKETS: frozenset[str] = frozenset(DEFAULT_BUCKET_TARGETS)
+
+
 def sample_bucket(sample: T.Mapping[str, T.Any]) -> str:
     metadata = _metadata(sample)
-    bucket = canonical_bucket(
-        metadata.get("hard_negative_bucket") or sample.get("condition")
-    )
+    # metadata.hard_negative_bucket is the authoritative annotation: trust it as
+    # written so custom bucket targets keep working.
+    annotated = metadata.get("hard_negative_bucket")
+    if annotated:
+        return canonical_bucket(annotated)
+
     conditions = sample.get("conditions") or metadata.get("conditions") or ()
     if isinstance(conditions, str):
         conditions = (conditions,)
     labels = {canonical_bucket(item) for item in conditions}
-    if bucket != "unknown":
-        return bucket
+
+    # Only honor ``condition`` when it resolves to a real bucket; a dataset/source
+    # label (lapa, fll2, 300vw, ...) is ignored so it never pollutes the bucket
+    # dimension. Fall through to the richer ``conditions`` labels, then anchor.
+    condition_bucket = canonical_bucket(sample.get("condition"))
+    if condition_bucket in KNOWN_BUCKETS:
+        return condition_bucket
     if "profile" in labels and "occlusion" in labels:
         return "profile_occlusion"
     if "profile" in labels:

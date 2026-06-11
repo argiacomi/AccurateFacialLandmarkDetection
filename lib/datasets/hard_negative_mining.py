@@ -55,6 +55,19 @@ BUCKET_WEIGHT: dict[str, float] = {
     "occlusion": 2.0,
     "anchor": 1.0,
 }
+# Whole-dataset fallback bucket when a sample carries no explicit profile/
+# occlusion labels. Some datasets are dominated by one regime (COFW is
+# occlusion-heavy, MultiPIE is profile-heavy), so their "neutral" samples are
+# better bucketed by dataset than forced to anchor.
+DATASET_DEFAULT_BUCKET: dict[str, str] = {
+    "cofw68": "occlusion",
+    "cofw6868": "occlusion",
+    "cofw29": "occlusion",
+    "300w": "anchor",
+    "w300": "anchor",
+    "production_validated": "anchor",
+    "multipie": "profile",
+}
 DEFAULT_HARD_NEGATIVE_WEIGHT: float = 1.0
 MAX_HARD_NEGATIVE_WEIGHT: float = 5.0
 
@@ -227,6 +240,66 @@ def annotate_sample(
     return out
 
 
+def default_class_for_dataset(dataset: str) -> HardNegativeClass | None:
+    """Default bucket for a whole dataset, or None when the dataset is unmapped."""
+    label = str(dataset).strip().lower()
+    bucket = DATASET_DEFAULT_BUCKET.get(label)
+    if bucket is None:
+        return None
+    return HardNegativeClass(
+        bucket=bucket,
+        priority=BUCKET_PRIORITY[bucket],
+        weight=BUCKET_WEIGHT[bucket],
+        reasons=(f"{label}_default",),
+    )
+
+
+def resolve_hard_negative_class(
+    sample: T.Mapping[str, T.Any],
+) -> tuple[HardNegativeClass, str]:
+    """Resolve a bucket for any sample: classifier, else dataset default, else anchor.
+
+    Unlike :func:`classify_hard_negative`, this never returns ``None`` -- every
+    sample gets a bucket so the training sampler's bucket dimension is never
+    polluted by an overloaded ``condition`` field. Returns ``(classification,
+    source)`` where ``source`` is ``classified_by_label`` / ``dataset_default``
+    / ``anchor_fallback``.
+    """
+    classification = classify_hard_negative(sample)
+    if classification is not None:
+        return classification, "classified_by_label"
+    default = default_class_for_dataset(source_key(sample)[0])
+    if default is not None:
+        return default, "dataset_default"
+    anchor = HardNegativeClass(
+        bucket="anchor",
+        priority=BUCKET_PRIORITY["anchor"],
+        weight=BUCKET_WEIGHT["anchor"],
+        reasons=("anchor_fallback",),
+    )
+    return anchor, "anchor_fallback"
+
+
+def annotate_sample_bucket_in_place(sample: dict[str, T.Any]) -> tuple[str, str]:
+    """Write only hard-negative *metadata* on ``sample`` in place; return (bucket, source).
+
+    Non-destructive: unlike :func:`annotate_sample`, it never rewrites the
+    overloaded ``condition``/``conditions`` fields (which also carry dataset,
+    pose, and occlusion labels consumed by evaluation slicing). It records only
+    ``metadata.hard_negative_bucket`` / ``_priority`` / ``_weight`` so the
+    training sampler reads an authoritative bucket.
+    """
+    classification, source = resolve_hard_negative_class(sample)
+    metadata = sample.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        sample["metadata"] = metadata
+    metadata["hard_negative_bucket"] = classification.bucket
+    metadata["hard_negative_priority"] = classification.priority
+    metadata["hard_negative_weight"] = classification.weight
+    return classification.bucket, source
+
+
 def clamp_hard_negative_weight(weight: float) -> float:
     """Clamp a combined hard-negative weight into the supported range."""
     if not weight or weight != weight:
@@ -240,15 +313,19 @@ __all__ = [
     "ANCHOR_LABELS",
     "BUCKET_PRIORITY",
     "BUCKET_WEIGHT",
+    "DATASET_DEFAULT_BUCKET",
     "DEFAULT_HARD_NEGATIVE_WEIGHT",
     "MAX_HARD_NEGATIVE_WEIGHT",
     "OCCLUSION_LABELS",
     "PROFILE_LABELS",
     "HardNegativeClass",
     "annotate_sample",
+    "annotate_sample_bucket_in_place",
     "clamp_hard_negative_weight",
     "classify_hard_negative",
+    "default_class_for_dataset",
     "normalize_label",
+    "resolve_hard_negative_class",
     "sample_labels",
     "source_key",
 ]

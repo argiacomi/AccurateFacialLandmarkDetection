@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lib.datasets.hard_negative_mining import annotate_sample_bucket_in_place
 from lib.datasets.parallel import resolve_worker_count
 from lib.datasets.progress import concurrent_progress
 from lib.io_utils import read_json, write_json
@@ -502,6 +503,69 @@ def _clean_same_image_split_leakage(
             level=Verbosity.INFO,
             same_image_groups=affected_groups,
             samples=changed,
+        )
+
+    return payload
+
+
+def _annotate_hard_negative_buckets(
+    manifest_path: Path,
+    payload: T.Mapping[str, T.Any] | None,
+) -> T.Mapping[str, T.Any] | None:
+    """Write metadata.hard_negative_bucket on every un-annotated sample.
+
+    The training sampler reads ``metadata.hard_negative_bucket`` first and only
+    falls back to the overloaded ``condition`` field otherwise -- where a
+    dataset/source label (lapa, fll2, 300vw, ...) would pollute the bucket
+    dimension. Baking an authoritative bucket here (classifier, else dataset
+    default, else anchor) keeps domain-balanced sampling balancing real hard
+    buckets. Non-destructive: ``condition``/``conditions`` are left untouched so
+    evaluation slicing is unaffected, and already-annotated samples are
+    preserved (a manifest from build_hard_negative_manifest.py is not changed).
+    """
+
+    if payload is None or not isinstance(payload, dict):
+        return payload
+    samples = payload.get("samples")
+    if not isinstance(samples, list):
+        return payload
+
+    annotated = 0
+    by_bucket: Counter[str] = Counter()
+    by_source: Counter[str] = Counter()
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        metadata = sample.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("hard_negative_bucket"):
+            continue
+        bucket, source = annotate_sample_bucket_in_place(sample)
+        annotated += 1
+        by_bucket[bucket] += 1
+        by_source[source] += 1
+
+    if annotated:
+        payload_meta = payload.setdefault("metadata", {})
+        if isinstance(payload_meta, dict):
+            payload_meta["hard_negative_bucket_annotation"] = {
+                "samples": annotated,
+                "by_bucket": dict(by_bucket),
+                "by_source": dict(by_source),
+            }
+        write_json(manifest_path, payload)
+        bucket_summary = ", ".join(
+            f"{name} {count}" for name, count in sorted(by_bucket.items())
+        )
+        log_event(
+            "prepare",
+            (
+                f"annotated hard-negative buckets | samples {fmt_count(annotated)}"
+                f" | {bucket_summary}"
+            ),
+            level=Verbosity.INFO,
+            samples=annotated,
+            by_bucket=dict(by_bucket),
+            by_source=dict(by_source),
         )
 
     return payload
@@ -1173,6 +1237,10 @@ def prepare(args: argparse.Namespace) -> int:
     )
     if built_any and combined_manifest.is_file():
         combined_payload = _clean_same_image_split_leakage(
+            combined_manifest,
+            combined_payload,
+        )
+        combined_payload = _annotate_hard_negative_buckets(
             combined_manifest,
             combined_payload,
         )
