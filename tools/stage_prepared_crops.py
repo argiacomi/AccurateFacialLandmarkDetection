@@ -48,6 +48,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lib.datasets.loader_geometry import (
+    image_hw as loader_image_hw,
+    simulate_loader_geometry,
+)
 from lib.datasets.parallel import parallel_map
 from lib.logging_utils import Verbosity, log_event
 
@@ -127,6 +131,43 @@ def _prepared_image_and_landmarks(crop_path: str, landmarks_path: str, orig_hw):
     return img, lmk
 
 
+def _sample_loader_geometry(
+    entry: dict,
+    *,
+    base_dir: Path,
+) -> dict[str, T.Any]:
+    landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
+    if not landmarks_value:
+        return {"ok": False, "reason": "missing_landmarks"}
+
+    landmarks_path = _resolve(base_dir, landmarks_value)
+    try:
+        points = np.load(landmarks_path).astype(np.float32)[:, :2]
+    except Exception as err:  # noqa: BLE001
+        return {"ok": False, "reason": f"invalid_landmarks:{err}"}
+
+    orig_hw = entry.get("prepared_image_orig_hw")
+    if orig_hw:
+        try:
+            hw = (int(orig_hw[0]), int(orig_hw[1]))
+        except Exception as err:  # noqa: BLE001
+            return {"ok": False, "reason": f"invalid_prepared_image_orig_hw:{err}"}
+    else:
+        image_value = entry.get("image")
+        if not image_value:
+            return {"ok": False, "reason": "missing_image"}
+        try:
+            hw = loader_image_hw(_resolve(base_dir, image_value))
+        except Exception as err:  # noqa: BLE001
+            return {"ok": False, "reason": f"unreadable_image:{err}"}
+
+    return simulate_loader_geometry(
+        points,
+        hw,
+        landmark_mask=entry.get("landmark_mask"),
+    )
+
+
 def stage_crops(
     manifest_path: str | Path,
     *,
@@ -137,6 +178,8 @@ def stage_crops(
     strict: bool = False,
     keep_mismatched_crops: bool = False,
     workers: int | None = 1,
+    validate_geometry: bool = False,
+    geometry_strict: bool = False,
 ) -> dict:
     """Write 256x256 crops and record prepared references on a manifest.
 
@@ -181,6 +224,34 @@ def stage_crops(
 
     staged = skipped_already_256 = skipped_no_image = reused = 0
     mismatches: list[str] = []
+    geometry_issues: list[dict[str, T.Any]] = []
+    invalid_geometry_entries: set[int] = set()
+
+    if validate_geometry:
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            dataset = str(entry.get("dataset") or "").strip()
+            if dataset_filter is not None and dataset.lower() not in dataset_filter:
+                continue
+            diag = _sample_loader_geometry(entry, base_dir=base_dir)
+            if diag.get("ok"):
+                continue
+            issue = {
+                "index": index,
+                "sample_id": entry.get("sample_id") or entry.get("id") or index,
+                "dataset": dataset,
+                "reason": diag.get("reason") or "invalid_geometry",
+                "diagnostics": diag,
+            }
+            geometry_issues.append(issue)
+            invalid_geometry_entries.add(id(entry))
+        if geometry_issues and geometry_strict:
+            first = geometry_issues[0]
+            raise ValueError(
+                "stage crop geometry validation failed: "
+                f"{len(geometry_issues)} invalid sample(s); first={first}"
+            )
 
     # Group samples by their resolved native image path. Several samples can
     # share one native image (multiple faces, or MERL-RAV over a single AFLW
@@ -303,11 +374,15 @@ def stage_crops(
         group = groups[result.image_path]
         if result.status == "staged":
             orig_hw = [int(result.orig_hw[0]), int(result.orig_hw[1])]
-            for entry in group:
+            valid_group = [
+                entry for entry in group if id(entry) not in invalid_geometry_entries
+            ]
+            for entry in valid_group:
                 entry["prepared_image"] = result.rel
                 entry["prepared_image_orig_hw"] = orig_hw
-            staged += 1
-            reused += len(group) - 1
+            if valid_group:
+                staged += 1
+                reused += len(valid_group) - 1
         elif result.status == "skipped_already_256":
             skipped_already_256 += len(group)
         elif result.status == "skipped_no_image":
@@ -327,7 +402,7 @@ def stage_crops(
             f"stage crops done | crops {staged} unique | reused {reused} | "
             f"skipped 256x256 {skipped_already_256} | "
             f"skipped missing {skipped_no_image} | mismatches {len(mismatches)} | "
-            f"{_stage_elapsed:.1f}s"
+            f"geometry invalid {len(geometry_issues)} | {_stage_elapsed:.1f}s"
         ),
         level=Verbosity.INFO,
         staged=staged,
@@ -335,6 +410,7 @@ def stage_crops(
         skipped_already_256=skipped_already_256,
         skipped_no_image=skipped_no_image,
         mismatches=len(mismatches),
+        geometry_invalid=len(geometry_issues),
         duration_seconds=_stage_elapsed,
         manifest=str(manifest_path),
         out_manifest=str(out_manifest),
@@ -350,6 +426,7 @@ def stage_crops(
         "skipped_already_256": skipped_already_256,
         "skipped_no_image": skipped_no_image,
         "mismatches": mismatches,
+        "geometry_issues": geometry_issues,
     }
 
 
@@ -363,10 +440,13 @@ def stage_manifest(args: argparse.Namespace) -> int:
         strict=args.strict,
         keep_mismatched_crops=args.keep_mismatched_crops,
         workers=args.workers,
+        validate_geometry=args.validate_geometry,
+        geometry_strict=args.geometry_strict,
     )
 
     staged, reused = stats["staged"], stats["reused"]
     mismatches = stats["mismatches"]
+    geometry_issues = stats.get("geometry_issues", [])
     print(f"manifest        : {stats['manifest']}")
     print(f"out manifest    : {stats['out_manifest']}")
     print(f"crops dir       : {stats['images_root']}")
@@ -381,6 +461,10 @@ def stage_manifest(args: argparse.Namespace) -> int:
         print(f"mismatched (left native): {len(mismatches)}")
         for path in mismatches[:10]:
             print(f"  - {path}")
+    if geometry_issues:
+        print(f"invalid geometry (left native): {len(geometry_issues)}")
+        for issue in geometry_issues[:10]:
+            print(f"  - {issue['sample_id']}: {issue['reason']}")
     return 0
 
 
@@ -416,6 +500,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--keep-mismatched-crops",
         action="store_true",
         help="Keep (rather than delete) crop files that failed bit-identity.",
+    )
+    parser.add_argument(
+        "--validate-geometry",
+        action="store_true",
+        help="Validate every sample's loader geometry before applying staged crops.",
+    )
+    parser.add_argument(
+        "--geometry-strict",
+        action="store_true",
+        help="Fail if --validate-geometry finds any invalid sample.",
     )
     parser.add_argument(
         "--workers",

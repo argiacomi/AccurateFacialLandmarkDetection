@@ -41,6 +41,11 @@ from lib.core.schema import (
     projection_audit_for_schema,
     to_canonical_68,
 )
+from lib.datasets.loader_geometry import (
+    image_hw as loader_image_hw,
+    loader_padding_for_points as _shared_loader_padding_for_points,
+    simulate_loader_geometry,
+)
 from lib.datasets.parallel import parallel_map
 from lib.datasets.progress import track as _dataset_progress_track
 
@@ -671,6 +676,43 @@ def _write_crop_image(
     if not ok:
         raise OSError(f"failed to write crop image: {out}")
     return out
+
+
+def _loader_padding_for_points(
+    points: np.ndarray,
+    image_hw_256: tuple[int, int] = (256, 256),
+    *,
+    landmark_mask: T.Any = None,
+) -> dict[str, T.Any]:
+    """Return training-loader padding diagnostics for already loader-scaled points."""
+
+    return _shared_loader_padding_for_points(
+        points,
+        image_hw_256,
+        landmark_mask=landmark_mask,
+    )
+
+
+def _simulate_loader_geometry(
+    image_path: Path,
+    points: np.ndarray,
+    *,
+    landmark_mask: T.Any = None,
+) -> dict[str, T.Any]:
+    """Simulate the training loader's geometry for ``points`` on ``image_path``.
+
+    Proves the landmarks are usable in the resolved image's coordinate frame:
+    the loader scales them into the 256x256 crop and pads via
+    ``MakeLMKInsideImage``, which raises when the required padding is
+    pathological. Returns diagnostics with ``ok=False`` instead of raising for
+    unreadable images.
+    """
+
+    try:
+        hw = loader_image_hw(image_path)
+    except (FileNotFoundError, OSError) as err:
+        return {"ok": False, "reason": f"unreadable_image:{err}", "image_hw": None}
+    return simulate_loader_geometry(points, hw, landmark_mask=landmark_mask)
 
 
 def _crop_sample_image(

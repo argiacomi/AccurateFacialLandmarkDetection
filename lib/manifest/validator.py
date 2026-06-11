@@ -11,6 +11,11 @@ from pathlib import Path
 
 import numpy as np
 
+from lib.datasets.loader_geometry import (
+    image_hw as loader_image_hw,
+    simulate_loader_geometry,
+)
+
 from lib.core.schema import (
     canonicalize_schema,
     head_name_for_schema,
@@ -208,6 +213,15 @@ def validate_training_manifest(
             "head_mismatch": [],
             "projection_audit": [],
             "leakage": [],
+            "landmarks_outside_image": [],
+            "unreasonable_loader_padding": [],
+            "invalid_geometry": [],
+        },
+        "geometry": {
+            "checked_samples": 0,
+            "landmarks_outside_image": 0,
+            "unreasonable_loader_padding": 0,
+            "invalid_geometry": 0,
         },
         "legacy_68_projection_samples": 0,
         "leakage": {"checked_fields": list(IDENTITY_FIELDS), "violations": []},
@@ -256,6 +270,7 @@ def validate_training_manifest(
             errors.append(f"missing_{field}")
 
         image_value = sample.get("image") or sample.get("image_path")
+        image_path = None
         if image_value and require_images:
             image_path = _resolve(manifest_path, image_value)
             if not image_path.is_file():
@@ -308,6 +323,81 @@ def validate_training_manifest(
                         max_examples,
                     )
                     errors.append("invalid_landmarks")
+
+        if landmarks is not None:
+            geometry_hw = None
+            geometry_source = ""
+            prepared_orig_hw = sample.get("prepared_image_orig_hw")
+            if prepared_orig_hw:
+                try:
+                    geometry_hw = (int(prepared_orig_hw[0]), int(prepared_orig_hw[1]))
+                    geometry_source = "prepared_image_orig_hw"
+                except Exception as err:  # noqa: BLE001
+                    report["geometry"]["invalid_geometry"] += 1
+                    _example(
+                        report,
+                        "invalid_geometry",
+                        {
+                            "sample_id": sample_id,
+                            "error": f"invalid_prepared_image_orig_hw:{err}",
+                        },
+                        max_examples,
+                    )
+                    errors.append("invalid_geometry")
+            elif image_path is not None and image_path.is_file():
+                try:
+                    geometry_hw = loader_image_hw(image_path)
+                    geometry_source = "image"
+                except Exception as err:  # noqa: BLE001
+                    report["geometry"]["invalid_geometry"] += 1
+                    _example(
+                        report,
+                        "invalid_geometry",
+                        {
+                            "sample_id": sample_id,
+                            "path": str(image_path),
+                            "error": f"unreadable_image:{err}",
+                        },
+                        max_examples,
+                    )
+                    errors.append("invalid_geometry")
+
+            if geometry_hw is not None:
+                diag = simulate_loader_geometry(
+                    np.asarray(landmarks)[:, :2],
+                    geometry_hw,
+                    landmark_mask=sample.get("landmark_mask"),
+                )
+                report["geometry"]["checked_samples"] += 1
+                diag_example = {
+                    "sample_id": sample_id,
+                    "dataset": dataset,
+                    "split": split,
+                    "source": geometry_source,
+                    "diagnostics": diag,
+                }
+                if diag.get("landmarks_outside_image"):
+                    report["geometry"]["landmarks_outside_image"] += 1
+                    _example(
+                        report,
+                        "landmarks_outside_image",
+                        diag_example,
+                        max_examples,
+                    )
+                if not diag.get("ok"):
+                    report["geometry"]["invalid_geometry"] += 1
+                    reason = str(diag.get("reason") or "invalid_geometry")
+                    if reason == "unreasonable_loader_padding":
+                        report["geometry"]["unreasonable_loader_padding"] += 1
+                        _example(
+                            report,
+                            "unreasonable_loader_padding",
+                            diag_example,
+                            max_examples,
+                        )
+                    else:
+                        _example(report, "invalid_geometry", diag_example, max_examples)
+                    errors.append(reason)
 
         source_schema = None
         target_schema = None

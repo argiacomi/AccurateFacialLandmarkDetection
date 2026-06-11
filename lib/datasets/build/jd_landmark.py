@@ -45,6 +45,66 @@ def _split_hint_from_jd_name(name: str) -> str | None:
     return None
 
 
+def _jd_resolve_loader_geometry_path(
+    *,
+    output_dir: Path,
+    sample_id: str,
+    image: Path,
+    points: np.ndarray,
+    bbox: T.Sequence[float] | None,
+    bbox_source: str,
+) -> tuple[Path, np.ndarray, dict[str, T.Any]]:
+    """Choose a JD sample geometry path.
+
+    Policy:
+    A. native image + raw landmarks fit the loader -> keep native path
+    B. otherwise bbox crop/remap fits the loader -> use crop/remapped landmarks
+    C. otherwise raise, and the builder skips the sample
+    """
+
+    native = _simulate_loader_geometry(image, points)
+    meta: dict[str, T.Any] = {
+        "loader_geometry_policy": "native_fit" if native.get("ok") else "invalid",
+        "loader_geometry_native": native,
+    }
+    if native.get("ok"):
+        return image, points.astype(np.float32), meta
+
+    if bbox is None:
+        raise ValueError(
+            f"invalid loader geometry: native={native.get('reason')}; no bbox fallback"
+        )
+
+    try:
+        crop_image, crop_points, crop_meta = _crop_sample_image(
+            output_dir=output_dir,
+            dataset="jd-landmark",
+            sample_id=sample_id,
+            image_path=image,
+            points68=points,
+            bbox_xyxy=bbox,
+            bbox_source=bbox_source,
+        )
+    except Exception as err:  # noqa: BLE001
+        raise ValueError(
+            f"invalid loader geometry: native={native.get('reason')}; bbox crop failed: {err}"
+        ) from err
+
+    crop_diag = _simulate_loader_geometry(crop_image, crop_points)
+    meta["loader_geometry_bbox_crop"] = crop_diag
+    if not crop_diag.get("ok"):
+        with contextlib.suppress(OSError):
+            crop_image.unlink()
+        raise ValueError(
+            "invalid loader geometry: "
+            f"native={native.get('reason')}; bbox_crop={crop_diag.get('reason')}"
+        )
+
+    meta.update(crop_meta)
+    meta["loader_geometry_policy"] = "bbox_crop_fit"
+    return crop_image, crop_points.astype(np.float32), meta
+
+
 def _build_jd_landmark(
     root: Path,
     output_dir: Path,
@@ -194,14 +254,34 @@ def _build_jd_landmark(
                 sample_id=sample_id,
             )
             condition, conds = _native_conditions_for_split(scenario, split)
+            try:
+                selected_image, selected_points, geometry_metadata = (
+                    _jd_resolve_loader_geometry_path(
+                        output_dir=output_dir,
+                        sample_id=sample_id,
+                        image=image,
+                        points=points,
+                        bbox=bbox,
+                        bbox_source=str(bbox_path.resolve())
+                        if bbox_path is not None
+                        else "jd_bbox",
+                    )
+                )
+            except ValueError as err:
+                skipped.append(
+                    {"sample_id": landmark_path.as_posix(), "reason": str(err)}
+                )
+                continue
+
+            metadata.update(geometry_metadata)
             samples.append(
                 _with_split(
                     _sample(
                         output_dir=output_dir,
                         dataset="jd-landmark",
                         sample_id=sample_id,
-                        image=image,
-                        points68=points,
+                        image=selected_image,
+                        points68=selected_points,
                         condition=condition,
                         conditions=conds,
                         source_schema="2d_106",
