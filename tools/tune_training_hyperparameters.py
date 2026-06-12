@@ -1228,6 +1228,41 @@ def _finished_optuna_trials(output_dir: Path) -> int:
     return len(result_by_stage(read_results(output_dir), "optuna_loss_search"))
 
 
+def _used_optuna_run_indices(output_dir: Path) -> set[int]:
+    used: set[int] = set()
+
+    for result in result_by_stage(read_results(output_dir), "optuna_loss_search"):
+        raw = result.get("optuna_run_index")
+        if raw is None:
+            parts = str(result.get("id", "")).split("__", 2)
+            raw = parts[1] if len(parts) > 1 else None
+        try:
+            used.add(int(raw))
+        except (TypeError, ValueError):
+            pass
+
+    runs_dir = output_dir / "runs"
+    if runs_dir.exists():
+        for run_dir in runs_dir.glob("optuna_loss_search__*"):
+            parts = run_dir.name.split("__", 2)
+            if len(parts) < 2:
+                continue
+            try:
+                used.add(int(parts[1]))
+            except ValueError:
+                continue
+
+    return used
+
+
+def _next_optuna_run_index(output_dir: Path) -> int:
+    used = _used_optuna_run_indices(output_dir)
+    index = 0
+    while index in used:
+        index += 1
+    return index
+
+
 def _run_interactive_search(
     args: argparse.Namespace,
     base: dict[str, float],
@@ -1251,11 +1286,13 @@ def _run_interactive_search(
         before = _finished_optuna_trials(output_dir)
         trial = study.ask()
         params = _trial_suggest_params(trial, base, ranges)
-        number = int(getattr(trial, "number", before))
+        optuna_number = int(getattr(trial, "number", before))
+        run_index = _next_optuna_run_index(output_dir)
         run = make_run_config(
-            stage="optuna_loss_search", params=params, seed=args.seed, index=number
+            stage="optuna_loss_search", params=params, seed=args.seed, index=run_index
         )
-        run["optuna_trial_number"] = number
+        run["optuna_run_index"] = run_index
+        run["optuna_trial_number"] = optuna_number
         run["optuna_study_name"] = args.optuna_study_name
         run["optuna_storage"] = optuna_storage_url(args)
         run["optuna_source"] = "optuna"
