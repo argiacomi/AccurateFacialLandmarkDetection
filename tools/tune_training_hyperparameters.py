@@ -53,7 +53,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.io_utils import jsonable, read_json, write_json
+from lib.io_utils import read_json, write_json
 
 DEFAULT_STAR_BRACKET = [0.0, 0.005, 0.01, 0.02, 0.05]
 DEFAULT_LR_SWEEP = [3e-5, 5e-5, 1e-4, 2e-4, 3e-4]
@@ -1115,22 +1115,52 @@ def run_one(
 
 def append_result(path: Path, result: dict[str, T.Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(jsonable(result), sort_keys=True) + "\n")
+    payload = (json.dumps(result, sort_keys=True) + "\n").encode("utf-8")
+
+    with path.open("ab+") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size > 0:
+            handle.seek(size - 1)
+            if handle.read(1) != b"\\n":
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\\n")
+        handle.seek(0, os.SEEK_END)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def read_results(output_dir: Path) -> list[dict[str, T.Any]]:
     path = output_dir / "results.jsonl"
     if not path.exists():
         return []
-    out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            out.append(json.loads(line))
-    dedup: dict[str, dict[str, T.Any]] = {}
-    for result in out:
-        dedup[str(result["id"])] = result
-    return list(dedup.values())
+
+    text = path.read_text(encoding="utf-8")
+    decoder = json.JSONDecoder()
+    out: list[dict[str, T.Any]] = []
+    i = 0
+
+    while i < len(text):
+        while i < len(text) and text[i].isspace():
+            i += 1
+        # Tolerate files produced by the bad append_result patch that wrote
+        # a literal backslash-n separator instead of a physical newline.
+        while text.startswith("\\n", i):
+            i += 2
+            while i < len(text) and text[i].isspace():
+                i += 1
+        if i >= len(text):
+            break
+        try:
+            item, end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError as exc:
+            raise TuningError(f"malformed {path} near byte {i}: {exc.msg}") from exc
+        if isinstance(item, dict):
+            out.append(item)
+        i = end
+
+    return out
 
 
 def result_by_stage(
