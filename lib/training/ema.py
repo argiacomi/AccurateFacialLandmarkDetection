@@ -1,6 +1,7 @@
-import torch.nn as nn
 from copy import deepcopy
+
 import torch
+import torch.nn as nn
 
 
 class EMA(nn.Module):
@@ -55,7 +56,7 @@ if __name__ == "__main__":
         nn.Linear(16, 1),
     )
     ema = EMA(model, warm_up_iter=100, ema_steps=10, decay=0.9)
-    opt = torch.optim.Adam(model.parameters(), lr=0.001)
+    opt = torch.optim.AdamW(model.parameters(), lr=0.001)
     for i in range(10000):
         opt.zero_grad()
         x = torch.rand((64, 1)) * torch.pi * 2

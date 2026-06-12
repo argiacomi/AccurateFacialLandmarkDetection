@@ -548,7 +548,7 @@ def main():
                     level=Verbosity.QUIET,
                 )
 
-        optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
+        optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr)
         scheduler = StepLR(optimizer, args.sched_step, gamma=0.5)
 
         best_nme = 99999
