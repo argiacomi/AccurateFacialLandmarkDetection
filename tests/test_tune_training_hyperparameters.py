@@ -731,7 +731,7 @@ def test_run_one_records_crashed_prunable_trial_as_pruned(tmp_path):
     assert (tmp_path / "results.jsonl").exists()
 
 
-def test_run_one_records_failed_finalist_without_aborting(tmp_path):
+def test_run_one_finalist_startup_failure_raises_as_systemic(tmp_path):
     args = tuner.build_arg_parser().parse_args(
         [
             "--output-dir",
@@ -748,12 +748,60 @@ def test_run_one_records_failed_finalist_without_aborting(tmp_path):
         index=0,
     )
 
+    with pytest.raises(
+        tuner.TuningError, match="before usable metrics; treating as systemic"
+    ):
+        tuner.run_one(args, run, baseline_metrics=None)
+
+
+def test_run_one_records_failed_finalist_after_metrics_without_aborting(tmp_path):
+    metrics_file = "metrics.json"
+    helper = tmp_path / "write_metrics_then_fail.py"
+
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--execute",
+            "--metrics-file-name",
+            metrics_file,
+            "--train-command",
+            f"{sys.executable} {helper}",
+        ]
+    )
+    run = tuner.make_run_config(
+        stage="loss_finalist_seed",
+        params=tuner.baseline_config(args),
+        seed=17,
+        index=0,
+    )
+    run_dir = tmp_path / "runs" / run["id"]
+    metrics_path = run_dir / metrics_file
+
+    helper.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                f"p = pathlib.Path({str(metrics_path)!r})",
+                "p.parent.mkdir(parents=True, exist_ok=True)",
+                "p.write_text(json.dumps({'NME': 0.123, 'epoch': 0}))",
+                "sys.exit(2)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     result = tuner.run_one(args, run, baseline_metrics=None)
 
-    assert result is not None
-    assert result["pruned"] is True
+    assert result["failed"] is True
+    assert result["pruned"] is False
     assert result["returncode"] == 2
     assert result["score"] == float("inf")
+    assert "training exited with code 2" in result["failure_reason"]
+    assert (Path(result["run_dir"]) / "result.json").exists()
 
 
 def test_run_one_baseline_failure_still_raises(tmp_path):
@@ -773,7 +821,9 @@ def test_run_one_baseline_failure_still_raises(tmp_path):
         index=0,
     )
 
-    with pytest.raises(tuner.TuningError, match="baseline training exited"):
+    with pytest.raises(
+        tuner.TuningError, match="before usable metrics; treating as systemic"
+    ):
         tuner.run_one(args, run, baseline_metrics=None)
 
 

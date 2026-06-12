@@ -899,6 +899,12 @@ def _tell_study_pruned(study, trial) -> None:
         pass
 
 
+def _run_made_progress(metrics_path: Path, last_epoch: int | None = None) -> bool:
+    if last_epoch is not None and int(last_epoch) >= 0:
+        return True
+    return metrics_path.exists()
+
+
 def run_one(
     args: argparse.Namespace,
     run: dict[str, T.Any],
@@ -944,7 +950,8 @@ def run_one(
                 "command": command,
                 "pruned": True,
                 "pruned_epoch": status["last_epoch"],
-                "prune_reason": status.get("prune_reason") or f"pruned at epoch {status['last_epoch']}",
+                "prune_reason": status.get("prune_reason")
+                or f"pruned at epoch {status['last_epoch']}",
                 "returncode": status.get("returncode"),
                 "score": float("inf"),
             }
@@ -984,27 +991,41 @@ def run_one(
             )
     elif args.execute:
         completed = subprocess.run(
-            command, cwd=args.cwd or None, env=os.environ.copy()
+            command,
+            check=False,
+            cwd=args.cwd or None,
+            env=os.environ.copy(),
         )
         if completed.returncode != 0:
-            if run.get("stage") == "baseline":
-                raise TuningError(
-                    f"baseline training exited with code {completed.returncode}"
-                )
-            result = {
-                **run,
-                "run_dir": str(run_dir),
-                "command": command,
-                "pruned": True,
-                "pruned_epoch": -1,
-                "prune_reason": f"training exited with code {completed.returncode}",
-                "returncode": int(completed.returncode),
-                "score": float("inf"),
-            }
-            write_json(run_dir / "result.json", result)
-            append_result(output_dir / "results.jsonl", result)
-            print("PRUNED", run["id"], result["prune_reason"])
-            return result
+            reason = f"training exited with code {completed.returncode}"
+            if str(run.get("stage", "")) != "baseline" and _run_made_progress(
+                metrics_path
+            ):
+                result = {
+                    **run,
+                    "run_dir": str(run_dir),
+                    "command": command,
+                    "failed": True,
+                    "pruned": False,
+                    "failure_reason": reason,
+                    "returncode": int(completed.returncode),
+                    "score": float("inf"),
+                }
+                if metrics_path.exists():
+                    try:
+                        raw_metrics = read_json(metrics_path)
+                        result["raw_metrics"] = raw_metrics
+                        result["metrics"] = normalize_metrics(raw_metrics)
+                    except Exception as exc:
+                        result["metrics_error"] = str(exc)
+                write_json(run_dir / "result.json", result)
+                append_result(output_dir / "results.jsonl", result)
+                print("FAILED", run["id"], reason)
+                return result
+            raise TuningError(
+                f"training for {run['id']} exited with code {completed.returncode} "
+                "before usable metrics; treating as systemic"
+            )
     elif not metrics_path.exists():
         print("SKIP", run["id"], "missing metrics", metrics_path)
         return None
