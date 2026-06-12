@@ -82,6 +82,11 @@ HARD_SLICE_KEYS = (
 )
 OVERALL_KEYS = ("heldout_68_nme", "overall_68_nme", "nme_68", "NME")
 FRONTAL_KEYS = ("frontal_nme", "frontal_68_nme")
+# Abort the interactive search when this many trials in a row exit without
+# ever writing an eval report: bad hyperparameters fail after some training,
+# while instant exits point at a broken training command or environment, and
+# recording those as pruned would silently burn the whole trial budget.
+MAX_CONSECUTIVE_STARTUP_FAILURES = 3
 
 
 class TuningError(RuntimeError):
@@ -767,6 +772,13 @@ def _baseline_score_for_pruning(
     args: argparse.Namespace,
     baseline_metrics: dict[str, T.Any] | None,
 ) -> float | None:
+    """Score the baseline with the objective used for intermediate scores.
+
+    ``baseline_metrics=None`` is correct here: the baseline's regression
+    penalty against itself is zero by definition, so the result is directly
+    comparable to the per-epoch trial scores from ``_intermediate_score``.
+    """
+
     if not baseline_metrics:
         return None
     try:
@@ -971,7 +983,28 @@ def run_one(
                 f"training for {run['id']} exited with code {status['returncode']}"
             )
     elif args.execute:
-        subprocess.run(command, check=True, cwd=args.cwd or None, env=os.environ.copy())
+        completed = subprocess.run(
+            command, cwd=args.cwd or None, env=os.environ.copy()
+        )
+        if completed.returncode != 0:
+            if run.get("stage") == "baseline":
+                raise TuningError(
+                    f"baseline training exited with code {completed.returncode}"
+                )
+            result = {
+                **run,
+                "run_dir": str(run_dir),
+                "command": command,
+                "pruned": True,
+                "pruned_epoch": -1,
+                "prune_reason": f"training exited with code {completed.returncode}",
+                "returncode": int(completed.returncode),
+                "score": float("inf"),
+            }
+            write_json(run_dir / "result.json", result)
+            append_result(output_dir / "results.jsonl", result)
+            print("PRUNED", run["id"], result["prune_reason"])
+            return result
     elif not metrics_path.exists():
         print("SKIP", run["id"], "missing metrics", metrics_path)
         return None
@@ -991,23 +1024,24 @@ def run_one(
             max_easy_regression=float(args.max_easy_regression),
         )
     except TuningError as exc:
+        if not prunable and run.get("stage") == "baseline":
+            raise
         if prunable:
             _tell_study_pruned(study, trial)
-            result = {
-                **run,
-                "run_dir": str(run_dir),
-                "command": command,
-                "raw_metrics": raw_metrics,
-                "metrics": metrics,
-                "pruned": True,
-                "prune_reason": f"invalid final metrics: {exc}",
-                "score": float("inf"),
-            }
-            write_json(run_dir / "result.json", result)
-            append_result(output_dir / "results.jsonl", result)
-            print("PRUNED", run["id"], f"invalid final metrics: {exc}")
-            return result
-        raise
+        result = {
+            **run,
+            "run_dir": str(run_dir),
+            "command": command,
+            "raw_metrics": raw_metrics,
+            "metrics": metrics,
+            "pruned": True,
+            "prune_reason": f"invalid final metrics: {exc}",
+            "score": float("inf"),
+        }
+        write_json(run_dir / "result.json", result)
+        append_result(output_dir / "results.jsonl", result)
+        print("PRUNED", run["id"], f"invalid final metrics: {exc}")
+        return result
     result = {
         **run,
         "run_dir": str(run_dir),
@@ -1050,6 +1084,12 @@ def result_by_stage(
     results: list[dict[str, T.Any]], stage: str
 ) -> list[dict[str, T.Any]]:
     return [item for item in results if item.get("stage") == stage]
+
+
+def unpruned(results: list[dict[str, T.Any]]) -> list[dict[str, T.Any]]:
+    """Results eligible for ranking/aggregation (failures carry inf scores)."""
+
+    return [item for item in results if not item.get("pruned")]
 
 
 def synthetic_metrics_for_config(
@@ -1153,6 +1193,7 @@ def _run_interactive_search(
 
     output_dir = Path(args.output_dir)
     target = int(args.optuna_trials)
+    startup_failures = 0
     while _finished_optuna_trials(output_dir) < target:
         before = _finished_optuna_trials(output_dir)
         trial = study.ask()
@@ -1165,7 +1206,30 @@ def _run_interactive_search(
         run["optuna_study_name"] = args.optuna_study_name
         run["optuna_storage"] = optuna_storage_url(args)
         run["optuna_source"] = "optuna"
-        run_one(args, run, baseline_metrics=baseline_metrics, trial=trial, study=study)
+        try:
+            result = run_one(
+                args, run, baseline_metrics=baseline_metrics, trial=trial, study=study
+            )
+        except BaseException:
+            # Never leave the asked trial RUNNING in storage: zombie trials
+            # bias future TPE suggestions and pollute resumed studies.
+            _tell_study_pruned(study, trial)
+            raise
+        if result is None:
+            _tell_study_pruned(study, trial)
+        elif result.get("returncode") not in (None, 0) and (
+            int(result.get("pruned_epoch", -1)) < 0
+        ):
+            startup_failures += 1
+            if startup_failures >= MAX_CONSECUTIVE_STARTUP_FAILURES:
+                raise TuningError(
+                    f"{startup_failures} consecutive trials exited before "
+                    "writing any eval report; this looks like a broken "
+                    "training command or environment rather than bad "
+                    "hyperparameters"
+                )
+        else:
+            startup_failures = 0
         if _finished_optuna_trials(output_dir) <= before:
             # No new result recorded (e.g. a dry-run skip); stop to avoid looping.
             break
@@ -1246,11 +1310,7 @@ def _run_joint_pipeline(
     run_search_stage(args, base, baseline_metrics, ranges=optuna_ranges(args))
 
     results = read_results(output_dir)
-    candidates = [
-        item
-        for item in result_by_stage(results, "optuna_loss_search")
-        if not item.get("pruned")
-    ]
+    candidates = unpruned(result_by_stage(results, "optuna_loss_search"))
     ranked = rank_results(candidates, top_k=max(int(args.loss_top_k), 1))
     write_json(output_dir / "ranked_loss_candidates.json", ranked)
 
@@ -1260,7 +1320,7 @@ def _run_joint_pipeline(
 
     results = read_results(output_dir)
     finalist_summaries = aggregate_by_parent(
-        result_by_stage(results, "loss_finalist_seed"),
+        unpruned(result_by_stage(results, "loss_finalist_seed")),
         top_k=max(int(args.loss_top_k), 1),
     )
     write_json(output_dir / "loss_finalist_summary.json", finalist_summaries)
@@ -1301,12 +1361,10 @@ def _run_legacy_pipeline(
     run_search_stage(args, base, baseline_metrics, ranges=optuna_ranges(args))
 
     results = read_results(output_dir)
-    loss_candidates = [
-        item
-        for item in result_by_stage(results, "star_bracket")
+    loss_candidates = unpruned(
+        result_by_stage(results, "star_bracket")
         + result_by_stage(results, "optuna_loss_search")
-        if not item.get("pruned")
-    ]
+    )
     ranked_loss = rank_results(loss_candidates, top_k=max(int(args.loss_top_k), 1))
     write_json(output_dir / "ranked_loss_candidates.json", ranked_loss)
 
@@ -1316,7 +1374,7 @@ def _run_legacy_pipeline(
 
     results = read_results(output_dir)
     loss_finalist_summaries = aggregate_by_parent(
-        result_by_stage(results, "loss_finalist_seed"),
+        unpruned(result_by_stage(results, "loss_finalist_seed")),
         top_k=max(int(args.loss_top_k), 1),
     )
     write_json(output_dir / "loss_finalist_summary.json", loss_finalist_summaries)
@@ -1338,7 +1396,8 @@ def _run_legacy_pipeline(
 
     results = read_results(output_dir)
     ranked_lr = rank_results(
-        result_by_stage(results, "lr_sweep"), top_k=max(int(args.lr_top_k), 1)
+        unpruned(result_by_stage(results, "lr_sweep")),
+        top_k=max(int(args.lr_top_k), 1),
     )
     write_json(output_dir / "ranked_lr_candidates.json", ranked_lr)
 
@@ -1348,7 +1407,8 @@ def _run_legacy_pipeline(
 
     results = read_results(output_dir)
     lr_finalist_summaries = aggregate_by_parent(
-        result_by_stage(results, "lr_finalist_seed"), top_k=max(int(args.lr_top_k), 1)
+        unpruned(result_by_stage(results, "lr_finalist_seed")),
+        top_k=max(int(args.lr_top_k), 1),
     )
     write_json(output_dir / "lr_finalist_summary.json", lr_finalist_summaries)
     if lr_finalist_summaries:

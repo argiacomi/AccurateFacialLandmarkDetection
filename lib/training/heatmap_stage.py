@@ -141,6 +141,11 @@ LEGACY_FS68_DATASET_NAME = LEGACY_MANIFEST_DATA_NAME
 MULTI_SCHEMA_MANIFEST_DATASET_NAME = CANONICAL_MANIFEST_DATA_NAME
 FS68_DATASET_NAME = LEGACY_FS68_DATASET_NAME
 
+# With AMP enabled a non-finite loss can be a one-off fp16 overflow that
+# GradScaler absorbs by skipping the step and shrinking the loss scale; only
+# this many consecutive non-finite batches abort training as real divergence.
+MAX_NONFINITE_LOSS_STREAK = 5
+
 # Legacy private helper aliases kept for TrainHeatmapStageFP16.py and older tests/tools.
 _landmark_count_for_dataset = landmark_count_for_dataset
 _build_dataset = build_dataset
@@ -644,6 +649,7 @@ def main():
                 description=f"e{int(epoch):03d}",
                 enabled=is_rank_zero() and bool(getattr(args, "train_progress", True)),
             )
+            nonfinite_loss_streak = 0
             batch_fetch_start_time = time.time()
             for batch_idx, batch in enumerate(train_dataloader):
                 if is_rank_zero():
@@ -761,27 +767,36 @@ def main():
                     )
 
                 if not torch.isfinite(loss.detach()).all():
+                    nonfinite_loss_streak += 1
                     loss_components = {
                         "loc": float(loss_loc.detach().float().item()),
                         "heat": float(loss_heatmap.detach().float().item()),
-                        "star": float(loss_star.detach().float().item())
-                        if "loss_star" in locals()
-                        else 0.0,
+                        "star": float(loss_star.detach().float().item()),
                         "cons": float(loss_consistency.detach().float().item()),
-                        "vis": float(loss_visibility.detach().float().item())
-                        if "loss_visibility" in locals()
-                        else 0.0,
+                        "vis": float(loss_visibility.detach().float().item()),
                         "aux": float(loss_aux.detach().float().item()),
                     }
                     message = (
                         f"non-finite training loss at epoch {int(epoch)} "
-                        f"batch {int(batch_idx)}: "
+                        f"batch {int(batch_idx)} (streak "
+                        f"{nonfinite_loss_streak}/{MAX_NONFINITE_LOSS_STREAK}): "
                         f"loss={float(loss.detach().float().item())} "
                         f"components={loss_components}"
                     )
                     if is_rank_zero():
                         log_event("train", message, level=Verbosity.QUIET)
-                    raise FloatingPointError(message)
+                    if (
+                        not scaler.is_enabled()
+                        or nonfinite_loss_streak >= MAX_NONFINITE_LOSS_STREAK
+                    ):
+                        raise FloatingPointError(message)
+                    # Otherwise fall through to backward: non-finite gradients
+                    # make GradScaler skip the step and shrink the loss scale,
+                    # the normal AMP recovery for a transient fp16 overflow,
+                    # and every rank still runs the same collectives so DDP
+                    # stays in sync.
+                else:
+                    nonfinite_loss_streak = 0
 
                 backward_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing

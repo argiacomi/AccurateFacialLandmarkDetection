@@ -693,3 +693,172 @@ def test_plain_dry_run_generates_commands_without_metrics(tmp_path, capsys):
     assert "DRY-RUN" in captured.out
     assert (tmp_path / "runs").exists()
     assert (tmp_path / "best_training_hyperparameters.json").exists()
+
+
+def test_run_one_records_crashed_prunable_trial_as_pruned(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--execute",
+            "--prune-poll-seconds",
+            "0.5",
+            "--train-command",
+            f"{sys.executable} -c 'import sys; sys.exit(3)'",
+        ]
+    )
+    run = tuner.make_run_config(
+        stage="optuna_loss_search",
+        params=tuner.baseline_config(args),
+        seed=17,
+        index=0,
+    )
+
+    result = tuner.run_one(
+        args,
+        run,
+        baseline_metrics=None,
+        trial=_PruningTrial(prune_at_epoch=None),
+        study=_FakeStudy(),
+    )
+
+    assert result is not None
+    assert result["pruned"] is True
+    assert result["score"] == float("inf")
+    assert result["returncode"] == 3
+    assert "exited with code 3" in result["prune_reason"]
+    assert result["pruned_epoch"] == -1
+    assert (tmp_path / "results.jsonl").exists()
+
+
+def test_run_one_records_failed_finalist_without_aborting(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--execute",
+            "--train-command",
+            f"{sys.executable} -c 'import sys; sys.exit(2)'",
+        ]
+    )
+    run = tuner.make_run_config(
+        stage="loss_finalist_seed",
+        params=tuner.baseline_config(args),
+        seed=17,
+        index=0,
+    )
+
+    result = tuner.run_one(args, run, baseline_metrics=None)
+
+    assert result is not None
+    assert result["pruned"] is True
+    assert result["returncode"] == 2
+    assert result["score"] == float("inf")
+
+
+def test_run_one_baseline_failure_still_raises(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--execute",
+            "--train-command",
+            f"{sys.executable} -c 'import sys; sys.exit(2)'",
+        ]
+    )
+    run = tuner.make_run_config(
+        stage="baseline",
+        params=tuner.baseline_config(args),
+        seed=17,
+        index=0,
+    )
+
+    with pytest.raises(tuner.TuningError, match="baseline training exited"):
+        tuner.run_one(args, run, baseline_metrics=None)
+
+
+def test_run_one_records_invalid_final_metrics_for_finalist(tmp_path):
+    args = tuner.build_arg_parser().parse_args(["--output-dir", str(tmp_path)])
+    run = tuner.make_run_config(
+        stage="loss_finalist_seed",
+        params=tuner.baseline_config(args),
+        seed=17,
+        index=0,
+    )
+    run_dir = tmp_path / "runs" / run["id"]
+    run_dir.mkdir(parents=True)
+    (run_dir / args.metrics_file_name).write_text('{"epoch": 1}', encoding="utf-8")
+
+    result = tuner.run_one(args, run, baseline_metrics=None)
+
+    assert result is not None
+    assert result["pruned"] is True
+    assert "invalid final metrics" in result["prune_reason"]
+    assert result["score"] == float("inf")
+
+
+def test_execute_with_pruning_prunes_trials_far_worse_than_baseline(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--prune-poll-seconds",
+            "0.5",
+            "--baseline-prune-margin",
+            "0.01",
+            "--baseline-prune-min-epoch",
+            "1",
+        ]
+    )
+    metrics_path = tmp_path / "metrics.json"
+    script = (
+        "import json,sys,time\n"
+        "p=sys.argv[1]\n"
+        "for e in range(20):\n"
+        "    json.dump({'epoch': e, 'model': {'overall': {'nme': 0.5}}}, open(p,'w'))\n"
+        "    time.sleep(0.3)\n"
+    )
+    command = [sys.executable, "-c", script, str(metrics_path)]
+
+    status = tuner._execute_with_pruning(
+        args,
+        command,
+        metrics_path,
+        trial=_PruningTrial(prune_at_epoch=None),
+        baseline_metrics={"heldout_68_nme": 0.05},
+    )
+
+    assert status["pruned"] is True
+    assert "baseline" in status["prune_reason"]
+    # The child was killed well before all 20 epochs were written.
+    assert status["last_epoch"] < 19
+
+
+def test_interactive_search_aborts_after_consecutive_startup_failures(tmp_path):
+    args = tuner.build_arg_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--execute",
+            "--prune-poll-seconds",
+            "0.5",
+            "--optuna-trials",
+            "10",
+            "--train-command",
+            f"{sys.executable} -c 'import sys; sys.exit(1)'",
+        ]
+    )
+    study = _FakeStudy()
+
+    with pytest.raises(tuner.TuningError, match="consecutive trials exited"):
+        tuner._run_interactive_search(
+            args,
+            tuner.baseline_config(args),
+            None,
+            study=study,
+            ranges=tuner.optuna_ranges(args),
+        )
+
+    results = tuner.read_results(tmp_path)
+    assert len(results) == tuner.MAX_CONSECUTIVE_STARTUP_FAILURES
+    assert all(item["pruned"] for item in results)
