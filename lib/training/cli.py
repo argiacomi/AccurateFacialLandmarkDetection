@@ -239,6 +239,16 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--nonfinite-loss-check-interval",
+        type=int,
+        default=0,
+        help=(
+            "Check total loss for NaN/Inf every N training batches. "
+            "0 disables this extra synchronized guard; use a positive value "
+            "for tuner/debug runs where fast failure is worth the sync."
+        ),
+    )
+    parser.add_argument(
         "--domain-balanced-sampling",
         action="store_true",
         help=(

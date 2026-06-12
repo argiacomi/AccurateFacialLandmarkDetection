@@ -766,37 +766,44 @@ def main():
                         synchronize=args.synchronize_runtime_timing,
                     )
 
-                if not torch.isfinite(loss.detach()).all():
-                    nonfinite_loss_streak += 1
-                    loss_components = {
-                        "loc": float(loss_loc.detach().float().item()),
-                        "heat": float(loss_heatmap.detach().float().item()),
-                        "star": float(loss_star.detach().float().item()),
-                        "cons": float(loss_consistency.detach().float().item()),
-                        "vis": float(loss_visibility.detach().float().item()),
-                        "aux": float(loss_aux.detach().float().item()),
-                    }
-                    message = (
-                        f"non-finite training loss at epoch {int(epoch)} "
-                        f"batch {int(batch_idx)} (streak "
-                        f"{nonfinite_loss_streak}/{MAX_NONFINITE_LOSS_STREAK}): "
-                        f"loss={float(loss.detach().float().item())} "
-                        f"components={loss_components}"
+                nonfinite_interval = int(
+                    getattr(args, "nonfinite_loss_check_interval", 0) or 0
+                )
+                if nonfinite_interval > 0 and batch_idx % nonfinite_interval == 0:
+                    local_finite = torch.isfinite(loss.detach()).to(
+                        device=device,
+                        dtype=torch.int32,
                     )
-                    if is_rank_zero():
-                        log_event("train", message, level=Verbosity.QUIET)
-                    if (
-                        not scaler.is_enabled()
-                        or nonfinite_loss_streak >= MAX_NONFINITE_LOSS_STREAK
-                    ):
-                        raise FloatingPointError(message)
-                    # Otherwise fall through to backward: non-finite gradients
-                    # make GradScaler skip the step and shrink the loss scale,
-                    # the normal AMP recovery for a transient fp16 overflow,
-                    # and every rank still runs the same collectives so DDP
-                    # stays in sync.
-                else:
-                    nonfinite_loss_streak = 0
+                    global_finite = local_finite.clone()
+                    if dist.is_initialized():
+                        dist.all_reduce(global_finite, op=dist.ReduceOp.MIN)
+                    if int(global_finite.item()) == 0:
+                        nonfinite_loss_streak += 1
+                        loss_components = {
+                            "loc": float(loss_loc.detach().float().item()),
+                            "heat": float(loss_heatmap.detach().float().item()),
+                            "star": float(loss_star.detach().float().item()),
+                            "cons": float(loss_consistency.detach().float().item()),
+                            "vis": float(loss_visibility.detach().float().item()),
+                            "aux": float(loss_aux.detach().float().item()),
+                        }
+                        message = (
+                            f"non-finite training loss at epoch {int(epoch)} "
+                            f"batch {int(batch_idx)} (streak "
+                            f"{nonfinite_loss_streak}/{MAX_NONFINITE_LOSS_STREAK}): "
+                            f"local_finite={bool(int(local_finite.item()))} "
+                            f"loss={float(loss.detach().float().item())} "
+                            f"components={loss_components}"
+                        )
+                        if is_rank_zero():
+                            log_event("train", message, level=Verbosity.QUIET)
+                        if (
+                            not scaler.is_enabled()
+                            or nonfinite_loss_streak >= MAX_NONFINITE_LOSS_STREAK
+                        ):
+                            raise FloatingPointError(message)
+                    else:
+                        nonfinite_loss_streak = 0
 
                 backward_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
