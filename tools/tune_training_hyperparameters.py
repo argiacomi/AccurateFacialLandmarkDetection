@@ -5,11 +5,13 @@ The default plan reaches a good configuration with as little training as possibl
 
 1. Baseline run.
 2. One joint Optuna search over STAR, schema consistency, auxiliary loss, and the
-   learning rate (log scale). TPE adapts to results between trials, and the
-   ASHA/successive-halving pruner stops weak trials early. Pair with
-   ``--search-epochs`` to search at a reduced proxy budget.
-3. Multi-seed confirmation reruns of the top finalist(s) at the full ``--epoch``
-   budget.
+   learning rate (log scale). Each sampled Optuna configuration is evaluated
+   across ``--optuna-trial-seeds`` and reported back as an aggregate objective, so
+   TPE learns from more stable multi-seed estimates. The ASHA/successive-halving
+   pruner stops weak seed runs early. Pair with ``--search-epochs`` to search at a
+   reduced proxy budget.
+3. Optional held-out seed confirmation reruns of the top finalist(s) at the full
+   ``--epoch`` budget.
 4. best_training_hyperparameters.json recommendation.
 
 ``--legacy-staged-search`` reproduces the original staged plan instead: a manual
@@ -57,8 +59,10 @@ from lib.io_utils import read_json, write_json
 
 DEFAULT_STAR_BRACKET = [0.0, 0.005, 0.01, 0.02, 0.05]
 DEFAULT_LR_SWEEP = [3e-5, 5e-5, 1e-4, 2e-4, 3e-4]
-DEFAULT_LOSS_SEEDS = [17, 29, 43]
-DEFAULT_LR_SEEDS = [17, 29, 43]
+DEFAULT_LOSS_SEEDS = [43]
+DEFAULT_LR_SEEDS = [43]
+DEFAULT_OPTUNA_SEEDS = [17, 29]
+DEFAULT_OPTUNA_TRIAL_STD_WEIGHT = 0.5
 # Loss-weight-only ranges. The default joint search additionally folds in ``lr``
 # (see ``optuna_ranges``); ``DEFAULT_OPTUNA_RANGES`` stays loss-only for the
 # legacy staged search where the learning rate is swept on a separate grid.
@@ -67,12 +71,15 @@ DEFAULT_OPTUNA_RANGES = {
     "schema_consistency_weight": (0.0, 0.08),
     "auxiliary_loss_weight": (0.0, 0.1),
 }
-DEFAULT_LR_RANGE = (3e-5, 3e-4)
+DEFAULT_LR_RANGE = (1e-5, 5e-4)
 # Parameters sampled on a log scale (e.g. learning rate spans orders of magnitude).
 LOG_SCALE_PARAMS = frozenset({"lr"})
 # Stages that run at the reduced ``--search-epochs`` proxy budget. Finalist and
 # baseline runs always train at the full ``--epoch`` budget for confirmation.
-SEARCH_STAGES = frozenset({"optuna_loss_search", "star_bracket", "lr_sweep"})
+OPTUNA_TRIAL_SEED_STAGE = "optuna_loss_search_seed"
+SEARCH_STAGES = frozenset(
+    {"optuna_loss_search", OPTUNA_TRIAL_SEED_STAGE, "star_bracket", "lr_sweep"}
+)
 HARD_SLICE_KEYS = (
     "profile_nme",
     "occlusion_nme",
@@ -115,6 +122,15 @@ def _split_csv_ints(raw: str, default: list[int]) -> list[int]:
     if not raw:
         return list(default)
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
+
+
+def _optuna_trial_seeds(args: argparse.Namespace) -> list[int]:
+    seeds = _split_csv_ints(
+        getattr(args, "optuna_trial_seeds", ""), DEFAULT_OPTUNA_SEEDS
+    )
+    if not seeds:
+        raise TuningError("--optuna-trial-seeds must include at least one seed")
+    return seeds
 
 
 def _load_optuna(*, required: bool = False):
@@ -199,6 +215,7 @@ def create_or_load_optuna_study(args: argparse.Namespace):
         sampler = optuna.samplers.TPESampler(
             seed=sampler_seed,
             constant_liar=True,
+            multivariate=True,
         )
     except TypeError:
         sampler = optuna.samplers.TPESampler(seed=sampler_seed)
@@ -208,6 +225,7 @@ def create_or_load_optuna_study(args: argparse.Namespace):
         storage=storage_url,
         direction="minimize",
         sampler=sampler,
+        pruner=_build_pruner(optuna, args),
         load_if_exists=True,
     )
 
@@ -925,6 +943,7 @@ def run_one(
     baseline_metrics: dict[str, T.Any] | None,
     trial=None,
     study=None,
+    tell_study_on_complete: bool = True,
 ) -> dict[str, T.Any] | None:
     output_dir = Path(args.output_dir)
     run_dir = output_dir / "runs" / run["id"]
@@ -1106,9 +1125,9 @@ def run_one(
     }
     write_json(run_dir / "result.json", result)
     append_result(output_dir / "results.jsonl", result)
-    if prunable:
+    if prunable and tell_study_on_complete:
         _tell_study(study, trial, score)
-    else:
+    elif not prunable:
         tell_optuna_result(args, result)
     return result
 
@@ -1293,6 +1312,238 @@ def _next_optuna_run_index(output_dir: Path) -> int:
     return index
 
 
+def _load_run_result(output_dir: Path, run_id: str) -> dict[str, T.Any] | None:
+    path = output_dir / "runs" / run_id / "result.json"
+    if not path.exists():
+        return None
+    result = read_json(path)
+    return result if isinstance(result, dict) else None
+
+
+class _TrialWithStepOffset:
+    """Forward trial.report calls with unique cumulative steps per seed run.
+
+    The same Optuna trial owns all internal seed runs. Offsetting report steps
+    prevents duplicate-step warnings when the second seed starts at epoch 0/1.
+    With ``--search-epochs 50``, seed 0 reports roughly steps 0-50 and seed 1
+    reports roughly steps 51-101, modeling total consumed training budget.
+    """
+
+    def __init__(self, trial, step_offset: int):
+        self._trial = trial
+        self._step_offset = int(step_offset)
+        self.number = getattr(trial, "number", None)
+
+    def report(self, value: float, step: int) -> T.Any:
+        return self._trial.report(value, int(step) + self._step_offset)
+
+    def should_prune(self) -> bool:
+        return bool(self._trial.should_prune())
+
+    def __getattr__(self, name: str) -> T.Any:
+        return getattr(self._trial, name)
+
+
+def _optuna_seed_step_stride(args: argparse.Namespace) -> int:
+    search_epochs = int(getattr(args, "search_epochs", 0) or 0)
+    if search_epochs > 0:
+        return search_epochs + 1
+    # The full search budget is unknown when --search-epochs is 0. Use a large
+    # stride so seed report steps remain unique without needing trainer metadata.
+    return 100_000
+
+
+def _aggregate_optuna_seed_results(
+    args: argparse.Namespace, seed_results: list[dict[str, T.Any]]
+) -> tuple[float, dict[str, T.Any]]:
+    scores = [float(result["score"]) for result in seed_results]
+    mean_score = statistics.mean(scores)
+    std_score = statistics.pstdev(scores) if len(scores) > 1 else 0.0
+    std_weight = float(
+        getattr(args, "optuna_trial_std_weight", DEFAULT_OPTUNA_TRIAL_STD_WEIGHT)
+    )
+    score = mean_score + std_weight * std_score
+    diagnostics = {
+        "aggregation": "mean_plus_std",
+        "score": score,
+        "mean_score": mean_score,
+        "std_score": std_score,
+        "std_weight": std_weight,
+        "best_score": min(scores),
+        "worst_score": max(scores),
+        "count": len(scores),
+        "seed_scores": [
+            {
+                "seed": int(result["seed"]),
+                "run_id": result["id"],
+                "score": float(result["score"]),
+            }
+            for result in seed_results
+        ],
+    }
+    return float(score), diagnostics
+
+
+def _write_parent_optuna_result(
+    args: argparse.Namespace,
+    parent_run: dict[str, T.Any],
+    result: dict[str, T.Any],
+) -> dict[str, T.Any]:
+    output_dir = Path(args.output_dir)
+    run_dir = output_dir / "runs" / parent_run["id"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_json(run_dir / "config.json", parent_run)
+    result = {**parent_run, **result, "run_dir": str(run_dir)}
+    write_json(run_dir / "result.json", result)
+    append_result(output_dir / "results.jsonl", result)
+    return result
+
+
+def run_optuna_trial_with_internal_seeds(
+    args: argparse.Namespace,
+    parent_run: dict[str, T.Any],
+    *,
+    baseline_metrics: dict[str, T.Any] | None,
+    trial,
+    study,
+) -> dict[str, T.Any] | None:
+    """Evaluate one sampled Optuna configuration across internal seed runs.
+
+    One parent ``optuna_loss_search`` result is written per Optuna trial. The
+    child seed runs use ``OPTUNA_TRIAL_SEED_STAGE`` so they can use
+    ``--search-epochs`` but do not count as separate Optuna trials.
+    """
+
+    output_dir = Path(args.output_dir)
+    seeds = _optuna_trial_seeds(args)
+    parent_run = dict(parent_run)
+    parent_run["optuna_trial_seeds"] = seeds
+    parent_run["optuna_trial_seed_stage"] = OPTUNA_TRIAL_SEED_STAGE
+    parent_run["optuna_seed_objective"] = {
+        "aggregation": "mean_plus_std",
+        "std_weight": float(
+            getattr(args, "optuna_trial_std_weight", DEFAULT_OPTUNA_TRIAL_STD_WEIGHT)
+        ),
+    }
+
+    parent_dir = output_dir / "runs" / parent_run["id"]
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    write_json(parent_dir / "config.json", parent_run)
+
+    seed_results: list[dict[str, T.Any]] = []
+    step_stride = _optuna_seed_step_stride(args)
+
+    for seed_index, seed in enumerate(seeds):
+        seed_run = make_run_config(
+            stage=OPTUNA_TRIAL_SEED_STAGE,
+            params=parent_run["params"],
+            seed=int(seed),
+            index=int(parent_run["optuna_run_index"]),
+            parent_trial=parent_run["id"],
+        )
+        seed_run["optuna_run_index"] = parent_run["optuna_run_index"]
+        seed_run["optuna_trial_number"] = parent_run["optuna_trial_number"]
+        seed_run["optuna_seed_index"] = seed_index
+        seed_run["optuna_parent_run_id"] = parent_run["id"]
+        seed_run["optuna_study_name"] = parent_run["optuna_study_name"]
+        seed_run["optuna_storage"] = parent_run["optuna_storage"]
+        seed_run["optuna_source"] = parent_run["optuna_source"]
+
+        existing = _load_run_result(output_dir, seed_run["id"])
+        if existing is not None:
+            seed_result = existing
+        else:
+            seed_trial = _TrialWithStepOffset(trial, seed_index * step_stride)
+            seed_result = run_one(
+                args,
+                seed_run,
+                baseline_metrics=baseline_metrics,
+                trial=seed_trial,
+                study=study,
+                tell_study_on_complete=False,
+            )
+
+        if seed_result is None:
+            _tell_study_pruned(study, trial)
+            return _write_parent_optuna_result(
+                args,
+                parent_run,
+                {
+                    "pruned": True,
+                    "prune_reason": f"seed {seed} produced no result",
+                    "score": float("inf"),
+                    "child_run_ids": [result["id"] for result in seed_results],
+                },
+            )
+
+        seed_results.append(seed_result)
+
+        if seed_result.get("pruned"):
+            _tell_study_pruned(study, trial)
+            return _write_parent_optuna_result(
+                args,
+                parent_run,
+                {
+                    "pruned": True,
+                    "pruned_epoch": seed_result.get("pruned_epoch"),
+                    "prune_reason": (
+                        f"internal seed {seed} pruned: "
+                        f"{seed_result.get('prune_reason', 'unknown')}"
+                    ),
+                    "returncode": seed_result.get("returncode"),
+                    "score": float("inf"),
+                    "child_run_ids": [result["id"] for result in seed_results],
+                    "seed_results": [
+                        {
+                            "seed": int(result["seed"]),
+                            "run_id": result["id"],
+                            "score": float(result.get("score", float("inf"))),
+                            "pruned": bool(result.get("pruned")),
+                        }
+                        for result in seed_results
+                    ],
+                },
+            )
+
+        if not math.isfinite(float(seed_result.get("score", float("inf")))):
+            _tell_study_pruned(study, trial)
+            return _write_parent_optuna_result(
+                args,
+                parent_run,
+                {
+                    "pruned": True,
+                    "prune_reason": f"internal seed {seed} produced non-finite score",
+                    "returncode": seed_result.get("returncode"),
+                    "score": float("inf"),
+                    "child_run_ids": [result["id"] for result in seed_results],
+                },
+            )
+
+    score, diagnostics = _aggregate_optuna_seed_results(args, seed_results)
+    result = _write_parent_optuna_result(
+        args,
+        parent_run,
+        {
+            "child_run_ids": [result["id"] for result in seed_results],
+            "seed_results": [
+                {
+                    "seed": int(result["seed"]),
+                    "run_id": result["id"],
+                    "score": float(result["score"]),
+                    "pruned": bool(result.get("pruned")),
+                }
+                for result in seed_results
+            ],
+            "score": score,
+            "objective": diagnostics,
+            "mean_score": diagnostics["mean_score"],
+            "std_score": diagnostics["std_score"],
+        },
+    )
+    _tell_study(study, trial, score)
+    return result
+
+
 def _run_interactive_search(
     args: argparse.Namespace,
     base: dict[str, float],
@@ -1327,8 +1578,12 @@ def _run_interactive_search(
         run["optuna_storage"] = optuna_storage_url(args)
         run["optuna_source"] = "optuna"
         try:
-            result = run_one(
-                args, run, baseline_metrics=baseline_metrics, trial=trial, study=study
+            result = run_optuna_trial_with_internal_seeds(
+                args,
+                run,
+                baseline_metrics=baseline_metrics,
+                trial=trial,
+                study=study,
             )
         except BaseException:
             # Never leave the asked trial RUNNING in storage: zombie trials
@@ -1424,7 +1679,7 @@ def _run_joint_pipeline(
     baseline_result: dict[str, T.Any] | None,
     baseline_metrics: dict[str, T.Any] | None,
 ) -> dict[str, T.Any]:
-    """Default path: one joint loss+LR search, then multi-seed confirmation."""
+    """Default path: multi-seed joint loss+LR search, then held-out confirmation."""
 
     output_dir = Path(args.output_dir)
     run_search_stage(args, base, baseline_metrics, ranges=optuna_ranges(args))
@@ -1608,7 +1863,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--star-bracket", default=",".join(str(x) for x in DEFAULT_STAR_BRACKET)
     )
-    parser.add_argument("--optuna-trials", type=int, default=20)
+    parser.add_argument("--optuna-trials", type=int, default=40)
     parser.add_argument("--optuna-seed", type=int, default=2026)
     parser.add_argument("--optuna-study-name", default="landmark_loss_weight_search")
     parser.add_argument(
@@ -1622,11 +1877,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1,
         help="Documented worker count for shared Optuna storage; launch multiple processes with same output dir/storage for parallelism.",
     )
+    parser.add_argument(
+        "--optuna-trial-seeds",
+        default=",".join(str(x) for x in DEFAULT_OPTUNA_SEEDS),
+        help=(
+            "Comma-separated seeds evaluated inside each sampled Optuna trial. "
+            "The trial objective is aggregated across these seed runs."
+        ),
+    )
+    parser.add_argument(
+        "--optuna-trial-std-weight",
+        type=float,
+        default=DEFAULT_OPTUNA_TRIAL_STD_WEIGHT,
+        help=(
+            "Penalty applied to within-trial seed score standard deviation: "
+            "objective = mean_score + weight * std_score."
+        ),
+    )
     parser.add_argument("--optuna-pruner-startup-trials", type=int, default=5)
     parser.add_argument(
         "--optuna-min-pruning-epoch",
         type=int,
-        default=5,
+        default=8,
         help="Minimum epochs before a trial may be pruned (pruner min_resource / warmup).",
     )
     parser.add_argument(
@@ -1654,7 +1926,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--baseline-prune-margin",
         type=float,
-        default=0.25,
+        default=0.2,
         help=(
             "Hard-prune Optuna trials whose intermediate objective is worse than "
             "the baseline objective by more than this absolute margin. Set very "
@@ -1664,14 +1936,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--baseline-prune-min-epoch",
         type=int,
-        default=3,
+        default=5,
         help="Earliest evaluated epoch eligible for baseline-regression pruning.",
     )
 
     parser.add_argument(
         "--search-epochs",
         type=int,
-        default=0,
+        default=50,
         help=(
             "Proxy epoch budget for search-stage trials (0 keeps the trainer "
             "default). Finalist and baseline runs always use the full --epoch "
@@ -1709,7 +1981,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use deterministic sampled fallback instead of a real Optuna study.",
     )
-    parser.add_argument("--loss-top-k", type=int, default=3)
+    parser.add_argument("--loss-top-k", type=int, default=1)
     parser.add_argument(
         "--loss-finalist-seeds", default=",".join(str(x) for x in DEFAULT_LOSS_SEEDS)
     )
@@ -1722,7 +1994,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hard-slice-weight", type=float, default=0.25)
     parser.add_argument("--regression-penalty-weight", type=float, default=2.0)
-    parser.add_argument("--max-easy-regression", type=float, default=0.0)
+    parser.add_argument("--max-easy-regression", type=float, default=0.001)
     return parser
 
 
@@ -1732,10 +2004,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--execute and --dry-run cannot both be set")
     if not args.execute and not args.dry_run and not args.mock_metrics:
         print(
-            "Neither --execute nor --dry-run was set; defaulting to dry-run planning.",
+            "Neither --execute nor --dry-run was set; defaulting to execution.",
             file=sys.stderr,
         )
-        args.dry_run = True
+        args.execute = True
     recommendation = run_pipeline(args)
     print(json.dumps(recommendation, indent=2, sort_keys=True))
     return 0
