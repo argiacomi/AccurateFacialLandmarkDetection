@@ -698,14 +698,13 @@ def _intermediate_score(
     metrics_path: Path,
     *,
     baseline_metrics: dict[str, T.Any] | None,
-) -> tuple[int, float] | None:
-    """Read the latest per-epoch eval report and return ``(epoch, score)``.
+) -> tuple[int, float, float] | None:
+    """Read the latest per-epoch eval report.
 
-    The trainer overwrites the ``--eval-report-json`` file every evaluated epoch
-    with an ``epoch`` field and the ``model.overall.nme`` report. We score it with
-    the same objective used for the final selection so the pruner ranks trials on
-    the metric we actually optimize. Slice-free fast evals score on overall NME
-    alone, which is the dominant objective term, so they remain comparable.
+    Returns ``(epoch, full_score, comparable_score)``. ``full_score`` is the
+    objective reported to Optuna and may include the baseline-regression penalty.
+    ``comparable_score`` is scored without baseline metrics, so it can be compared
+    directly against the baseline's own score for hard baseline pruning.
     """
 
     if not metrics_path.exists():
@@ -732,13 +731,21 @@ def _intermediate_score(
             max_easy_regression=float(args.max_easy_regression),
             required_slices=(),
         )
+        comparable_score, _ = objective_score(
+            metrics,
+            baseline_metrics=None,
+            hard_slice_weight=float(args.hard_slice_weight),
+            regression_penalty_weight=float(args.regression_penalty_weight),
+            max_easy_regression=float(args.max_easy_regression),
+            required_slices=(),
+        )
     except TuningError as exc:
         print(
             f"PRUNE invalid intermediate metrics at epoch {epoch}: {exc}",
             file=sys.stderr,
         )
-        return int(epoch), float("inf")
-    return int(epoch), float(score)
+        return int(epoch), float("inf"), float("inf")
+    return int(epoch), float(score), float(comparable_score)
 
 
 def _signal_process_group(proc: subprocess.Popen, sig: int) -> None:
@@ -833,7 +840,7 @@ def _execute_with_pruning(
                 args, metrics_path, baseline_metrics=baseline_metrics
             )
             if observation is not None:
-                epoch, score = observation
+                epoch, score, comparable_score = observation
                 last_epoch = epoch
                 if epoch > reported_epoch:
                     reported_epoch = epoch
@@ -844,14 +851,16 @@ def _execute_with_pruning(
                     if (
                         baseline_score is not None
                         and epoch >= baseline_min_epoch
-                        and float(score) > float(baseline_score) + baseline_margin
+                        and float(comparable_score)
+                        > float(baseline_score) + baseline_margin
                     ):
                         pruned = True
                         prune_reason = (
                             "baseline regression at epoch "
-                            f"{epoch}: score={float(score):.6f} "
+                            f"{epoch}: comparable_score={float(comparable_score):.6f} "
                             f"baseline={float(baseline_score):.6f} "
-                            f"margin={float(baseline_margin):.6f}"
+                            f"margin={float(baseline_margin):.6f} "
+                            f"full_score={float(score):.6f}"
                         )
                         print(f"PRUNE {prune_reason}", file=sys.stderr)
                         break
@@ -960,7 +969,9 @@ def run_one(
             print("PRUNED", run["id"], result["prune_reason"])
             return result
         if status["returncode"] != 0:
-            if prunable:
+            if prunable and _run_made_progress(
+                metrics_path, status.get("last_epoch", -1)
+            ):
                 _tell_study_pruned(study, trial)
                 result = {
                     **run,
@@ -987,7 +998,8 @@ def run_one(
                 print("PRUNED", run["id"], result["prune_reason"])
                 return result
             raise TuningError(
-                f"training for {run['id']} exited with code {status['returncode']}"
+                f"training for {run['id']} exited with code {status['returncode']} "
+                "before usable metrics; treating as systemic"
             )
     elif args.execute:
         completed = subprocess.run(
@@ -1049,19 +1061,35 @@ def run_one(
             raise
         if prunable:
             _tell_study_pruned(study, trial)
+            result = {
+                **run,
+                "run_dir": str(run_dir),
+                "command": command,
+                "raw_metrics": raw_metrics,
+                "metrics": metrics,
+                "pruned": True,
+                "prune_reason": f"invalid final metrics: {exc}",
+                "score": float("inf"),
+            }
+            write_json(run_dir / "result.json", result)
+            append_result(output_dir / "results.jsonl", result)
+            print("PRUNED", run["id"], f"invalid final metrics: {exc}")
+            return result
+
         result = {
             **run,
             "run_dir": str(run_dir),
             "command": command,
             "raw_metrics": raw_metrics,
             "metrics": metrics,
-            "pruned": True,
-            "prune_reason": f"invalid final metrics: {exc}",
+            "failed": True,
+            "pruned": False,
+            "failure_reason": f"invalid final metrics: {exc}",
             "score": float("inf"),
         }
         write_json(run_dir / "result.json", result)
         append_result(output_dir / "results.jsonl", result)
-        print("PRUNED", run["id"], f"invalid final metrics: {exc}")
+        print("FAILED", run["id"], f"invalid final metrics: {exc}")
         return result
     result = {
         **run,

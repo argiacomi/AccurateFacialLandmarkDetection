@@ -479,10 +479,11 @@ def test_intermediate_score_reads_per_epoch_eval(tmp_path):
     observation = tuner._intermediate_score(args, metrics_path, baseline_metrics=None)
 
     assert observation is not None
-    epoch, score = observation
+    epoch, score, comparable_score = observation
     assert epoch == 7
     # Slice-free fast eval scores on overall NME alone.
     assert score == pytest.approx(0.05)
+    assert comparable_score == pytest.approx(score)
 
 
 def test_intermediate_score_handles_missing_and_partial_files(tmp_path):
@@ -695,7 +696,7 @@ def test_plain_dry_run_generates_commands_without_metrics(tmp_path, capsys):
     assert (tmp_path / "best_training_hyperparameters.json").exists()
 
 
-def test_run_one_records_crashed_prunable_trial_as_pruned(tmp_path):
+def test_run_one_prunable_startup_failure_raises_as_systemic(tmp_path):
     args = tuner.build_arg_parser().parse_args(
         [
             "--output-dir",
@@ -714,21 +715,17 @@ def test_run_one_records_crashed_prunable_trial_as_pruned(tmp_path):
         index=0,
     )
 
-    result = tuner.run_one(
-        args,
-        run,
-        baseline_metrics=None,
-        trial=_PruningTrial(prune_at_epoch=None),
-        study=_FakeStudy(),
-    )
-
-    assert result is not None
-    assert result["pruned"] is True
-    assert result["score"] == float("inf")
-    assert result["returncode"] == 3
-    assert "exited with code 3" in result["prune_reason"]
-    assert result["pruned_epoch"] == -1
-    assert (tmp_path / "results.jsonl").exists()
+    with pytest.raises(
+        tuner.TuningError,
+        match="before usable metrics; treating as systemic",
+    ):
+        tuner.run_one(
+            args,
+            run,
+            baseline_metrics=None,
+            trial=_PruningTrial(prune_at_epoch=None),
+            study=_FakeStudy(),
+        )
 
 
 def test_run_one_finalist_startup_failure_raises_as_systemic(tmp_path):
@@ -842,9 +839,11 @@ def test_run_one_records_invalid_final_metrics_for_finalist(tmp_path):
     result = tuner.run_one(args, run, baseline_metrics=None)
 
     assert result is not None
-    assert result["pruned"] is True
-    assert "invalid final metrics" in result["prune_reason"]
+    assert result["failed"] is True
+    assert result["pruned"] is False
     assert result["score"] == float("inf")
+    assert "invalid final metrics" in result["failure_reason"]
+    assert (Path(result["run_dir"]) / "result.json").exists()
 
 
 def test_execute_with_pruning_prunes_trials_far_worse_than_baseline(tmp_path):
@@ -884,7 +883,7 @@ def test_execute_with_pruning_prunes_trials_far_worse_than_baseline(tmp_path):
     assert status["last_epoch"] < 19
 
 
-def test_interactive_search_aborts_after_consecutive_startup_failures(tmp_path):
+def test_interactive_search_aborts_on_startup_failure(tmp_path):
     args = tuner.build_arg_parser().parse_args(
         [
             "--output-dir",
@@ -900,7 +899,10 @@ def test_interactive_search_aborts_after_consecutive_startup_failures(tmp_path):
     )
     study = _FakeStudy()
 
-    with pytest.raises(tuner.TuningError, match="consecutive trials exited"):
+    with pytest.raises(
+        tuner.TuningError,
+        match="before usable metrics; treating as systemic",
+    ):
         tuner._run_interactive_search(
             args,
             tuner.baseline_config(args),
@@ -908,7 +910,3 @@ def test_interactive_search_aborts_after_consecutive_startup_failures(tmp_path):
             study=study,
             ranges=tuner.optuna_ranges(args),
         )
-
-    results = tuner.read_results(tmp_path)
-    assert len(results) == tuner.MAX_CONSECUTIVE_STARTUP_FAILURES
-    assert all(item["pruned"] for item in results)
