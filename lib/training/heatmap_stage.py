@@ -760,6 +760,29 @@ def main():
                         synchronize=args.synchronize_runtime_timing,
                     )
 
+                if not torch.isfinite(loss.detach()).all():
+                    loss_components = {
+                        "loc": float(loss_loc.detach().float().item()),
+                        "heat": float(loss_heatmap.detach().float().item()),
+                        "star": float(loss_star.detach().float().item())
+                        if "loss_star" in locals()
+                        else 0.0,
+                        "cons": float(loss_consistency.detach().float().item()),
+                        "vis": float(loss_visibility.detach().float().item())
+                        if "loss_visibility" in locals()
+                        else 0.0,
+                        "aux": float(loss_aux.detach().float().item()),
+                    }
+                    message = (
+                        f"non-finite training loss at epoch {int(epoch)} "
+                        f"batch {int(batch_idx)}: "
+                        f"loss={float(loss.detach().float().item())} "
+                        f"components={loss_components}"
+                    )
+                    if is_rank_zero():
+                        log_event("train", message, level=Verbosity.QUIET)
+                    raise FloatingPointError(message)
+
                 backward_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
                 )

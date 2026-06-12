@@ -518,8 +518,7 @@ def stage_crops(
 
         if face_crop_failures and strict:
             raise ValueError(
-                "tight face crop staging failed; first failure="
-                f"{face_crop_failures[0]}"
+                f"tight face crop staging failed; first failure={face_crop_failures[0]}"
             )
 
     def _write_issue_overlay(entry: dict, issue: dict[str, T.Any]) -> None:
@@ -864,7 +863,11 @@ def stage_manifest(args: argparse.Namespace) -> int:
     print(f"out manifest    : {stats['out_manifest']}")
     print(f"crops dir       : {stats['images_root']}")
     print(f"staged crops    : {staged} (unique native images)")
-    if stats.get("face_cropped") or stats.get("face_crop_existing") or stats.get("face_crop_failed"):
+    if (
+        stats.get("face_cropped")
+        or stats.get("face_crop_existing")
+        or stats.get("face_crop_failed")
+    ):
         print(
             "tight face crops: "
             f"{stats.get('face_cropped', 0)} cropped, "

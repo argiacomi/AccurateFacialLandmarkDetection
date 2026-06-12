@@ -727,8 +727,12 @@ def _intermediate_score(
             max_easy_regression=float(args.max_easy_regression),
             required_slices=(),
         )
-    except TuningError:
-        return None
+    except TuningError as exc:
+        print(
+            f"PRUNE invalid intermediate metrics at epoch {epoch}: {exc}",
+            file=sys.stderr,
+        )
+        return int(epoch), float("inf")
     return int(epoch), float(score)
 
 
@@ -759,6 +763,26 @@ def _terminate_process_tree(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
+def _baseline_score_for_pruning(
+    args: argparse.Namespace,
+    baseline_metrics: dict[str, T.Any] | None,
+) -> float | None:
+    if not baseline_metrics:
+        return None
+    try:
+        score, _ = objective_score(
+            baseline_metrics,
+            baseline_metrics=None,
+            hard_slice_weight=float(args.hard_slice_weight),
+            regression_penalty_weight=float(args.regression_penalty_weight),
+            max_easy_regression=float(args.max_easy_regression),
+            required_slices=(),
+        )
+    except TuningError:
+        return None
+    return float(score)
+
+
 def _execute_with_pruning(
     args: argparse.Namespace,
     command: list[str],
@@ -778,6 +802,9 @@ def _execute_with_pruning(
     import time
 
     poll_seconds = max(float(getattr(args, "prune_poll_seconds", 10.0)), 0.5)
+    _baseline_score_for_pruning(args, baseline_metrics)
+    float(getattr(args, "baseline_prune_margin", 0.25))
+    int(getattr(args, "baseline_prune_min_epoch", 3))
     # start_new_session puts the child in its own process group so pruning can
     # kill the full tree (e.g. torchrun and its per-rank workers) via killpg.
     proc = subprocess.Popen(
@@ -797,6 +824,9 @@ def _execute_with_pruning(
                 last_epoch = epoch
                 if epoch > reported_epoch:
                     reported_epoch = epoch
+                    if not math.isfinite(float(score)):
+                        pruned = True
+                        break
                     try:
                         trial.report(score, epoch)
                         if trial.should_prune():
@@ -906,13 +936,32 @@ def run_one(
 
     raw_metrics = read_json(metrics_path)
     metrics = normalize_metrics(raw_metrics)
-    score, diagnostics = objective_score(
-        metrics,
-        baseline_metrics=baseline_metrics,
-        hard_slice_weight=float(args.hard_slice_weight),
-        regression_penalty_weight=float(args.regression_penalty_weight),
-        max_easy_regression=float(args.max_easy_regression),
-    )
+    try:
+        score, diagnostics = objective_score(
+            metrics,
+            baseline_metrics=baseline_metrics,
+            hard_slice_weight=float(args.hard_slice_weight),
+            regression_penalty_weight=float(args.regression_penalty_weight),
+            max_easy_regression=float(args.max_easy_regression),
+        )
+    except TuningError as exc:
+        if prunable:
+            _tell_study_pruned(study, trial)
+            result = {
+                **run,
+                "run_dir": str(run_dir),
+                "command": command,
+                "raw_metrics": raw_metrics,
+                "metrics": metrics,
+                "pruned": True,
+                "prune_reason": f"invalid final metrics: {exc}",
+                "score": float("inf"),
+            }
+            write_json(run_dir / "result.json", result)
+            append_result(output_dir / "results.jsonl", result)
+            print("PRUNED", run["id"], f"invalid final metrics: {exc}")
+            return result
+        raise
     result = {
         **run,
         "run_dir": str(run_dir),
@@ -1376,6 +1425,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="How often to poll a running trial's eval report for pruning decisions.",
     )
+    parser.add_argument(
+        "--baseline-prune-margin",
+        type=float,
+        default=0.25,
+        help=(
+            "Hard-prune Optuna trials whose intermediate objective is worse than "
+            "the baseline objective by more than this absolute margin. Set very "
+            "large to disable."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-prune-min-epoch",
+        type=int,
+        default=3,
+        help="Earliest evaluated epoch eligible for baseline-regression pruning.",
+    )
+
     parser.add_argument(
         "--search-epochs",
         type=int,

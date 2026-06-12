@@ -22,7 +22,7 @@ def _write_sample(src_dir: Path, name: str, h: int, w: int, seed: int):
     return image_path
 
 
-def _manifest(src_dir: Path, names) -> dict:
+def _manifest(src_dir: Path, names, *, dataset: str = "unit-test") -> dict:
     return {
         "manifest_contract": "schema_aware_landmark_manifest_v1",
         "version": 2,
@@ -30,7 +30,7 @@ def _manifest(src_dir: Path, names) -> dict:
             {
                 "image": f"src/{name}.png",
                 "landmarks": f"src/{name}.npy",
-                "dataset": "merl-rav",
+                "dataset": dataset,
                 "split": "train",
                 "source_schema": "2d_68",
                 "target_schema": "2d_68",
