@@ -802,9 +802,9 @@ def _execute_with_pruning(
     import time
 
     poll_seconds = max(float(getattr(args, "prune_poll_seconds", 10.0)), 0.5)
-    _baseline_score_for_pruning(args, baseline_metrics)
-    float(getattr(args, "baseline_prune_margin", 0.25))
-    int(getattr(args, "baseline_prune_min_epoch", 3))
+    baseline_score = _baseline_score_for_pruning(args, baseline_metrics)
+    baseline_margin = float(getattr(args, "baseline_prune_margin", 0.25))
+    baseline_min_epoch = int(getattr(args, "baseline_prune_min_epoch", 3))
     # start_new_session puts the child in its own process group so pruning can
     # kill the full tree (e.g. torchrun and its per-rank workers) via killpg.
     proc = subprocess.Popen(
@@ -812,6 +812,7 @@ def _execute_with_pruning(
     )
     reported_epoch = -1
     pruned = False
+    prune_reason = None
     last_epoch = -1
     try:
         while True:
@@ -826,11 +827,27 @@ def _execute_with_pruning(
                     reported_epoch = epoch
                     if not math.isfinite(float(score)):
                         pruned = True
+                        prune_reason = f"invalid intermediate metrics at epoch {epoch}"
+                        break
+                    if (
+                        baseline_score is not None
+                        and epoch >= baseline_min_epoch
+                        and float(score) > float(baseline_score) + baseline_margin
+                    ):
+                        pruned = True
+                        prune_reason = (
+                            "baseline regression at epoch "
+                            f"{epoch}: score={float(score):.6f} "
+                            f"baseline={float(baseline_score):.6f} "
+                            f"margin={float(baseline_margin):.6f}"
+                        )
+                        print(f"PRUNE {prune_reason}", file=sys.stderr)
                         break
                     try:
                         trial.report(score, epoch)
                         if trial.should_prune():
                             pruned = True
+                            prune_reason = f"optuna pruner at epoch {epoch}"
                             break
                     except Exception:
                         # A fake/old Optuna without report/should_prune simply
@@ -844,6 +861,7 @@ def _execute_with_pruning(
     return {
         "returncode": proc.returncode,
         "pruned": pruned,
+        "prune_reason": prune_reason,
         "last_epoch": last_epoch,
     }
 
@@ -914,13 +932,41 @@ def run_one(
                 "command": command,
                 "pruned": True,
                 "pruned_epoch": status["last_epoch"],
+                "prune_reason": status.get("prune_reason") or f"pruned at epoch {status['last_epoch']}",
+                "returncode": status.get("returncode"),
                 "score": float("inf"),
             }
             write_json(run_dir / "result.json", result)
             append_result(output_dir / "results.jsonl", result)
-            print("PRUNED", run["id"], f"at epoch {status['last_epoch']}")
+            print("PRUNED", run["id"], result["prune_reason"])
             return result
         if status["returncode"] != 0:
+            if prunable:
+                _tell_study_pruned(study, trial)
+                result = {
+                    **run,
+                    "run_dir": str(run_dir),
+                    "command": command,
+                    "pruned": True,
+                    "pruned_epoch": status.get("last_epoch", -1),
+                    "prune_reason": (
+                        status.get("prune_reason")
+                        or f"training exited with code {status['returncode']}"
+                    ),
+                    "returncode": status["returncode"],
+                    "score": float("inf"),
+                }
+                if metrics_path.exists():
+                    try:
+                        raw_metrics = read_json(metrics_path)
+                        result["raw_metrics"] = raw_metrics
+                        result["metrics"] = normalize_metrics(raw_metrics)
+                    except Exception as exc:
+                        result["metrics_error"] = str(exc)
+                write_json(run_dir / "result.json", result)
+                append_result(output_dir / "results.jsonl", result)
+                print("PRUNED", run["id"], result["prune_reason"])
+                return result
             raise TuningError(
                 f"training for {run['id']} exited with code {status['returncode']}"
             )
