@@ -184,28 +184,32 @@ def create_or_load_optuna_study(args: argparse.Namespace):
     optuna = _load_optuna(required=bool(getattr(args, "require_optuna", False)))
     if optuna is None:
         return None
-    sampler = optuna.samplers.TPESampler(seed=int(args.optuna_seed))
-    pruner = _build_pruner(optuna, args)
-    study = optuna.create_study(
-        study_name=str(args.optuna_study_name),
-        storage=optuna_storage_url(args),
-        direction="minimize",
-        load_if_exists=True,
-        sampler=sampler,
-        pruner=pruner,
-    )
+
+    output_dir = Path(args.output_dir)
+    default_storage_path = output_dir / "optuna_study.db"
+    storage_url = args.optuna_storage or f"sqlite:///{default_storage_path.resolve()}"
+
+    study_exists = False
+    if str(storage_url).startswith("sqlite:///"):
+        sqlite_path = Path(str(storage_url).removeprefix("sqlite:///"))
+        study_exists = sqlite_path.exists()
+
+    sampler_seed = None if study_exists else int(args.optuna_seed)
     try:
-        study.set_user_attr("objective", "heldout_68_nme_plus_hard_slices")
-        study.set_user_attr("search_space", optuna_ranges(args))
-        study.set_user_attr("min_pruning_epoch", int(args.optuna_min_pruning_epoch))
-        study.set_user_attr(
-            "pruner", str(getattr(args, "pruner", "successive_halving"))
+        sampler = optuna.samplers.TPESampler(
+            seed=sampler_seed,
+            constant_liar=True,
         )
-        study.set_user_attr("workers", int(args.optuna_workers))
-    except Exception:
-        # Older/fake Optuna implementations used in tests may not expose attrs.
-        pass
-    return study
+    except TypeError:
+        sampler = optuna.samplers.TPESampler(seed=sampler_seed)
+
+    return optuna.create_study(
+        study_name=args.optuna_study_name,
+        storage=storage_url,
+        direction="minimize",
+        sampler=sampler,
+        load_if_exists=True,
+    )
 
 
 def config_id(
