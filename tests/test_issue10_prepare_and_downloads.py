@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from lib.datasets.progress import track
+from tools import build_production_validated_manifest as production_builder
 from tools import download_landmark_datasets as downloader
 from tools import prepare_landmark_dataset as prepare
 
@@ -55,21 +56,43 @@ def _make_json_source(extracted: Path, *, dataset: str, count: int = 3) -> None:
     )
 
 
-def _make_production_source(root: Path) -> Path:
+def _make_production_source(
+    root: Path,
+    *,
+    points: list[list[float]] | None = None,
+    runtime_bucket: str | None = "normal",
+) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image_name = "production_frame.jpg"
     _write_image(root / image_name)
+    metadata = {"runtime_bucket": runtime_bucket} if runtime_bucket else {}
     face = {
-        "landmarks_xy": _points68(),
+        "landmarks_xy": points or _points68(),
         "x": 20,
         "y": 20,
         "w": 216,
         "h": 216,
-        "metadata": {"runtime_bucket": "normal"},
+        "metadata": metadata,
     }
     payload = {"__data__": {image_name: {"faces": [face]}}}
     (root / "alignments.fsa").write_bytes(zlib.compress(pickle.dumps(payload)))
     return root
+
+
+def _production_pose_points68() -> list[list[float]]:
+    points = np.zeros((68, 2), dtype=np.float64)
+    points[0] = [-1.0, 1.0]
+    points[16] = [1.0, 1.0]
+    points[8] = [0.0, 1.6]
+    for index in range(36, 42):
+        points[index] = [-0.5 + 0.04 * (index - 36), 0.0]
+    for index in range(42, 48):
+        points[index] = [0.3 + 0.04 * (index - 42), 0.0]
+    points[30] = [-0.5, 0.7]
+    for index in range(48, 68):
+        points[index] = [-0.2 + 0.02 * (index - 48), 0.9]
+    points = (points + 2.0) * 50.0
+    return points.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -500,9 +523,7 @@ def test_prepare_wflwv_flow(tmp_path, capsys):
     assert "run_cdvit_manifest_training_pipeline.py --manifest" in out
 
 
-def test_prepare_prod_skips_download_and_uses_production_builder(
-    tmp_path, monkeypatch
-):
+def test_prepare_prod_skips_download_and_uses_production_builder(tmp_path, monkeypatch):
     prod_dir = _make_production_source(tmp_path / "prod")
     output_root = tmp_path / "out"
 
@@ -527,6 +548,36 @@ def test_prepare_prod_skips_download_and_uses_production_builder(
     ]
     landmark_path = output_root / payload["samples"][0]["landmarks"]
     assert landmark_path.is_file()
+
+
+@pytest.mark.parametrize(
+    ("runtime_bucket", "expected_primary"),
+    [("normal", "normal"), (None, "unknown")],
+)
+def test_production_manifest_appends_landmark_geometry_pose_conditions(
+    tmp_path, runtime_bucket, expected_primary
+):
+    prod_dir = _make_production_source(
+        tmp_path / "prod",
+        points=_production_pose_points68(),
+        runtime_bucket=runtime_bucket,
+    )
+    output_dir = tmp_path / "out"
+
+    production_builder.build_manifest(prod_dir, output_dir)
+
+    sample = json.loads((output_dir / "manifest.json").read_text("utf-8"))["samples"][0]
+    assert sample["condition"] == expected_primary
+    assert sample["conditions"] == [
+        expected_primary,
+        "pose_left_profile",
+        "pitch_down",
+        "pose_side_left",
+    ]
+    assert sample["metadata"]["pose_source"] == "landmark_geometry"
+    assert sample["metadata"]["pose_bucket"] == "left_profile"
+    assert sample["metadata"]["pitch_bucket"] == "down"
+    assert sample["metadata"]["pose_side"] == "left"
 
 
 @pytest.mark.parametrize(

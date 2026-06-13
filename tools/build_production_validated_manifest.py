@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.core.schema import normalize_landmarks
+from lib.datasets.build.core import _pose_condition_tags, _pose_metadata
 from lib.io_utils import jsonable, write_json
 from lib.logging_utils import (
     Verbosity,
@@ -359,13 +360,17 @@ def build_manifest(
                     fsa_path=fsa_path,
                     face_index=face_index,
                 )
+                metadata.update(_pose_metadata(dataset_name, points, "2d_68", metadata))
                 condition = _runtime_bucket(metadata) or "unknown"
+                conditions = list(
+                    dict.fromkeys((condition, *_pose_condition_tags(metadata)))
+                )
                 landmark_path = _write_landmarks(output_dir, sample_id, points)
                 sample = {
                     "sample_id": sample_id,
                     "dataset": dataset_name,
                     "condition": condition,
-                    "conditions": [condition],
+                    "conditions": conditions,
                     "source_schema": "2d_68",
                     "image": str(image_path),
                     "landmarks": landmark_path,
