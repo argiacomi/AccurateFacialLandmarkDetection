@@ -277,6 +277,13 @@ def _progress_scalar(value: T.Any) -> str:
     return text[1:] if text.startswith("0.") else text
 
 
+def _progress_component_scalar(value: T.Any) -> str:
+    if value is None or not _is_positive(value):
+        return "-"
+    text = fmt_num(value, 3)
+    return text[1:] if text.startswith("0.") else text
+
+
 def update_training_progress(
     state: tuple[T.Any, T.Any] | None,
     *,
@@ -305,23 +312,27 @@ def update_training_progress(
         update["loss"] = _progress_scalar(loss)
     if components is not None:
         ordered_keys = ("loc", "heat", "star", "cons", "vis", "aux")
+        positive_components = {
+            key: components[key]
+            for key in ordered_keys
+            if key in components and _is_positive(components[key])
+        }
         update["components"] = (
             fmt_mapping(
-                components,
+                positive_components,
                 precision=3,
                 keys=ordered_keys,
-                omit_zero=False,
             )
             or "-"
         )
         # Keep the old individual fields populated for backward compatibility
         # with any custom Rich column layout.
-        update["loc"] = _progress_scalar(components.get("loc"))
-        update["heat"] = _progress_scalar(components.get("heat"))
-        update["star"] = _progress_scalar(components.get("star"))
-        update["cons"] = _progress_scalar(components.get("cons"))
-        update["vis"] = _progress_scalar(components.get("vis"))
-        update["aux"] = _progress_scalar(components.get("aux"))
+        update["loc"] = _progress_component_scalar(components.get("loc"))
+        update["heat"] = _progress_component_scalar(components.get("heat"))
+        update["star"] = _progress_component_scalar(components.get("star"))
+        update["cons"] = _progress_component_scalar(components.get("cons"))
+        update["vis"] = _progress_component_scalar(components.get("vis"))
+        update["aux"] = _progress_component_scalar(components.get("aux"))
     progress.update(task_id, **update)
 
 
@@ -490,6 +501,15 @@ def _is_zero(value: T.Any) -> bool:
         return False
     try:
         return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_positive(value: T.Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        return float(value) > 0.0
     except (TypeError, ValueError):
         return False
 
