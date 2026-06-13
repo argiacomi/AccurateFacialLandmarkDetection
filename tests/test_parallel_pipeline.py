@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from lib.datasets.parallel import parallel_map, resolve_worker_count
+from lib.datasets.video_frames import extract_video_frames, video_files
 from tools import build_quality_dataset as builder
 
 
@@ -94,6 +95,91 @@ def _build_video_root(tmp_path: Path) -> Path:
         for frame_index in range(4):
             _write_pts(root / clip / f"{frame_index:06d}.pts", points)
     return root
+
+
+def test_video_files_uses_case_insensitive_single_tree_scan(tmp_path):
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "clip.AVI").touch()
+    (tmp_path / "nested" / "notes.txt").touch()
+
+    assert video_files(tmp_path) == [tmp_path / "nested" / "clip.AVI"]
+
+
+def test_sequential_frame_extraction_does_not_seek_each_frame(tmp_path, monkeypatch):
+    class FakeCapture:
+        def __init__(self, path):
+            self.position = 0
+            self.set_calls = []
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FRAME_COUNT:
+                return 4
+            if prop == cv2.CAP_PROP_POS_FRAMES:
+                return self.position
+            return 0
+
+        def set(self, prop, value):
+            self.set_calls.append((prop, value))
+            self.position = int(value)
+            return True
+
+        def grab(self):
+            if self.position >= 4:
+                return False
+            self.position += 1
+            return True
+
+        def read(self):
+            if self.position >= 4:
+                return False, None
+            frame = np.full((8, 8, 3), self.position, dtype=np.uint8)
+            self.position += 1
+            return True, frame
+
+        def release(self):
+            return None
+
+    capture = FakeCapture("unused")
+    monkeypatch.setattr(cv2, "VideoCapture", lambda path: capture)
+    monkeypatch.setattr(cv2, "imwrite", lambda path, frame: True)
+
+    records = extract_video_frames(
+        tmp_path / "clip.avi",
+        tmp_path / "frames",
+        progress=False,
+    )
+
+    assert [record["frame_index"] for record in records] == [0, 1, 2, 3]
+    assert capture.set_calls == []
+
+
+def test_300vw_native_index_maps_one_based_annotations(tmp_path):
+    import lib.datasets.build.video as video_builder
+
+    sequence = tmp_path / "001"
+    video_path = sequence / "vid.avi"
+    video_path.parent.mkdir(parents=True)
+    video_path.touch()
+    points = _points68()
+    _write_pts(sequence / "annot" / "000001.pts", points)
+    _write_pts(sequence / "annot" / "000002.pts", points)
+    task = video_builder._VideoFrameTask(
+        video_path=video_path,
+        video_id="001/vid",
+        frame_root=tmp_path / "frames",
+        frame_stride=1,
+        max_frames_per_video=None,
+    )
+
+    index = video_builder._build_300vw_frame_landmark_index([task])
+
+    assert index == {
+        ("001/vid", 0): sequence / "annot" / "000001.pts",
+        ("001/vid", 1): sequence / "annot" / "000002.pts",
+    }
 
 
 def _manifest_fingerprint(manifest_path: Path) -> list[tuple]:

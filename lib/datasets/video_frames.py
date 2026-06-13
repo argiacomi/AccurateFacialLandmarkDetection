@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import typing as T
 from pathlib import Path
 
@@ -15,11 +16,13 @@ VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".mpg", ".mpeg", ".webm")
 def video_files(root: Path) -> list[Path]:
     """Return supported video files below a root in deterministic order."""
 
+    root = Path(root)
+    extensions = set(VIDEO_EXTS)
     return sorted(
-        path
-        for suffix in VIDEO_EXTS
-        for path in root.rglob(f"*{suffix}")
-        if path.is_file()
+        Path(dirpath) / name
+        for dirpath, _, filenames in os.walk(root)
+        for name in filenames
+        if Path(name).suffix.lower() in extensions
     )
 
 
@@ -96,7 +99,14 @@ def extract_video_frames(
             unit="frame",
             disable=None if progress else True,
         ):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+            current_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or 0)
+            gap = int(frame_index) - current_index
+            if gap < 0 or gap > 32:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+            else:
+                for _ in range(gap):
+                    if not cap.grab():
+                        break
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue

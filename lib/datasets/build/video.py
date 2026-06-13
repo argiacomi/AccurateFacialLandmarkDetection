@@ -254,6 +254,35 @@ class _VideoFrameTask:
     max_frames_per_video: int | None
 
 
+def _build_300vw_frame_landmark_index(
+    tasks: T.Sequence[_VideoFrameTask],
+) -> dict[tuple[str, int], Path] | None:
+    """Index the native ``<sequence>/annot/<frame>.pts`` layout directly."""
+
+    index: dict[tuple[str, int], Path] = {}
+    for task in tasks:
+        annotation_dir = task.video_path.parent / "annot"
+        landmark_paths = list(annotation_dir.glob("*.pts"))
+        if not landmark_paths:
+            return None
+
+        numbered_paths: list[tuple[int, Path]] = []
+        for path in landmark_paths:
+            try:
+                numbered_paths.append((int(path.stem), path))
+            except ValueError:
+                return None
+        base = min(number for number, _ in numbered_paths)
+        if base not in (0, 1):
+            return None
+
+        for number, path in numbered_paths:
+            frame_index = number - base
+            if frame_index >= 0:
+                index[(task.video_id, frame_index)] = path
+    return index
+
+
 def _extract_video_frames_task(
     task: _VideoFrameTask,
 ) -> tuple[str, list[dict[str, T.Any]] | None, str | None]:
@@ -583,7 +612,6 @@ def _build_video_dataset(
     )
     samples: list[dict[str, T.Any]] = []
     skipped: list[dict[str, str]] = []
-    frame_landmark_index = _build_frame_landmark_index(root)
     wflwv_sequence_index = (
         _build_wflwv_sequence_index(root) if dataset == "wflw-v" else None
     )
@@ -604,6 +632,11 @@ def _build_video_dataset(
         )
         for video_path in videos
     ]
+    frame_landmark_index = (
+        _build_300vw_frame_landmark_index(tasks) if dataset == "300vw" else None
+    )
+    if frame_landmark_index is None:
+        frame_landmark_index = _build_frame_landmark_index(root)
     extracted = parallel_map(
         _extract_video_frames_task,
         tasks,
