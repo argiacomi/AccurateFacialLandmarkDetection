@@ -467,6 +467,7 @@ def _prepare_args(**overrides) -> argparse.Namespace:
         force=False,
         skip_checksum=True,
         skip_download=True,
+        skip_build=False,
         skip_validate=False,
         skip_image_exists_check=False,
         keep_going=True,
@@ -624,6 +625,101 @@ def test_prepare_dataset_workers_parallel_matches_serial(tmp_path, monkeypatch):
             path = Path(sample[key])
             resolved = path if path.is_absolute() else base / path
             assert resolved.exists(), f"missing {key}: {sample[key]}"
+
+
+def test_prepare_skip_build_remerges_cached_datasets_and_continues_pipeline(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(prepare.os, "cpu_count", lambda: 4)
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+    _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2)
+    _make_json_source(data_root / "300vw" / "extracted", dataset="300vw", count=3)
+
+    initial_args = _prepare_args(
+        datasets=["wflw-v", "300vw"],
+        data_root=data_root,
+        output_root=output_root,
+        dataset_workers=2,
+    )
+    assert prepare.prepare(initial_args) == 0
+    (output_root / "manifest.json").unlink()
+
+    def unexpected_call(*args, **kwargs):
+        raise AssertionError("--skip-build must not download or build")
+
+    monkeypatch.setattr(downloader, "download_datasets", unexpected_call)
+    monkeypatch.setattr(prepare, "_build_dataset", unexpected_call)
+
+    cached_args = _prepare_args(
+        datasets=["300vw", "wflw-v"],
+        data_root=data_root,
+        output_root=output_root,
+        dataset_workers=1,
+        skip_download=False,
+        skip_build=True,
+    )
+    assert prepare.prepare(cached_args) == 0
+
+    payload = json.loads((output_root / "manifest.json").read_text("utf-8"))
+    assert payload["metadata"]["sample_count"] == 5
+    assert {sample["dataset"] for sample in payload["samples"]} == {
+        "wflw-v",
+        "300vw",
+    }
+    assert all(
+        sample.get("metadata", {}).get("hard_negative_bucket")
+        for sample in payload["samples"]
+    )
+
+    cached_args.manifest_mode = "merge"
+    assert prepare.prepare(cached_args) == 0
+    merged = json.loads((output_root / "manifest.json").read_text("utf-8"))
+    assert merged["metadata"]["sample_count"] == 5
+
+
+def test_prepare_skip_build_requires_requested_cached_manifest(tmp_path):
+    args = _prepare_args(
+        datasets=["wflw-v"],
+        data_root=tmp_path / "data",
+        output_root=tmp_path / "out",
+        skip_build=True,
+    )
+
+    assert prepare.prepare(args) == 1
+
+
+def test_prepare_skip_build_reuses_cached_prod_without_prod_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(prepare.os, "cpu_count", lambda: 4)
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+    prod_dir = _make_production_source(tmp_path / "prod")
+    _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=1)
+
+    initial_args = _prepare_args(
+        datasets=["wflw-v", "prod"],
+        data_root=data_root,
+        output_root=output_root,
+        prod_dir=prod_dir,
+        dataset_workers=2,
+    )
+    assert prepare.prepare(initial_args) == 0
+    (output_root / "manifest.json").unlink()
+
+    cached_args = _prepare_args(
+        datasets=["prod", "wflw-v"],
+        data_root=data_root,
+        output_root=output_root,
+        prod_dir=None,
+        skip_build=True,
+    )
+    assert prepare.prepare(cached_args) == 0
+
+    payload = json.loads((output_root / "manifest.json").read_text("utf-8"))
+    assert {sample["dataset"] for sample in payload["samples"]} == {
+        "wflw-v",
+        "production_validated",
+    }
 
 
 def test_prepare_dataset_workers_merge_does_not_double(tmp_path, monkeypatch):

@@ -10,6 +10,7 @@ plumbing source/cache paths between tools. For each requested dataset it will:
 * resolve the extracted source directory from the downloader registry,
 * stage multi-archive datasets (e.g. JD-landmark) into a single source root,
 * build the CD-ViT manifest (extracting video frames when required),
+* optionally rebuild the combined manifest from existing ``_datasets`` outputs,
 * write audit overlays when requested,
 * validate the resulting manifest,
 * merge every requested dataset into one combined manifest, and
@@ -1056,6 +1057,189 @@ def _merge_dedupe_key(sample: dict[str, T.Any]) -> tuple[T.Any, ...]:
     )
 
 
+def _merge_isolated_dataset_results(
+    results: T.Sequence[dict[str, T.Any]],
+    *,
+    output_root: Path,
+    args: argparse.Namespace,
+) -> bool:
+    """Merge isolated per-dataset payloads into the combined manifest."""
+
+    new_samples: list[dict[str, T.Any]] = []
+    skipped: list[dict[str, str]] = []
+    built_any = False
+    for record in results:
+        if record.get("status") == "error":
+            continue
+        built_any = True
+        payload = record.get("payload") or {}
+        for sample in payload.get("samples", []):
+            if isinstance(sample, dict):
+                new_samples.append(sample)
+        skipped.extend(record.get("skipped_examples") or [])
+
+    if not built_any:
+        return False
+
+    # Merge in memory keyed on source identity (not image path) so repeated
+    # cached/parallel merges never double samples whose artifact paths changed.
+    deduped: dict[tuple[T.Any, ...], dict[str, T.Any]] = {}
+    if args.manifest_mode == "merge":
+        combined_manifest = output_root / "manifest.json"
+        if combined_manifest.is_file():
+            existing = read_json(combined_manifest)
+            for sample in existing.get("samples", []):
+                if isinstance(sample, dict):
+                    deduped[_merge_dedupe_key(sample)] = sample
+    # Freshly loaded samples win on a stable-key collision (current paths).
+    for sample in new_samples:
+        deduped[_merge_dedupe_key(sample)] = sample
+
+    builder._write_manifest(
+        output_root,
+        "multi_dataset",
+        "default",
+        list(deduped.values()),
+        mode="replace",
+        allow_overlap=args.allow_overlap,
+        scenarios=None,
+        skipped=skipped,
+    )
+    return True
+
+
+def _payload_datasets(payload: T.Mapping[str, T.Any]) -> set[str]:
+    datasets: set[str] = set()
+    for sample in payload.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        source = sample.get("source")
+        source = source if isinstance(source, dict) else {}
+        dataset = str(sample.get("dataset") or source.get("dataset") or "")
+        if dataset:
+            datasets.add(dataset)
+    if not datasets:
+        metadata = payload.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        dataset = str(metadata.get("dataset") or payload.get("dataset") or "")
+        if dataset and dataset != "multi_dataset":
+            datasets.add(dataset)
+    return datasets
+
+
+def _merge_existing_dataset_outputs(
+    datasets: T.Sequence[str],
+    *,
+    output_root: Path,
+    args: argparse.Namespace,
+) -> tuple[list[dict[str, T.Any]], bool]:
+    """Load requested manifests from ``_datasets`` and rebuild the combined one."""
+
+    datasets_root = output_root / "_datasets"
+    manifest_paths = (
+        sorted(datasets_root.glob("*/manifest.json"))
+        if datasets_root.is_dir()
+        else []
+    )
+    payloads: dict[Path, dict[str, T.Any]] = {}
+    datasets_by_manifest: dict[Path, set[str]] = {}
+    for manifest_path in manifest_paths:
+        try:
+            payload = read_json(manifest_path)
+        except Exception as err:  # noqa: BLE001
+            log_event(
+                "prepare",
+                f"ignore unreadable cached manifest {manifest_path}: {err}",
+                level=Verbosity.DEBUG,
+                manifest=str(manifest_path),
+                error=str(err),
+            )
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payloads[manifest_path] = payload
+        datasets_by_manifest[manifest_path] = _payload_datasets(payload)
+
+    results: list[dict[str, T.Any]] = []
+    selected_manifests: set[Path] = set()
+    for index, dataset in enumerate(datasets, start=1):
+        expected = _dataset_output_dir(output_root, index, dataset) / "manifest.json"
+        if expected in payloads and dataset in datasets_by_manifest[expected]:
+            matches = [expected]
+        else:
+            matches = [
+                path
+                for path, manifest_datasets in datasets_by_manifest.items()
+                if dataset in manifest_datasets and path not in selected_manifests
+            ]
+
+        if len(matches) != 1:
+            if not matches:
+                error = (
+                    f"no cached manifest for {dataset!r} under {datasets_root}; "
+                    "run without --skip-build first"
+                )
+            else:
+                names = ", ".join(str(path.parent) for path in matches)
+                error = f"multiple cached manifests for {dataset!r}: {names}"
+            log_error("prepare", error)
+            results.append(
+                {
+                    "dataset": dataset,
+                    "source_dir": None,
+                    "status": "error",
+                    "error": error,
+                }
+            )
+            continue
+
+        manifest_path = matches[0]
+        selected_manifests.add(manifest_path)
+        dataset_output_dir = manifest_path.parent
+        payload = _rebase_dataset_payload(
+            copy.deepcopy(payloads[manifest_path]),
+            dataset_output_dir=dataset_output_dir,
+            output_root=output_root,
+        )
+        dataset_samples, total_samples, skipped_count = (
+            _manifest_dataset_build_counts(manifest_path, dataset)
+        )
+        log_event(
+            "prepare",
+            (
+                f"reuse {dataset} | samples {fmt_count(dataset_samples)} | "
+                f"cached {manifest_path}"
+            ),
+            level=Verbosity.INFO,
+            dataset=dataset,
+            sample_count=dataset_samples,
+            manifest=str(manifest_path),
+        )
+        results.append(
+            {
+                "dataset": dataset,
+                "source_dir": None,
+                "dataset_output_dir": str(dataset_output_dir),
+                "status": "reused",
+                "manifest": str(manifest_path),
+                "payload": payload,
+                "sample_count": dataset_samples,
+                "manifest_total": total_samples,
+                "skipped_count": skipped_count,
+                "skipped_examples": _dataset_skipped_examples(
+                    dataset_output_dir, dataset, skipped_count
+                ),
+            }
+        )
+
+    built_any = _merge_isolated_dataset_results(
+        results,
+        output_root=output_root,
+        args=args,
+    )
+    return results, built_any
+
+
 def _build_datasets_parallel(
     datasets: list[str],
     *,
@@ -1137,46 +1321,11 @@ def _build_datasets_parallel(
     order = {dataset: index for index, dataset in enumerate(datasets)}
     results.sort(key=lambda item: order.get(item["dataset"], 10**9))
 
-    new_samples: list[dict[str, T.Any]] = []
-    skipped: list[dict[str, str]] = []
-    built_any = False
-    for record in results:
-        if record.get("status") == "error":
-            continue
-        built_any = True
-        payload = record.pop("payload", None) or {}
-        for sample in payload.get("samples", []):
-            if isinstance(sample, dict):
-                new_samples.append(sample)
-        skipped.extend(record.get("skipped_examples") or [])
-
-    if built_any:
-        # Merge in memory keyed on source identity (not image path) so a repeated
-        # --manifest-mode merge in parallel mode never doubles samples, then write
-        # once as a replace. _write_manifest still applies its image-path dedupe
-        # for cross-dataset overlap when --allow-overlap is not set.
-        deduped: dict[tuple[T.Any, ...], dict[str, T.Any]] = {}
-        if args.manifest_mode == "merge":
-            combined_manifest = output_root / "manifest.json"
-            if combined_manifest.is_file():
-                existing = read_json(combined_manifest)
-                for sample in existing.get("samples", []):
-                    if isinstance(sample, dict):
-                        deduped[_merge_dedupe_key(sample)] = sample
-        # Freshly built samples win on a stable-key collision (current paths).
-        for sample in new_samples:
-            deduped[_merge_dedupe_key(sample)] = sample
-
-        builder._write_manifest(
-            output_root,
-            "multi_dataset",
-            "default",
-            list(deduped.values()),
-            mode="replace",
-            allow_overlap=args.allow_overlap,
-            scenarios=None,
-            skipped=skipped,
-        )
+    built_any = _merge_isolated_dataset_results(
+        results,
+        output_root=output_root,
+        args=args,
+    )
 
     return results, built_any
 
@@ -1266,11 +1415,16 @@ def _stage_combined_crops(
 
 def prepare(args: argparse.Namespace) -> int:
     _ensure_prepare_logging_defaults(args)
+    skip_build = bool(getattr(args, "skip_build", False))
     datasets = _normalize_prepare_datasets(args.datasets)
     if not datasets:
         log_error("prepare", "no datasets requested. Pass --datasets <id> [<id> ...].")
         return 2
-    if PRODUCTION_DATASET in datasets and getattr(args, "prod_dir", None) is None:
+    if (
+        not skip_build
+        and PRODUCTION_DATASET in datasets
+        and getattr(args, "prod_dir", None) is None
+    ):
         log_error("prepare", "dataset 'prod' requires --prod-dir.")
         return 2
     data_root = Path(args.data_root)
@@ -1278,7 +1432,13 @@ def prepare(args: argparse.Namespace) -> int:
     output_root.mkdir(parents=True, exist_ok=True)
 
     registry: dict[str, T.Any] | None = None
-    if not args.skip_download:
+    if skip_build:
+        log_event(
+            "prepare",
+            "skip build | reusing isolated manifests under _datasets",
+            level=Verbosity.INFO,
+        )
+    elif not args.skip_download:
         download_target_names = [
             dataset for dataset in datasets if dataset != PRODUCTION_DATASET
         ]
@@ -1347,7 +1507,14 @@ def prepare(args: argparse.Namespace) -> int:
     outer_workers, inner_workers = _resolve_parallel_budget(
         getattr(args, "dataset_workers", 1), args.workers, dataset_total
     )
-    if outer_workers > 1 and dataset_total > 1:
+    if skip_build:
+        results, built_any = _merge_existing_dataset_outputs(
+            datasets,
+            output_root=output_root,
+            args=args,
+        )
+        dataset_iter: list[str] = []
+    elif outer_workers > 1 and dataset_total > 1:
         # Outer parallelism builds each dataset in its own isolated output dir and
         # merges them serially; the serial loop below is skipped (empty iter).
         results, built_any = _build_datasets_parallel(
@@ -1688,6 +1855,15 @@ def _parser() -> argparse.ArgumentParser:
         "--skip-download",
         action="store_true",
         help="Reuse already-downloaded/extracted assets from --data-root.",
+    )
+    parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help=(
+            "Skip downloads and dataset builds, rebuild the combined manifest from "
+            "existing --output-root/_datasets manifests, then continue validation "
+            "and crop staging."
+        ),
     )
     parser.add_argument(
         "--skip-validate", action="store_true", help="Skip manifest validation."

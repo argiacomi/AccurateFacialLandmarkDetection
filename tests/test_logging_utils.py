@@ -350,12 +350,14 @@ def test_prepare_parser_accepts_shared_logging_flags():
             "--log-level",
             "verbose",
             "--no-progress",
+            "--skip-build",
         ]
     )
 
     assert args.log_format == "json"
     assert args.log_level == "verbose"
     assert args.progress is False
+    assert args.skip_build is True
 
 
 def test_dataset_track_disabled_under_capture():
