@@ -5,7 +5,8 @@ This command stitches together the existing downloader and manifest builder so a
 user can go from "download" to "training-ready manifest" without manually
 plumbing source/cache paths between tools. For each requested dataset it will:
 
-* download (or reuse cached) source archives into a default data root,
+* download (or reuse cached) source archives into a default data root when needed,
+* accept local production data via ``--datasets prod --prod-dir ...``,
 * resolve the extracted source directory from the downloader registry,
 * stage multi-archive datasets (e.g. JD-landmark) into a single source root,
 * build the CD-ViT manifest (extracting video frames when required),
@@ -19,6 +20,10 @@ Example::
     python tools/prepare_landmark_dataset.py \
       --datasets wflw-v \
       --write-overlays
+
+    python tools/prepare_landmark_dataset.py \
+      --datasets prod \
+      --prod-dir /path/to/production_dir_or_zip
 """
 
 # ruff: noqa: E402
@@ -39,6 +44,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lib.core.schema import (
+    head_name_for_schema,
+    point_count_for_schema,
+    projection_audit_for_schema,
+)
 from lib.datasets.hard_negative_mining import annotate_sample_bucket_in_place
 from lib.datasets.parallel import resolve_worker_count
 from lib.datasets.progress import concurrent_progress
@@ -54,10 +64,18 @@ from lib.logging_utils import (
 )
 from lib.manifest.validator import validate_training_manifest
 from tools import build_quality_dataset as builder
+from tools import build_production_validated_manifest as production_builder
 from tools import download_landmark_datasets as downloader
 from tools.stage_prepared_crops import stage_crops
 
 VIDEO_DATASETS = frozenset({"300vw", "wflw-v"})
+PRODUCTION_DATASET = production_builder.DEFAULT_DATASET
+PRODUCTION_DATASET_ALIASES = frozenset(
+    {"prod", "production", "production-validated", "production_validated"}
+)
+PREPARE_BUILDABLE_DATASETS = frozenset(
+    (*builder.SUPPORTED_DATASETS, PRODUCTION_DATASET)
+)
 # Datasets that are annotation layers over the existing 300W image cache.
 DATASETS_NEEDING_300W_IMAGES = frozenset({"helen"})
 # Datasets that are annotation layers over the native AFLW image cache.
@@ -79,6 +97,20 @@ def _short_list(values: T.Sequence[str], *, limit: int = 8) -> str:
     shown = list(values[:limit])
     suffix = f" +{len(values) - limit} more" if len(values) > limit else ""
     return ", ".join(shown) + suffix
+
+
+def _normalize_prepare_datasets(values: T.Iterable[str]) -> list[str]:
+    """Normalize downloader ids plus the local production dataset aliases."""
+
+    datasets: list[str] = []
+    for dataset in downloader.normalize_datasets(values):
+        key = str(dataset).strip().lower().replace("_", "-")
+        canonical = (
+            PRODUCTION_DATASET if key in PRODUCTION_DATASET_ALIASES else dataset
+        )
+        if canonical not in datasets:
+            datasets.append(canonical)
+    return datasets
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +328,14 @@ def _resolve_inputs(
     registry: dict[str, T.Any] | None,
     data_root: Path,
     image_root_override: str | None,
+    prod_dir: Path | None = None,
 ) -> tuple[Path | None, str | None]:
     """Return the (source_dir, image_root) the builder should use for a dataset."""
+    if dataset == PRODUCTION_DATASET:
+        if prod_dir is None:
+            raise ValueError("dataset 'prod' requires --prod-dir")
+        return Path(prod_dir).expanduser(), None
+
     image_root = image_root_override
     if dataset == "jd-landmark":
         source = _stage_jd_landmark(data_root, registry)
@@ -317,6 +355,102 @@ def _resolve_inputs(
 # ---------------------------------------------------------------------------
 # Build / validate
 # ---------------------------------------------------------------------------
+def _complete_production_sample_contract(sample: dict[str, T.Any]) -> None:
+    """Add the schema-aware training fields omitted by the standalone builder."""
+
+    source_schema = str(sample.get("source_schema") or "2d_68")
+    target_schema = str(sample.get("target_schema") or source_schema)
+    landmark_count = point_count_for_schema(target_schema)
+    head_name = head_name_for_schema(target_schema)
+    metadata = sample.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+        sample["metadata"] = metadata
+
+    split = str(sample.get("split") or metadata.get("split") or "train")
+    split_safe_id = str(
+        sample.get("split_safe_id")
+        or metadata.get("split_safe_id")
+        or sample.get("image")
+        or sample.get("sample_id")
+    )
+    mapping_audit = {
+        "status": "native",
+        "source_schema": source_schema,
+        "target_schema": target_schema,
+        "projection_to_68": projection_audit_for_schema(source_schema),
+    }
+
+    sample.update(
+        {
+            "source_schema": source_schema,
+            "target_schema": target_schema,
+            "landmark_count": landmark_count,
+            "head_name": head_name,
+            "split": split,
+            "split_safe_id": split_safe_id,
+            "mapping_audit": mapping_audit,
+        }
+    )
+    metadata.setdefault("dataset", PRODUCTION_DATASET)
+    metadata.setdefault("source_schema", source_schema)
+    metadata.setdefault("target_schema", target_schema)
+    metadata.setdefault("landmark_count", landmark_count)
+    metadata.setdefault("head_name", head_name)
+    metadata.setdefault("split", split)
+    metadata.setdefault("split_safe_id", split_safe_id)
+    metadata.setdefault("mapping_audit", mapping_audit)
+
+
+def _build_production_dataset(
+    source: Path,
+    output_dir: Path,
+    *,
+    mode: str,
+    args: argparse.Namespace,
+) -> Path:
+    """Build production data in isolation, then merge it into the main manifest."""
+
+    dataset_output_dir = output_dir / "_production_validated"
+    metadata = production_builder.build_manifest(
+        source,
+        dataset_output_dir,
+        dataset_name=PRODUCTION_DATASET,
+    )
+    payload = read_json(dataset_output_dir / "manifest.json")
+    payload = _rebase_dataset_payload(
+        payload,
+        dataset_output_dir=dataset_output_dir,
+        output_root=output_dir,
+    )
+    samples = [
+        sample for sample in payload.get("samples", []) if isinstance(sample, dict)
+    ]
+    for sample in samples:
+        _complete_production_sample_contract(sample)
+
+    skipped: list[dict[str, str]] = []
+    for key, reason in (
+        ("skipped_missing_image", "missing production source image"),
+        ("skipped_invalid_face", "invalid production face"),
+    ):
+        count = int(metadata.get(key, 0))
+        skipped.extend(
+            [{"sample_id": PRODUCTION_DATASET, "reason": reason}] * max(0, count)
+        )
+
+    return builder._write_manifest(
+        output_dir,
+        PRODUCTION_DATASET,
+        "default",
+        samples,
+        mode=mode,
+        allow_overlap=args.allow_overlap,
+        scenarios=None,
+        skipped=skipped,
+    )
+
+
 def _build_dataset(
     dataset: str,
     source: Path | None,
@@ -326,6 +460,11 @@ def _build_dataset(
     mode: str,
     args: argparse.Namespace,
 ) -> Path:
+    if dataset == PRODUCTION_DATASET:
+        if source is None:
+            raise ValueError("dataset 'prod' requires --prod-dir")
+        return _build_production_dataset(source, output_dir, mode=mode, args=args)
+
     # Guard before argparse: an unsupported id would otherwise hit the builder's
     # ``--dataset`` choices, printing a usage dump and raising SystemExit (which
     # bypasses the per-dataset error containment). Raise a clean, catchable error.
@@ -787,7 +926,13 @@ def _build_one_dataset_for_parallel(
         "dataset_output_dir": str(dataset_output_dir),
     }
 
-    source, image_root = _resolve_inputs(dataset, registry, data_root, args.image_root)
+    source, image_root = _resolve_inputs(
+        dataset,
+        registry,
+        data_root,
+        args.image_root,
+        getattr(args, "prod_dir", None),
+    )
     record["source_dir"] = str(source) if source else None
 
     index_label = f"{dataset_index:02d}/{dataset_total:02d}"
@@ -1121,9 +1266,12 @@ def _stage_combined_crops(
 
 def prepare(args: argparse.Namespace) -> int:
     _ensure_prepare_logging_defaults(args)
-    datasets = downloader.normalize_datasets(args.datasets)
+    datasets = _normalize_prepare_datasets(args.datasets)
     if not datasets:
         log_error("prepare", "no datasets requested. Pass --datasets <id> [<id> ...].")
+        return 2
+    if PRODUCTION_DATASET in datasets and getattr(args, "prod_dir", None) is None:
+        log_error("prepare", "dataset 'prod' requires --prod-dir.")
         return 2
     data_root = Path(args.data_root)
     output_root = Path(args.output_root)
@@ -1131,26 +1279,36 @@ def prepare(args: argparse.Namespace) -> int:
 
     registry: dict[str, T.Any] | None = None
     if not args.skip_download:
-        download_target_names = list(datasets)
+        download_target_names = [
+            dataset for dataset in datasets if dataset != PRODUCTION_DATASET
+        ]
         if any(d in DATASETS_NEEDING_300W_IMAGES for d in datasets):
             download_target_names.append("300w")
         if any(d in DATASETS_NEEDING_AFLW_IMAGES for d in datasets):
             download_target_names.append("aflw")
         download_targets = downloader.normalize_datasets(download_target_names)
-        log_event(
-            "download",
-            f"sources {len(download_targets)} | {_short_list(download_targets)}",
-        )
-        _, registry = downloader.download_datasets(
-            download_targets,
-            output_root=data_root,
-            extract=True,
-            force=args.force,
-            skip_checksum=args.skip_checksum,
-            keep_going=True,
-            # --dataset-workers also fans out the (I/O-bound) download/extract step.
-            workers=getattr(args, "dataset_workers", 1),
-        )
+        if download_targets:
+            log_event(
+                "download",
+                f"sources {len(download_targets)} | {_short_list(download_targets)}",
+            )
+            _, registry = downloader.download_datasets(
+                download_targets,
+                output_root=data_root,
+                extract=True,
+                force=args.force,
+                skip_checksum=args.skip_checksum,
+                keep_going=True,
+                # --dataset-workers also fans out the (I/O-bound) download/extract step.
+                workers=getattr(args, "dataset_workers", 1),
+            )
+        else:
+            registry = downloader.load_registry(data_root)
+            log_event(
+                "download",
+                "skipping download for local production dataset",
+                level=Verbosity.INFO,
+            )
     else:
         registry = downloader.load_registry(data_root)
 
@@ -1159,7 +1317,7 @@ def prepare(args: argparse.Namespace) -> int:
     # other datasets (merl-rav over AFLW). Drop any non-buildable id from the
     # build/merge list so it never reaches the builder's ``--dataset`` choices,
     # where it would otherwise trigger an argparse usage dump and SystemExit.
-    non_buildable = [d for d in datasets if d not in builder.SUPPORTED_DATASETS]
+    non_buildable = [d for d in datasets if d not in PREPARE_BUILDABLE_DATASETS]
     if non_buildable:
         log_event(
             "prepare",
@@ -1167,7 +1325,7 @@ def prepare(args: argparse.Namespace) -> int:
             level=Verbosity.INFO,
             skipped_non_buildable=non_buildable,
         )
-        datasets = [d for d in datasets if d in builder.SUPPORTED_DATASETS]
+        datasets = [d for d in datasets if d in PREPARE_BUILDABLE_DATASETS]
     if not datasets:
         log_error(
             "prepare",
@@ -1215,7 +1373,11 @@ def prepare(args: argparse.Namespace) -> int:
             # Resolution/staging runs inside the try so a single dataset's missing
             # source or staging error is contained rather than aborting the run.
             source, image_root = _resolve_inputs(
-                dataset, registry, data_root, args.image_root
+                dataset,
+                registry,
+                data_root,
+                args.image_root,
+                getattr(args, "prod_dir", None),
             )
             record["source_dir"] = str(source) if source else None
 
@@ -1444,6 +1606,17 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/prepared"),
         help="Combined manifest output root.",
+    )
+    parser.add_argument(
+        "--prod-dir",
+        "--production-dir",
+        dest="prod_dir",
+        type=Path,
+        default=None,
+        help=(
+            "Production source directory or .zip containing images and one .fsa "
+            "file. Required when --datasets includes prod."
+        ),
     )
     parser.add_argument(
         "--image-root",

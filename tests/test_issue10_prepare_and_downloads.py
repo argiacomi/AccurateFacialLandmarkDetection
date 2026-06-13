@@ -4,8 +4,10 @@ import argparse
 import contextlib
 import io
 import json
+import pickle
 import tarfile
 import zipfile
+import zlib
 from pathlib import Path
 
 import cv2
@@ -51,6 +53,23 @@ def _make_json_source(extracted: Path, *, dataset: str, count: int = 3) -> None:
     (extracted / "samples.json").write_text(
         json.dumps({"samples": samples}), encoding="utf-8"
     )
+
+
+def _make_production_source(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    image_name = "production_frame.jpg"
+    _write_image(root / image_name)
+    face = {
+        "landmarks_xy": _points68(),
+        "x": 20,
+        "y": 20,
+        "w": 216,
+        "h": 216,
+        "metadata": {"runtime_bucket": "normal"},
+    }
+    payload = {"__data__": {image_name: {"faces": [face]}}}
+    (root / "alignments.fsa").write_bytes(zlib.compress(pickle.dumps(payload)))
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +188,12 @@ def test_normalize_datasets_aliases_and_dedup():
 
 def test_normalize_datasets_all_expands():
     assert downloader.normalize_datasets(["all"]) == list(downloader.ALL_DATASETS)
+
+
+def test_normalize_prepare_datasets_accepts_prod_aliases():
+    assert prepare._normalize_prepare_datasets(
+        ["prod,production_validated", "production"]
+    ) == ["production_validated"]
 
 
 def test_unknown_dataset_raises():
@@ -430,6 +455,7 @@ def _prepare_args(**overrides) -> argparse.Namespace:
         datasets=["wflw-v"],
         data_root=overrides.get("data_root"),
         output_root=overrides.get("output_root"),
+        prod_dir=None,
         image_root=None,
         manifest_mode="replace",
         allow_overlap=False,
@@ -471,6 +497,80 @@ def test_prepare_wflwv_flow(tmp_path, capsys):
     assert "Per-dataset summary" in out
     assert "Combined manifest summary" in out
     assert "run_cdvit_manifest_training_pipeline.py --manifest" in out
+
+
+def test_prepare_prod_skips_download_and_uses_production_builder(
+    tmp_path, monkeypatch
+):
+    prod_dir = _make_production_source(tmp_path / "prod")
+    output_root = tmp_path / "out"
+
+    def unexpected_download(*args, **kwargs):
+        raise AssertionError("prod must not enter the downloader")
+
+    monkeypatch.setattr(downloader, "download_datasets", unexpected_download)
+    args = _prepare_args(
+        datasets=["prod"],
+        data_root=tmp_path / "data",
+        output_root=output_root,
+        prod_dir=prod_dir,
+        skip_download=False,
+    )
+
+    assert prepare.prepare(args) == 0
+
+    payload = json.loads((output_root / "manifest.json").read_text("utf-8"))
+    assert payload["metadata"]["dataset"] == "production_validated"
+    assert [sample["dataset"] for sample in payload["samples"]] == [
+        "production_validated"
+    ]
+    landmark_path = output_root / payload["samples"][0]["landmarks"]
+    assert landmark_path.is_file()
+
+
+@pytest.mark.parametrize(
+    ("datasets", "dataset_workers"),
+    [
+        (["wflw-v", "prod"], 1),
+        (["prod", "wflw-v"], 1),
+        (["wflw-v", "prod"], 2),
+    ],
+)
+def test_prepare_prod_merges_with_generic_dataset(
+    tmp_path, monkeypatch, datasets, dataset_workers
+):
+    monkeypatch.setattr(prepare.os, "cpu_count", lambda: 4)
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+    prod_dir = _make_production_source(tmp_path / "prod")
+    _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2)
+
+    args = _prepare_args(
+        datasets=datasets,
+        data_root=data_root,
+        output_root=output_root,
+        prod_dir=prod_dir,
+        dataset_workers=dataset_workers,
+    )
+
+    assert prepare.prepare(args) == 0
+
+    payload = json.loads((output_root / "manifest.json").read_text("utf-8"))
+    assert {sample["dataset"] for sample in payload["samples"]} == {
+        "wflw-v",
+        "production_validated",
+    }
+    assert payload["metadata"]["sample_count"] == 3
+
+
+def test_prepare_prod_requires_prod_dir(tmp_path):
+    args = _prepare_args(
+        datasets=["prod"],
+        data_root=tmp_path / "data",
+        output_root=tmp_path / "out",
+    )
+
+    assert prepare.prepare(args) == 2
 
 
 def test_resolve_parallel_budget_priority_and_cap(monkeypatch):
