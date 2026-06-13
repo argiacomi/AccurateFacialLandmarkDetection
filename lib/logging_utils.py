@@ -244,9 +244,7 @@ def start_training_progress(
         TextColumn("{task.fields[counts]}"),
         TextColumn("|"),
         TextColumn("loss {task.fields[loss]}"),
-        TextColumn("loc {task.fields[loc]}"),
-        TextColumn("heat {task.fields[heat]}"),
-        TextColumn("aux {task.fields[aux]}"),
+        TextColumn("{task.fields[components]}"),
         TextColumn("|"),
         TimeElapsedColumn(),
         TextColumn("/"),
@@ -261,8 +259,12 @@ def start_training_progress(
         total=max(int(total), 1),
         counts=f"0 / {fmt_count(total)}",
         loss="-",
+        components="-",
         loc="-",
         heat="-",
+        star="-",
+        cons="-",
+        vis="-",
         aux="-",
     )
     return progress, task_id
@@ -302,8 +304,23 @@ def update_training_progress(
     if loss is not None:
         update["loss"] = _progress_scalar(loss)
     if components is not None:
+        ordered_keys = ("loc", "heat", "star", "cons", "vis", "aux")
+        update["components"] = (
+            fmt_mapping(
+                components,
+                precision=3,
+                keys=ordered_keys,
+                omit_zero=False,
+            )
+            or "-"
+        )
+        # Keep the old individual fields populated for backward compatibility
+        # with any custom Rich column layout.
         update["loc"] = _progress_scalar(components.get("loc"))
         update["heat"] = _progress_scalar(components.get("heat"))
+        update["star"] = _progress_scalar(components.get("star"))
+        update["cons"] = _progress_scalar(components.get("cons"))
+        update["vis"] = _progress_scalar(components.get("vis"))
         update["aux"] = _progress_scalar(components.get("aux"))
     progress.update(task_id, **update)
 

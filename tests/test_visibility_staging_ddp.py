@@ -140,7 +140,7 @@ def test_ddp_backward_tolerates_unused_non_final_visibility_params():
             device_ids=None,  # CPU
             find_unused_parameters=True,
         )
-        optimizer = torch.optim.AdamW(ddp_model.parameters(), lr=0.0)
+        optimizer = torch.optim.AdamW(ddp_model.parameters(), lr=0.0, weight_decay=1e-3)
 
         # Two iterations are required for this to be a real guard: the DDP
         # reducer only detects an unused parameter from the *previous* step, so

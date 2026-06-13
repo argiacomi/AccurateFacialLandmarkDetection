@@ -548,7 +548,7 @@ def main():
                     level=Verbosity.QUIET,
                 )
 
-        optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr)
+        optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-3)
         scheduler = StepLR(optimizer, args.sched_step, gamma=0.5)
 
         best_nme = 99999
@@ -821,6 +821,26 @@ def main():
                 optimizer_step_start_time = start_timing(
                     device=device, synchronize=args.synchronize_runtime_timing
                 )
+                scaler.unscale_(optimizer)
+
+                grad_clip_start_time = start_timing(
+                    device=device, synchronize=args.synchronize_runtime_timing
+                )
+
+                torch.nn.utils.clip_grad_norm_(
+                    net.parameters(),
+                    max_norm=1.0,
+                )
+
+                if is_rank_zero():
+                    accumulate_timing(
+                        epoch_timing,
+                        "grad_clip_seconds",
+                        grad_clip_start_time,
+                        device=device,
+                        synchronize=args.synchronize_runtime_timing,
+                    )
+
                 scaler.step(optimizer)
                 if is_rank_zero():
                     accumulate_timing(
