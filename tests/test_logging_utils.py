@@ -318,6 +318,22 @@ def test_production_manifest_parser_accepts_shared_logging_flags():
     assert args.log_level == "quiet"
 
 
+def test_quality_manifest_parser_accepts_progress_flag():
+    from tools.build_quality_dataset import _parser
+
+    args = _parser().parse_args(
+        [
+            "--dataset",
+            "wflw",
+            "--output-dir",
+            "out",
+            "--no-progress",
+        ]
+    )
+
+    assert args.progress is False
+
+
 def test_hard_negative_parser_accepts_shared_logging_flags():
     from tools.build_hard_negative_manifest import _parser
 
@@ -417,3 +433,54 @@ def test_track_routes_concurrent_loops_into_one_shared_progress(monkeypatch):
     assert fake.tasks[1]["completed"] == 2
     # Each task is removed when its loop finishes so rows do not accumulate.
     assert set(fake.removed) == {0, 1}
+
+
+def test_quality_build_joins_parent_progress_display(monkeypatch, tmp_path):
+    from argparse import Namespace
+
+    import lib.datasets.build.orchestrator as orchestrator
+    import lib.datasets.progress as prog
+
+    class FakeProgress:
+        def __init__(self):
+            self.tasks = {}
+            self._next = 0
+            self.removed = []
+
+        def add_task(self, desc, total=None, **kwargs):
+            tid = self._next
+            self._next += 1
+            self.tasks[tid] = {"desc": desc, "total": total, "completed": 0}
+            return tid
+
+        def advance(self, tid, n=1):
+            self.tasks[tid]["completed"] += n
+
+        def update(self, tid, **kwargs):
+            self.tasks[tid].update(kwargs)
+
+        def remove_task(self, tid):
+            self.removed.append(tid)
+
+    fake = FakeProgress()
+    manifest = tmp_path / "manifest.json"
+    monkeypatch.setattr(prog, "_PROGRESS_ENABLED", True)
+    monkeypatch.setattr(prog, "_SHARED_PROGRESS", fake)
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_without_progress",
+        lambda args: manifest,
+    )
+
+    result = orchestrator.build(Namespace(dataset="wflw"))
+
+    assert result == manifest
+    assert prog._SHARED_PROGRESS is fake
+    assert list(fake.tasks.values()) == [
+        {
+            "desc": "Build wflw pipeline",
+            "total": 1,
+            "completed": 1,
+        }
+    ]
+    assert fake.removed == [0]

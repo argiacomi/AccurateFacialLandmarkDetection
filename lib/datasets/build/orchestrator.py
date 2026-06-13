@@ -7,6 +7,11 @@ import argparse
 import contextlib
 
 from lib.datasets.build.core import *  # noqa: F403
+from lib.datasets.progress import (
+    progress_group,
+    set_progress_enabled,
+    track as progress_track,
+)
 from lib.datasets.build.w300 import *  # noqa: F403
 from lib.datasets.build.helen import *  # noqa: F403
 from lib.datasets.build.lapa import *  # noqa: F403
@@ -38,7 +43,7 @@ def _source_context(
         yield None
 
 
-def build(args: argparse.Namespace) -> Path:
+def _build_without_progress(args: argparse.Namespace) -> Path:
     dataset = _dataset(args.dataset)
     if dataset not in SUPPORTED_DATASETS:
         raise ValueError(f"unsupported dataset {args.dataset!r}")
@@ -254,6 +259,24 @@ def build(args: argparse.Namespace) -> Path:
     return manifest_path
 
 
+def build(args: argparse.Namespace) -> Path:
+    """Build one dataset and join any parent-owned Rich progress display."""
+
+    dataset = _dataset(args.dataset)
+    with (
+        progress_group(transient=False),
+        progress_track(
+            desc=f"Build {dataset} pipeline",
+            total=1,
+            unit="dataset",
+            leave=True,
+        ) as pipeline_progress,
+    ):
+        manifest_path = _build_without_progress(args)
+        pipeline_progress.update(1)
+    return manifest_path
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=SUPPORTED_DATASETS)
@@ -290,6 +313,12 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Parallel workers for video frame extraction and overlay rendering (<=0 uses all CPUs).",
+    )
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show Rich progress tracking for the dataset build pipeline.",
     )
     parser.add_argument(
         "--no-39pt-profile",
@@ -386,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         verbosity_from_name(_quality_log_level_name(args.log_level)),
         args.log_format,
     )
+    set_progress_enabled(bool(args.progress))
     try:
         manifest = build(args)
     except KeyboardInterrupt:
