@@ -106,9 +106,7 @@ def _normalize_prepare_datasets(values: T.Iterable[str]) -> list[str]:
     datasets: list[str] = []
     for dataset in downloader.normalize_datasets(values):
         key = str(dataset).strip().lower().replace("_", "-")
-        canonical = (
-            PRODUCTION_DATASET if key in PRODUCTION_DATASET_ALIASES else dataset
-        )
+        canonical = PRODUCTION_DATASET if key in PRODUCTION_DATASET_ALIASES else dataset
         if canonical not in datasets:
             datasets.append(canonical)
     return datasets
@@ -1057,6 +1055,138 @@ def _merge_dedupe_key(sample: dict[str, T.Any]) -> tuple[T.Any, ...]:
     )
 
 
+def _manifest_artifact_path(manifest_path: Path, value: T.Any) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_absolute() else manifest_path.parent / path
+
+
+def _valid_prepared_image_hw(value: T.Any) -> bool:
+    try:
+        return len(value) == 2 and int(value[0]) > 0 and int(value[1]) > 0
+    except (IndexError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _load_existing_staged_crops(
+    manifest_path: Path,
+) -> dict[tuple[T.Any, ...], dict[str, T.Any]]:
+    """Cache valid staged references before a combined manifest is rebuilt."""
+
+    if not manifest_path.is_file():
+        return {}
+    try:
+        payload = read_json(manifest_path)
+    except Exception as err:  # noqa: BLE001
+        log_event(
+            "prepare",
+            f"ignore unreadable staged manifest {manifest_path}: {err}",
+            level=Verbosity.DEBUG,
+            manifest=str(manifest_path),
+            error=str(err),
+        )
+        return {}
+
+    cached: dict[tuple[T.Any, ...], dict[str, T.Any]] = {}
+    for sample in payload.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        prepared_image = sample.get("prepared_image")
+        prepared_path = _manifest_artifact_path(manifest_path, prepared_image)
+        if (
+            prepared_path is None
+            or not prepared_path.is_file()
+            or not _valid_prepared_image_hw(sample.get("prepared_image_orig_hw"))
+        ):
+            continue
+
+        metadata = sample.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        face_crop = metadata.get("stage_face_crop")
+        is_tight = isinstance(face_crop, dict) and bool(face_crop.get("enabled"))
+        snapshot: dict[str, T.Any] = {
+            "kind": "tight" if is_tight else "prepared",
+            "prepared_image": prepared_image,
+            "prepared_image_orig_hw": copy.deepcopy(
+                sample.get("prepared_image_orig_hw")
+            ),
+        }
+        if is_tight:
+            image_path = _manifest_artifact_path(manifest_path, sample.get("image"))
+            landmarks_path = _manifest_artifact_path(
+                manifest_path, sample.get("landmarks")
+            )
+            if (
+                image_path is None
+                or not image_path.is_file()
+                or landmarks_path is None
+                or not landmarks_path.is_file()
+            ):
+                continue
+            snapshot.update(
+                {
+                    "image": sample.get("image"),
+                    "landmarks": sample.get("landmarks"),
+                    "stage_face_crop": copy.deepcopy(face_crop),
+                }
+            )
+
+        key = _merge_dedupe_key(sample)
+        if key[1]:
+            cached[key] = snapshot
+    return cached
+
+
+def _restore_existing_staged_crops(
+    manifest_path: Path,
+    manifest_payload: T.Mapping[str, T.Any] | None,
+    cached: T.Mapping[tuple[T.Any, ...], T.Mapping[str, T.Any]],
+) -> tuple[int, int]:
+    """Restore valid staged references onto freshly rebuilt sample records."""
+
+    if not isinstance(manifest_payload, dict) or not cached:
+        return 0, 0
+    samples = manifest_payload.get("samples")
+    if not isinstance(samples, list):
+        return 0, 0
+
+    restored_prepared = 0
+    restored_tight = 0
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        snapshot = cached.get(_merge_dedupe_key(sample))
+        if snapshot is None:
+            continue
+
+        sample["prepared_image"] = snapshot["prepared_image"]
+        sample["prepared_image_orig_hw"] = copy.deepcopy(
+            snapshot["prepared_image_orig_hw"]
+        )
+        if snapshot.get("kind") != "tight":
+            restored_prepared += 1
+            continue
+
+        native_image = sample.get("image")
+        native_landmarks = sample.get("landmarks") or sample.get("ground_truth")
+        face_crop = copy.deepcopy(snapshot["stage_face_crop"])
+        face_crop["source_image"] = native_image
+        face_crop["source_landmarks"] = native_landmarks
+        metadata = sample.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata["stage_face_crop"] = face_crop
+        sample["metadata"] = metadata
+        sample["image"] = snapshot["image"]
+        sample["landmarks"] = snapshot["landmarks"]
+        restored_tight += 1
+
+    if restored_prepared or restored_tight:
+        write_json(manifest_path, manifest_payload, sort_keys=False)
+    return restored_prepared, restored_tight
+
+
 def _merge_isolated_dataset_results(
     results: T.Sequence[dict[str, T.Any]],
     *,
@@ -1137,9 +1267,7 @@ def _merge_existing_dataset_outputs(
 
     datasets_root = output_root / "_datasets"
     manifest_paths = (
-        sorted(datasets_root.glob("*/manifest.json"))
-        if datasets_root.is_dir()
-        else []
+        sorted(datasets_root.glob("*/manifest.json")) if datasets_root.is_dir() else []
     )
     payloads: dict[Path, dict[str, T.Any]] = {}
     datasets_by_manifest: dict[Path, set[str]] = {}
@@ -1201,8 +1329,8 @@ def _merge_existing_dataset_outputs(
             dataset_output_dir=dataset_output_dir,
             output_root=output_root,
         )
-        dataset_samples, total_samples, skipped_count = (
-            _manifest_dataset_build_counts(manifest_path, dataset)
+        dataset_samples, total_samples, skipped_count = _manifest_dataset_build_counts(
+            manifest_path, dataset
         )
         log_event(
             "prepare",
@@ -1385,7 +1513,7 @@ def _stage_combined_crops(
         ),
     )
     elapsed = time.time() - started_at
-    identical = stats["staged"] + stats["reused"]
+    identical = stats["staged"] + stats["existing"] + stats["reused"]
     total = identical + len(stats["mismatches"])
     mismatch_note = (
         f" | left native {fmt_count(len(stats['mismatches']))}"
@@ -1396,6 +1524,7 @@ def _stage_combined_crops(
         "prepare",
         (
             f"stage-crops | crops {fmt_count(stats['staged'])} unique | "
+            f"existing {fmt_count(stats['existing'])} | "
             f"reused {fmt_count(stats['reused'])} | "
             f"skipped 256x256 {fmt_count(stats['skipped_already_256'])} | "
             f"bit-identical {fmt_count(identical)}/{fmt_count(total)}{mismatch_note} | "
@@ -1403,6 +1532,7 @@ def _stage_combined_crops(
         ),
         level=Verbosity.INFO,
         staged=stats["staged"],
+        existing=stats["existing"],
         reused=stats["reused"],
         skipped_already_256=stats["skipped_already_256"],
         skipped_no_image=stats["skipped_no_image"],
@@ -1430,6 +1560,29 @@ def prepare(args: argparse.Namespace) -> int:
     data_root = Path(args.data_root)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    combined_manifest = output_root / "manifest.json"
+    existing_staged_crops = (
+        _load_existing_staged_crops(combined_manifest)
+        if getattr(args, "stage_crops", False)
+        and not getattr(args, "force_stage_crops", False)
+        else {}
+    )
+    if existing_staged_crops:
+        tight_count = sum(
+            snapshot.get("kind") == "tight"
+            for snapshot in existing_staged_crops.values()
+        )
+        log_event(
+            "prepare",
+            (
+                "found existing staged crops | "
+                f"tight {fmt_count(tight_count)} | "
+                f"prepared {fmt_count(len(existing_staged_crops) - tight_count)}"
+            ),
+            level=Verbosity.INFO,
+            staged_tight=tight_count,
+            staged_prepared=len(existing_staged_crops) - tight_count,
+        )
 
     registry: dict[str, T.Any] | None = None
     if skip_build:
@@ -1602,7 +1755,6 @@ def prepare(args: argparse.Namespace) -> int:
                 return 1
         results.append(record)
 
-    combined_manifest = output_root / "manifest.json"
     combined_payload = (
         read_json(combined_manifest) if combined_manifest.is_file() else None
     )
@@ -1615,6 +1767,24 @@ def prepare(args: argparse.Namespace) -> int:
             combined_manifest,
             combined_payload,
         )
+    if built_any and existing_staged_crops:
+        restored_prepared, restored_tight = _restore_existing_staged_crops(
+            combined_manifest,
+            combined_payload,
+            existing_staged_crops,
+        )
+        if restored_prepared or restored_tight:
+            log_event(
+                "prepare",
+                (
+                    "reuse staged crops | "
+                    f"tight {fmt_count(restored_tight)} | "
+                    f"prepared {fmt_count(restored_prepared)}"
+                ),
+                level=Verbosity.INFO,
+                staged_tight=restored_tight,
+                staged_prepared=restored_prepared,
+            )
     report: dict[str, T.Any] | None = None
     if built_any and not args.skip_validate:
         log_event(

@@ -87,6 +87,42 @@ def _resolve(base_dir: Path, value: str) -> str:
     return str((base_dir / path).resolve())
 
 
+def _valid_prepared_image_hw(value: T.Any) -> bool:
+    try:
+        return len(value) == 2 and int(value[0]) > 0 and int(value[1]) > 0
+    except (IndexError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _existing_prepared_crop(entry: T.Mapping[str, T.Any], base_dir: Path) -> str:
+    prepared = entry.get("prepared_image")
+    if not prepared or not _valid_prepared_image_hw(
+        entry.get("prepared_image_orig_hw")
+    ):
+        return ""
+    resolved = _resolve(base_dir, str(prepared))
+    return resolved if Path(resolved).is_file() else ""
+
+
+def _existing_tight_face_crop(
+    entry: T.Mapping[str, T.Any],
+    metadata: T.Mapping[str, T.Any],
+    base_dir: Path,
+) -> bool:
+    stage_metadata = metadata.get("stage_face_crop")
+    if not isinstance(stage_metadata, dict) or not stage_metadata.get("enabled"):
+        return False
+    image = _resolve(base_dir, str(entry.get("image") or ""))
+    landmarks = _resolve(base_dir, str(entry.get("landmarks") or ""))
+    return bool(
+        image
+        and Path(image).is_file()
+        and landmarks
+        and Path(landmarks).is_file()
+        and _existing_prepared_crop(entry, base_dir)
+    )
+
+
 def _sanitize(text: str) -> str:
     keep = [c if (c.isalnum() or c in "-_.") else "_" for c in str(text)]
     return "".join(keep).strip("_") or "image"
@@ -175,11 +211,32 @@ def _stage_tight_face_crop_for_entry(
 
     metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
     existing = metadata.get("stage_face_crop")
-    if isinstance(existing, dict) and existing.get("enabled"):
+    if (
+        not force
+        and isinstance(existing, dict)
+        and existing.get("enabled")
+        and _existing_tight_face_crop(entry, metadata, base_dir)
+    ):
         return "skipped_existing", None
 
-    image_value = entry.get("image")
-    landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
+    image_value = (
+        existing.get("source_image")
+        if isinstance(existing, dict) and existing.get("enabled")
+        else entry.get("image")
+    )
+    landmarks_value = (
+        existing.get("source_landmarks")
+        if isinstance(existing, dict) and existing.get("enabled")
+        else entry.get("landmarks") or entry.get("ground_truth")
+    )
+    if isinstance(existing, dict) and existing.get("enabled"):
+        metadata = dict(metadata)
+        metadata.pop("stage_face_crop", None)
+        entry["metadata"] = metadata
+        entry["image"] = image_value
+        entry["landmarks"] = landmarks_value
+        entry.pop("prepared_image", None)
+        entry.pop("prepared_image_orig_hw", None)
     if not image_value or not landmarks_value:
         return "failed", {
             "index": index,
@@ -435,7 +492,7 @@ def stage_crops(
         else None
     )
 
-    staged = skipped_already_256 = skipped_no_image = reused = 0
+    staged = existing_prepared = skipped_already_256 = skipped_no_image = reused = 0
     mismatches: list[str] = []
     geometry_issues: list[dict[str, T.Any]] = []
     suspicious_geometry: list[dict[str, T.Any]] = []
@@ -641,6 +698,8 @@ def stage_crops(
     # decode/resize/validate the per-sample ``crop_for_native`` cache used to
     # avoid serially.
     groups: dict[str, list[dict]] = {}
+    existing_prepared_paths: set[str] = set()
+    existing_prepared_samples = 0
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -648,6 +707,17 @@ def stage_crops(
             continue
         dataset = str(entry.get("dataset") or "").strip()
         if dataset_filter is not None and dataset.lower() not in dataset_filter:
+            continue
+        metadata = (
+            entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        )
+        stage_face_crop = metadata.get("stage_face_crop")
+        if isinstance(stage_face_crop, dict) and stage_face_crop.get("enabled"):
+            continue
+        prepared_path = "" if force else _existing_prepared_crop(entry, base_dir)
+        if prepared_path:
+            existing_prepared_paths.add(prepared_path)
+            existing_prepared_samples += 1
             continue
         image_value = entry.get("image")
         landmarks_value = entry.get("landmarks") or entry.get("ground_truth")
@@ -777,6 +847,9 @@ def stage_crops(
         else:  # "mismatch"; strict mode already raised inside the worker
             mismatches.extend([result.image_path] * len(group))
 
+    existing_prepared = len(existing_prepared_paths)
+    reused += existing_prepared_samples - existing_prepared
+
     out_manifest.parent.mkdir(parents=True, exist_ok=True)
     out_manifest.write_text(
         json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8"
@@ -787,7 +860,7 @@ def stage_crops(
         "prepare",
         (
             f"stage crops done | crops {staged} unique | face cropped {face_cropped} | "
-            f"reused {reused} | "
+            f"existing {existing_prepared} | reused {reused} | "
             f"skipped 256x256 {skipped_already_256} | "
             f"skipped missing {skipped_no_image} | mismatches {len(mismatches)} | "
             f"geometry invalid {len(geometry_issues)} | "
@@ -796,6 +869,7 @@ def stage_crops(
         ),
         level=Verbosity.INFO,
         staged=staged,
+        existing=existing_prepared,
         face_cropped=face_cropped,
         face_crop_existing=face_crop_skipped_existing,
         face_crop_failed=face_crop_failed,
@@ -817,6 +891,7 @@ def stage_crops(
         "out_manifest": str(out_manifest),
         "images_root": str(images_root),
         "staged": staged,
+        "existing": existing_prepared,
         "face_cropped": face_cropped,
         "face_crop_existing": face_crop_skipped_existing,
         "face_crop_failed": face_crop_failed,
@@ -863,6 +938,7 @@ def stage_manifest(args: argparse.Namespace) -> int:
     print(f"out manifest    : {stats['out_manifest']}")
     print(f"crops dir       : {stats['images_root']}")
     print(f"staged crops    : {staged} (unique native images)")
+    print(f"existing crops  : {stats['existing']} (unique prepared images)")
     if (
         stats.get("face_cropped")
         or stats.get("face_crop_existing")
@@ -879,7 +955,8 @@ def stage_manifest(args: argparse.Namespace) -> int:
         f"skipped 256x256 : {stats['skipped_already_256']} (native path already cheap)"
     )
     print(f"skipped no image: {stats['skipped_no_image']}")
-    print(f"bit-identity OK : {staged + reused}/{staged + reused + len(mismatches)}")
+    identical = staged + stats["existing"] + reused
+    print(f"bit-identity OK : {identical}/{identical + len(mismatches)}")
     if mismatches:
         print(f"mismatched (left native): {len(mismatches)}")
         for path in mismatches[:10]:
