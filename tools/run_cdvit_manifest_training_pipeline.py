@@ -1367,6 +1367,7 @@ def _train_stage_outputs(args: argparse.Namespace, paths: PipelinePaths) -> list
     ]
     if bool(args.save_last_checkpoint):
         outputs.append(str(ckpt_folder / "last_checkpoint.pt"))
+        outputs.append(str(ckpt_folder / "last_checkpoint.weights.pt"))
     if int(args.eval_every or 0) > 0:
         outputs.append(str(ckpt_folder / "best.weights.pt"))
         outputs.append(str(ckpt_folder / "best_checkpoint.pt"))

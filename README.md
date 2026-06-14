@@ -216,7 +216,7 @@ For standalone checkpoint evaluation, pass `--schema-aware-model` to construct t
 
 ```bash
 python tools/evaluate_cdvit_manifest.py \
-  --checkpoint runs/landmarks/cdvit/best_model \
+  --checkpoint runs/landmarks/cdvit/best.weights.pt \
   --manifest runs/landmarks/cdvit_fs68_hard/hard_negative_mix/manifest.json \
   --schema-aware-model \
   --eval-report-json runs/landmarks/eval/report.json
@@ -232,7 +232,7 @@ The pipeline forwards runtime flags to `TrainHeatmapStageFP16.py` so long runs c
 
 - Data loading: `--preload 0`, `--pin-memory`, `--persistent-workers`, and `--prefetch-factor`.
 - Evaluation cadence: `--eval-every`, `--full-eval-every`, `--eval-ema-every`, and `--eval-max-samples`.
-- Checkpoints: `last_checkpoint.pt`, `best_checkpoint.pt`, metadata sidecars, manifest/config compatibility checks, and optional `--restore-rng`.
+- Checkpoints: `last_checkpoint.pt`, `last_checkpoint.weights.pt`, `best_checkpoint.pt`, `best.weights.pt`, metadata sidecars, manifest/config compatibility checks, and optional `--restore-rng`.
 - Metrics: `runtime_metrics.jsonl` records epoch throughput, CUDA memory, data wait, device transfer, forward/loss, backward, optimizer step, scaler update, eval, EMA eval, checkpoint, aggregate compute, unattributed, and total epoch timing. CUDA transfer/compute/eval sections use CUDA event timing by default through `--synchronize-runtime-timing`; pass `--no-synchronize-runtime-timing` for low-overhead CPU wall-clock timing. Checkpoint timing includes periodic, legacy, best, EMA-best, and last-checkpoint writes.
 
 ### Console output vs metrics files

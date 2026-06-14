@@ -186,12 +186,14 @@ class _RichTrack(T.Generic[_T]):
         unit_scale: bool,
         leave: bool,
         force_terminal: bool,
+        preserve_output: bool,
     ) -> None:
         self._iterable = iterable
         self._desc = desc
         self.total = total
         self.n: int | float = 0
         self._leave = leave
+        self._preserve_output = preserve_output
         self._unit = unit
         self._unit_scale = unit_scale
         self._force_terminal = force_terminal
@@ -227,7 +229,7 @@ class _RichTrack(T.Generic[_T]):
                 soft_wrap=False,
                 force_terminal=self._force_terminal,
             ),
-            transient=not self._leave,
+            transient=not (self._leave or self._preserve_output),
             expand=False,
         )
         self._progress.start()
@@ -493,4 +495,5 @@ def track(
         unit_scale=unit_scale,
         leave=leave,
         force_terminal=forced or not stderr_is_tty,
+        preserve_output=forced and not stderr_is_tty,
     )

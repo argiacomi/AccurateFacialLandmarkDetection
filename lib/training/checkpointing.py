@@ -180,15 +180,18 @@ def _save_training_checkpoint(
     best_nme: T.Any,
     best_record: T.Any,
     args: T.Any,
+    *,
+    weights_path: str | Path | None = None,
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path = training_manifest_path_for_compat(args)
+    model_state = _model_state(net)
     payload: dict[str, T.Any] = {
         "format": "cdvit-training-checkpoint-v1",
         "epoch": int(epoch),
         "next_epoch": int(epoch) + 1,
-        "model": _model_state(net),
+        "model": model_state,
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "scaler": scaler.state_dict() if scaler is not None else None,
@@ -207,6 +210,10 @@ def _save_training_checkpoint(
         payload["ema_n_iter"] = int(getattr(ema, "n_iter", 0))
     torch.save(payload, path)
     _write_checkpoint_metadata(path, payload)
+    if weights_path is not None:
+        weights_path = Path(weights_path)
+        weights_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model_state, weights_path)
 
 
 def _restore_training_checkpoint(

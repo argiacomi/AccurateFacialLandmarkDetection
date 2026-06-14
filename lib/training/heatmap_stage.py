@@ -222,12 +222,11 @@ def _log_schema_head_details(loss_details) -> None:
 
 
 def _save_best_weights(state_dict, ckpt_folder: str | os.PathLike[str]) -> None:
-    """Write explicit best weights and the legacy best_model compatibility copy."""
+    """Write the best model weights."""
 
     ckpt_path = Path(ckpt_folder)
     ckpt_path.mkdir(parents=True, exist_ok=True)
     torch.save(state_dict, ckpt_path / "best.weights.pt")
-    torch.save(state_dict, ckpt_path / "best_model")
 
 
 def _is_schema_extension_key(key: str) -> bool:
@@ -1241,6 +1240,8 @@ def main():
                         best_nme,
                         best_record,
                         args,
+                        weights_path=Path(args.ckpt_folder)
+                        / "last_checkpoint.weights.pt",
                     )
 
                 final_epoch_timing = finalize_epoch_timing(

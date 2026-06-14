@@ -109,6 +109,7 @@ def test_train_stage_signature_controls_train_skip(tmp_path: Path) -> None:
         json.dumps(payload) + "\n", encoding="utf-8"
     )
     (ckpt_dir / "last_checkpoint.pt").write_bytes(b"last")
+    (ckpt_dir / "last_checkpoint.weights.pt").write_bytes(b"last weights")
     (ckpt_dir / "best.weights.pt").write_bytes(b"weights")
     (ckpt_dir / "best_checkpoint.pt").write_bytes(b"checkpoint")
 

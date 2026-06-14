@@ -273,14 +273,44 @@ def test_allow_missing_schema_heads_only_accepts_schema_extension_keys():
         train._load_resume_model_state(net, bad_state, args)
 
 
-def test_save_best_weights_writes_explicit_and_legacy_names(tmp_path):
+def test_save_best_weights_writes_only_explicit_name(tmp_path):
     state = {"weight": torch.tensor([1.0])}
     ckpt_dir = tmp_path / "ckpt"
 
     train._save_best_weights(state, ckpt_dir)
 
     assert (ckpt_dir / "best.weights.pt").is_file()
-    assert (ckpt_dir / "best_model").is_file()
+    assert not (ckpt_dir / "best_model").exists()
+
+
+def test_save_training_checkpoint_writes_paired_weights_file(tmp_path):
+    args = _trainer_args(tmp_path)
+    model = torch.nn.Linear(2, 1)
+    checkpoint_path = tmp_path / "ckpt" / "last_checkpoint.pt"
+    weights_path = tmp_path / "ckpt" / "last_checkpoint.weights.pt"
+
+    train._save_training_checkpoint(
+        checkpoint_path,
+        model,
+        None,
+        None,
+        None,
+        None,
+        2,
+        0.1,
+        [(2, 10.0)],
+        args,
+        weights_path=weights_path,
+    )
+
+    checkpoint = train._torch_load_training_checkpoint(checkpoint_path, "cpu")
+    weights = train._torch_load_training_checkpoint(weights_path, "cpu")
+
+    assert checkpoint["format"] == "cdvit-training-checkpoint-v1"
+    assert weights.keys() == model.state_dict().keys()
+    assert all(
+        torch.equal(weights[key], value) for key, value in model.state_dict().items()
+    )
 
 
 def test_pipeline_auto_resume_accepts_matching_full_checkpoint_metadata(tmp_path):

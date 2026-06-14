@@ -98,7 +98,10 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         "--save-last-checkpoint",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Write <ckpt_folder>/last_checkpoint.pt after each epoch.",
+        help=(
+            "Write <ckpt_folder>/last_checkpoint.pt and "
+            "last_checkpoint.weights.pt after each epoch."
+        ),
     )
     parser.add_argument(
         "--save-legacy-epoch-state-dict",
