@@ -30,6 +30,8 @@
         "heatmap_size": 32,
         "lmk_num": 68,
         "lr": 0.0001,
+        "roll_quarter_turn_prob": 0.4,
+        "roll_diagonal_prob": 0.1,
         "train_arg": ["--schema-aware-training", "--auxiliary-heads"]
     },
     "runtime": {

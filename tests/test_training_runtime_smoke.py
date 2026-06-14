@@ -67,6 +67,8 @@ def _trainer_args(tmp_path: Path, **overrides):
         "heldout_dataset": [],
         "restore_rng": False,
         "synchronize_runtime_timing": True,
+        "roll_quarter_turn_prob": 0.4,
+        "roll_diagonal_prob": 0.1,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -214,6 +216,8 @@ def test_typed_training_config_snapshots_from_args(tmp_path):
     assert eval_config.eval_ema_scope == "full-only"
     assert eval_config.eval_progress is False
     assert dataset.data_name == "FS68Manifest"
+    assert dataset.roll_quarter_turn_prob == 0.4
+    assert dataset.roll_diagonal_prob == 0.1
     assert config_dict(eval_config)["eval_ema_scope"] == "full-only"
 
 
@@ -244,6 +248,10 @@ def test_heatmap_stage_cli_builder_exposes_schema_loss_and_resume_flags():
             "landmarks_98=1.5",
             "--star-loss-weight",
             "0.01",
+            "--roll-quarter-turn-prob",
+            "0.5",
+            "--roll-diagonal-prob",
+            "0.2",
         ]
     )
 
@@ -251,6 +259,8 @@ def test_heatmap_stage_cli_builder_exposes_schema_loss_and_resume_flags():
     assert args.schema_head_loss_weighting == "per_head"
     assert args.schema_head_loss_weights == "landmarks_98=1.5"
     assert args.star_loss_weight == 0.01
+    assert args.roll_quarter_turn_prob == 0.5
+    assert args.roll_diagonal_prob == 0.2
 
 
 def test_allow_missing_schema_heads_only_accepts_schema_extension_keys():
@@ -371,6 +381,10 @@ def test_pipeline_train_command_forwards_runtime_flags(tmp_path):
         "10",
         "--eval-max-samples",
         "128",
+        "--roll-quarter-turn-prob",
+        "0.5",
+        "--roll-diagonal-prob",
+        "0.2",
         "--no-save-last-checkpoint",
         "--runtime-metrics-jsonl",
         str(tmp_path / "metrics.jsonl"),
@@ -385,6 +399,8 @@ def test_pipeline_train_command_forwards_runtime_flags(tmp_path):
     assert command[command.index("--full-eval-every") + 1] == "20"
     assert command[command.index("--eval-ema-every") + 1] == "10"
     assert command[command.index("--eval-max-samples") + 1] == "128"
+    assert command[command.index("--roll-quarter-turn-prob") + 1] == "0.5"
+    assert command[command.index("--roll-diagonal-prob") + 1] == "0.2"
     assert "--no-save-last-checkpoint" in command
     assert "--synchronize-runtime-timing" in command
     assert "--no-synchronize-runtime-timing" not in command
@@ -400,3 +416,18 @@ def test_pipeline_compat_config_honors_train_arg_override(tmp_path):
         "--train-arg=32",
     )
     assert pipeline._pipeline_training_compat_config(args, paths)["batch_size"] == 32
+
+
+def test_pipeline_compat_config_tracks_roll_augmentation(tmp_path):
+    args, paths = _pipeline_args(
+        tmp_path,
+        "--roll-quarter-turn-prob",
+        "0.5",
+        "--roll-diagonal-prob",
+        "0.2",
+    )
+
+    compat = pipeline._pipeline_training_compat_config(args, paths)
+
+    assert compat["roll_quarter_turn_prob"] == 0.5
+    assert compat["roll_diagonal_prob"] == 0.2

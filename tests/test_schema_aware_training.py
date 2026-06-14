@@ -10,7 +10,7 @@ import pytest
 import torch
 
 augmentation_stub = types.ModuleType("ImageAugmentation")
-augmentation_stub.GetAugTransform = lambda: None
+augmentation_stub.GetAugTransform = lambda **_kwargs: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 from lib.core.schema import (
@@ -76,7 +76,9 @@ def test_profile39_schema_aware_augmentation_skips_horizontal_flip_without_audit
 
     import lib.datasets.manifest as manifest_module
 
-    monkeypatch.setattr(manifest_module, "GetAugTransform", lambda: IdentityAug())
+    monkeypatch.setattr(
+        manifest_module, "GetAugTransform", lambda **_kwargs: IdentityAug()
+    )
     monkeypatch.setattr(np.random, "random", lambda: 0.0)
 
     points = np.stack([np.linspace(32, 224, 39), np.linspace(40, 216, 39)], axis=1)

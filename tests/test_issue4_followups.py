@@ -11,7 +11,7 @@ import pytest
 import torch
 
 augmentation_stub = types.ModuleType("ImageAugmentation")
-augmentation_stub.GetAugTransform = lambda: None
+augmentation_stub.GetAugTransform = lambda **_kwargs: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 cv2 = pytest.importorskip("cv2")
@@ -127,7 +127,9 @@ def test_visibility_target_is_reindexed_when_schema_sample_is_flipped(
         def __call__(self, *, image, keypoints):
             return {"image": image, "keypoints": keypoints}
 
-    monkeypatch.setattr(manifest_module, "GetAugTransform", lambda: IdentityAug())
+    monkeypatch.setattr(
+        manifest_module, "GetAugTransform", lambda **_kwargs: IdentityAug()
+    )
     monkeypatch.setattr(np.random, "random", lambda: 0.0)
 
     image = np.full((256, 256, 3), 127, dtype=np.uint8)
@@ -245,7 +247,9 @@ def test_manifest_occluder_mask_follows_geometric_augmentation(tmp_path, monkeyp
 
             return output
 
-    monkeypatch.setattr(manifest_module, "GetAugTransform", lambda: ShiftRightAug())
+    monkeypatch.setattr(
+        manifest_module, "GetAugTransform", lambda **_kwargs: ShiftRightAug()
+    )
     monkeypatch.setattr(np.random, "random", lambda: 1.0)
 
     image = np.full((256, 256, 3), 127, dtype=np.uint8)

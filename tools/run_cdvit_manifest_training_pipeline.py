@@ -59,7 +59,13 @@ from lib.training.checkpoint_compat import (
     checkpoint_compat_errors_for_config,
     training_compat_digest_from_config,
 )
-from lib.training.config import PipelineConfig, config_dict
+from lib.training.config import (
+    DEFAULT_ROLL_DIAGONAL_PROB,
+    DEFAULT_ROLL_QUARTER_TURN_PROB,
+    PipelineConfig,
+    config_dict,
+    validate_roll_augmentation_probs,
+)
 
 TOOLS_ROOT = CDVIT_ROOT / "tools"
 DEFAULT_DATASETS = "wflw,cofw68,merl-rav,aflw2000-3d,300w,menpo2d,multipie"
@@ -910,6 +916,10 @@ def _load_checkpoint_metadata(path: Path) -> dict[str, T.Any] | None:
 
 
 def _normalize_runtime_args(args: argparse.Namespace) -> argparse.Namespace:
+    validate_roll_augmentation_probs(
+        args.roll_quarter_turn_prob,
+        args.roll_diagonal_prob,
+    )
     if args.restore_rng and args.persistent_workers:
         log_event(
             "pipeline",
@@ -1151,6 +1161,10 @@ def _train_command(args: argparse.Namespace, paths: PipelinePaths) -> list[str]:
         str(args.lmk_num),
         "--lr",
         str(args.lr),
+        "--roll-quarter-turn-prob",
+        str(args.roll_quarter_turn_prob),
+        "--roll-diagonal-prob",
+        str(args.roll_diagonal_prob),
     ]
     argv.extend(["--preload", str(args.preload)])
     argv.append("--pin-memory" if args.pin_memory else "--no-pin-memory")
@@ -1699,6 +1713,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Runtime metrics JSONL path. Defaults to <run-root>/runtime_metrics.jsonl.",
     )
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--roll-quarter-turn-prob",
+        type=float,
+        default=DEFAULT_ROLL_QUARTER_TURN_PROB,
+        help=(
+            "Total training probability for exact -90/+90 degree rotations, "
+            "split evenly between directions."
+        ),
+    )
+    parser.add_argument(
+        "--roll-diagonal-prob",
+        type=float,
+        default=DEFAULT_ROLL_DIAGONAL_PROB,
+        help=(
+            "Total training probability for exact -45/+45 degree rotations, "
+            "split evenly between directions."
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=12)
     parser.add_argument("--preload", type=int, default=0)
     parser.add_argument(

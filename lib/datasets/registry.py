@@ -25,6 +25,8 @@ def GetDataset(
     include_metadata=False,
     schema_aware_training=False,
     split_policy="declared_or_random_hash",
+    roll_quarter_turn_prob=0.4,
+    roll_diagonal_prob=0.1,
 ):
     if IsSchemaAwareManifestDataset(name):
         return DMultiSchemaLandmarkManifest(
@@ -39,6 +41,8 @@ def GetDataset(
             include_metadata=include_metadata,
             schema_aware_training=schema_aware_training,
             split_policy=split_policy,
+            roll_quarter_turn_prob=roll_quarter_turn_prob,
+            roll_diagonal_prob=roll_diagonal_prob,
         )
     raise ValueError(f"unknown dataset name: {name}")
 

@@ -5,6 +5,10 @@ from __future__ import annotations
 import argparse
 
 from lib.evaluation.split_safe import EVAL_MODES, SPLIT_POLICIES
+from lib.training.config import (
+    DEFAULT_ROLL_DIAGONAL_PROB,
+    DEFAULT_ROLL_QUARTER_TURN_PROB,
+)
 
 
 def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
@@ -85,6 +89,28 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--log-every", type=int, default=20)
+    parser.add_argument(
+        "--roll-quarter-turn-prob",
+        "--roll_quarter_turn_prob",
+        dest="roll_quarter_turn_prob",
+        type=float,
+        default=DEFAULT_ROLL_QUARTER_TURN_PROB,
+        help=(
+            "Total training probability for exact -90/+90 degree rotations, "
+            "split evenly between directions."
+        ),
+    )
+    parser.add_argument(
+        "--roll-diagonal-prob",
+        "--roll_diagonal_prob",
+        dest="roll_diagonal_prob",
+        type=float,
+        default=DEFAULT_ROLL_DIAGONAL_PROB,
+        help=(
+            "Total training probability for exact -45/+45 degree rotations, "
+            "split evenly between directions. Remaining probability stays upright."
+        ),
+    )
     parser.add_argument(
         "--train-progress",
         action=argparse.BooleanOptionalAction,

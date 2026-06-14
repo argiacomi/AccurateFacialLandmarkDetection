@@ -173,6 +173,7 @@ def test_slice_report_includes_required_metrics_and_ci():
                 "by_pose_bucket": "profile_left",
                 "by_occlusion": "no_occlusion",
                 "by_profile_side": "left",
+                "by_roll_bucket": "horizontal",
                 "by_face_size": "medium",
                 "by_production_source": "unknown",
             },
@@ -184,6 +185,7 @@ def test_slice_report_includes_required_metrics_and_ci():
                 "by_pose_bucket": "frontal",
                 "by_occlusion": "occlusion",
                 "by_profile_side": "not_profile",
+                "by_roll_bucket": "upright",
                 "by_face_size": "large",
                 "by_production_source": "unknown",
             },
@@ -197,6 +199,8 @@ def test_slice_report_includes_required_metrics_and_ci():
     assert overall["auc"] is not None
     assert overall["nme_ci95"]["low"] is not None
     assert report["by_dataset"]["wflw"]["sample_count"] == 2
+    assert report["by_roll_bucket"]["horizontal"]["sample_count"] == 1
+    assert report["by_roll_bucket"]["upright"]["sample_count"] == 1
 
 
 def test_slice_report_includes_visible_occluded_and_visibility_metrics():
@@ -318,6 +322,22 @@ def test_face_size_bucket_respects_explicit_bbox_format():
         slice_labels({"bbox": {"x": 0, "y": 0, "w": 129, "h": 129}})["by_face_size"]
         == "large"
     )
+
+
+@pytest.mark.parametrize(
+    ("roll", "expected"),
+    [
+        (0.0, "upright"),
+        (29.9, "upright"),
+        (-30.0, "diagonal"),
+        (69.9, "diagonal"),
+        (70.0, "horizontal"),
+        (-90.0, "horizontal"),
+        (None, "unknown"),
+    ],
+)
+def test_roll_bucket_uses_horizontal_face_thresholds(roll, expected):
+    assert slice_labels({"pose_roll_deg": roll})["by_roll_bucket"] == expected
 
 
 def test_eval_records_jsonl_can_be_written(tmp_path):

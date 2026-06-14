@@ -15,7 +15,7 @@ from lib.core.manifest_aliases import (
 )
 
 augmentation_stub = types.ModuleType("ImageAugmentation")
-augmentation_stub.GetAugTransform = lambda: None
+augmentation_stub.GetAugTransform = lambda **_kwargs: None
 sys.modules.setdefault("ImageAugmentation", augmentation_stub)
 
 from lib.datasets.manifest import (

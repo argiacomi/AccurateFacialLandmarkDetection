@@ -66,6 +66,8 @@ def build_dataset(
         include_metadata=include_metadata,
         schema_aware_training=schema_aware_training,
         split_policy=args.split_policy,
+        roll_quarter_turn_prob=getattr(args, "roll_quarter_turn_prob", 0.4),
+        roll_diagonal_prob=getattr(args, "roll_diagonal_prob", 0.1),
     )
 
 

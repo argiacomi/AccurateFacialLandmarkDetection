@@ -230,10 +230,13 @@ Visible/occluded landmark metrics are emitted when per-point visibility targets 
 
 The pipeline forwards runtime flags to `TrainHeatmapStageFP16.py` so long runs can be resumed and profiled safely:
 
+- Roll augmentation: `--roll-quarter-turn-prob 0.4` splits 40% of training samples evenly across exact `-90`/`+90` rotations, while `--roll-diagonal-prob 0.1` splits 10% across `-45`/`+45`. The remaining 50% receives no coarse rotation. The existing affine jitter then adds up to `±20` degrees, scale, translation, and shear.
 - Data loading: `--preload 0`, `--pin-memory`, `--persistent-workers`, and `--prefetch-factor`.
 - Evaluation cadence: `--eval-every`, `--full-eval-every`, `--eval-ema-every`, and `--eval-max-samples`.
 - Checkpoints: `last_checkpoint.pt`, `last_checkpoint.weights.pt`, `best_checkpoint.pt`, `best.weights.pt`, metadata sidecars, manifest/config compatibility checks, and optional `--restore-rng`.
 - Metrics: `runtime_metrics.jsonl` records epoch throughput, CUDA memory, data wait, device transfer, forward/loss, backward, optimizer step, scaler update, eval, EMA eval, checkpoint, aggregate compute, unattributed, and total epoch timing. CUDA transfer/compute/eval sections use CUDA event timing by default through `--synchronize-runtime-timing`; pass `--no-synchronize-runtime-timing` for low-overhead CPU wall-clock timing. Checkpoint timing includes periodic, legacy, best, EMA-best, and last-checkpoint writes.
+
+Evaluation slice reports include `by_roll_bucket`: `upright` for `|roll| < 30°`, `diagonal` for `30° <= |roll| < 70°`, `horizontal` for `|roll| >= 70°`, and `unknown` when roll metadata is unavailable.
 
 ### Console output vs metrics files
 

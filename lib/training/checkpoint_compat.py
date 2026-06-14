@@ -26,6 +26,8 @@ FLOAT_COMPAT_KEYS = {
     "schema_consistency_weight",
     "star_loss_weight",
     "auxiliary_loss_weight",
+    "roll_quarter_turn_prob",
+    "roll_diagonal_prob",
 }
 
 BOOL_COMPAT_KEYS = {
@@ -187,6 +189,16 @@ def build_pipeline_training_compat_config(
             0.1,
             "--auxiliary-loss-weight",
             "--auxiliary_loss_weight",
+        ),
+        "roll_quarter_turn_prob": float_opt(
+            float(getattr(args, "roll_quarter_turn_prob", 0.4)),
+            "--roll-quarter-turn-prob",
+            "--roll_quarter_turn_prob",
+        ),
+        "roll_diagonal_prob": float_opt(
+            float(getattr(args, "roll_diagonal_prob", 0.1)),
+            "--roll-diagonal-prob",
+            "--roll_diagonal_prob",
         ),
         "schema_aware_training": train_bool_arg(
             args,

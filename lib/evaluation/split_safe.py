@@ -382,6 +382,32 @@ def _profile_side(meta: T.Mapping[str, T.Any], conditions: T.Sequence[str]) -> s
     return "not_profile"
 
 
+def _roll_degrees(meta: T.Mapping[str, T.Any]) -> float | None:
+    for key in ("pose_roll_deg", "roll_deg", "roll"):
+        raw = meta.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            return value
+    return None
+
+
+def _roll_bucket(meta: T.Mapping[str, T.Any]) -> str:
+    roll = _roll_degrees(meta)
+    if roll is None:
+        return "unknown"
+    absolute_roll = abs(((roll + 180.0) % 360.0) - 180.0)
+    if absolute_roll < 30.0:
+        return "upright"
+    if absolute_roll < 70.0:
+        return "diagonal"
+    return "horizontal"
+
+
 def _bbox_value(meta: T.Mapping[str, T.Any]) -> tuple[T.Any, str]:
     for key in ("face_bbox", "bbox", "crop_bbox_xyxy"):
         value = meta.get(key)
@@ -457,6 +483,7 @@ def slice_labels(meta: T.Mapping[str, T.Any]) -> dict[str, str]:
         "by_pose_bucket": _pose_bucket(merged, conditions),
         "by_occlusion": _occlusion_bucket(merged, conditions),
         "by_profile_side": _profile_side(merged, conditions),
+        "by_roll_bucket": _roll_bucket(merged),
         "by_face_size": _face_size_bucket(merged),
         "by_production_source": production_source,
     }
@@ -464,6 +491,10 @@ def slice_labels(meta: T.Mapping[str, T.Any]) -> dict[str, str]:
 
 def record_for_sample(meta: T.Mapping[str, T.Any], nme: float) -> dict[str, T.Any]:
     labels = slice_labels(meta)
+    metadata = (
+        meta.get("metadata") if isinstance(meta.get("metadata"), T.Mapping) else {}
+    )
+    merged = {**metadata, **dict(meta)}
     return {
         "sample_id": str(meta.get("sample_id", "")),
         "image": str(meta.get("image", "")),
@@ -474,6 +505,8 @@ def record_for_sample(meta: T.Mapping[str, T.Any], nme: float) -> dict[str, T.An
         "hard_negative_bucket": labels["by_hard_negative_bucket"],
         "occlusion": labels["by_occlusion"],
         "profile_side": labels["by_profile_side"],
+        "pose_roll_deg": _roll_degrees(merged),
+        "roll_bucket": labels["by_roll_bucket"],
         "face_size": labels["by_face_size"],
         "production_source": labels["by_production_source"],
         **labels,
@@ -697,6 +730,7 @@ def build_slice_report(
         "by_pose_bucket",
         "by_occlusion",
         "by_profile_side",
+        "by_roll_bucket",
         "by_face_size",
         "by_production_source",
     ):
@@ -807,6 +841,8 @@ def write_eval_records_csv(
         "hard_negative_bucket",
         "occlusion",
         "profile_side",
+        "pose_roll_deg",
+        "roll_bucket",
         "face_size",
         "production_source",
     ]

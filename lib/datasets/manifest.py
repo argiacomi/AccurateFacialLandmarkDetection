@@ -676,6 +676,8 @@ class LandmarkDataset(Dataset):
         include_metadata=False,
         schema_aware_training=False,
         split_policy="declared_or_random_hash",
+        roll_quarter_turn_prob=0.4,
+        roll_diagonal_prob=0.1,
     ):
         super(LandmarkDataset, self).__init__()
         if perturbation:
@@ -716,7 +718,14 @@ class LandmarkDataset(Dataset):
                 transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
             ]
         )
-        self.aug_transform = GetAugTransform() if aug else None
+        self.aug_transform = (
+            GetAugTransform(
+                roll_quarter_turn_prob=roll_quarter_turn_prob,
+                roll_diagonal_prob=roll_diagonal_prob,
+            )
+            if aug
+            else None
+        )
         self.generateHM = (
             GenerateHeatmap(self.heatmap_size) if self.heatmap_size > 0 else None
         )

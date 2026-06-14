@@ -6,6 +6,30 @@ from dataclasses import asdict, dataclass
 import typing as T
 
 
+DEFAULT_ROLL_QUARTER_TURN_PROB = 0.4
+DEFAULT_ROLL_DIAGONAL_PROB = 0.1
+
+
+def validate_roll_augmentation_probs(
+    quarter_turn_prob: T.Any,
+    diagonal_prob: T.Any,
+) -> tuple[float, float]:
+    quarter_turn = float(quarter_turn_prob)
+    diagonal = float(diagonal_prob)
+    for name, value in (
+        ("roll_quarter_turn_prob", quarter_turn),
+        ("roll_diagonal_prob", diagonal),
+    ):
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be between 0 and 1, got {value}")
+    if quarter_turn + diagonal > 1.0:
+        raise ValueError(
+            "roll_quarter_turn_prob + roll_diagonal_prob must be <= 1, "
+            f"got {quarter_turn + diagonal}"
+        )
+    return quarter_turn, diagonal
+
+
 @dataclass(frozen=True)
 class EvalConfig:
     eval_batch_size: int
@@ -95,9 +119,19 @@ class DatasetBuildConfig:
     schema_targets: str
     auto_dataset_balancing: bool
     auto_schema_balancing: bool
+    roll_quarter_turn_prob: float
+    roll_diagonal_prob: float
 
     @classmethod
     def from_args(cls, args: T.Any) -> "DatasetBuildConfig":
+        quarter_turn, diagonal = validate_roll_augmentation_probs(
+            getattr(
+                args,
+                "roll_quarter_turn_prob",
+                DEFAULT_ROLL_QUARTER_TURN_PROB,
+            ),
+            getattr(args, "roll_diagonal_prob", DEFAULT_ROLL_DIAGONAL_PROB),
+        )
         return cls(
             data_name=str(args.data_name),
             manifest=str(getattr(args, "manifest", "")),
@@ -115,6 +149,8 @@ class DatasetBuildConfig:
             schema_targets=str(args.schema_targets),
             auto_dataset_balancing=bool(getattr(args, "auto_dataset_balancing", True)),
             auto_schema_balancing=bool(getattr(args, "auto_schema_balancing", True)),
+            roll_quarter_turn_prob=quarter_turn,
+            roll_diagonal_prob=diagonal,
         )
 
 
@@ -126,6 +162,8 @@ class PipelineConfig:
     heatmap_size: int
     lmk_num: int
     lr: float
+    roll_quarter_turn_prob: float
+    roll_diagonal_prob: float
     train_arg: tuple[str, ...]
     runtime: TrainingRuntimeConfig
     eval: EvalConfig
@@ -138,6 +176,14 @@ class PipelineConfig:
         *,
         runtime_metrics_jsonl: str = "",
     ) -> "PipelineConfig":
+        quarter_turn, diagonal = validate_roll_augmentation_probs(
+            getattr(
+                args,
+                "roll_quarter_turn_prob",
+                DEFAULT_ROLL_QUARTER_TURN_PROB,
+            ),
+            getattr(args, "roll_diagonal_prob", DEFAULT_ROLL_DIAGONAL_PROB),
+        )
         return cls(
             train_data_name=str(args.train_data_name),
             nproc_per_node=int(args.nproc_per_node),
@@ -145,6 +191,8 @@ class PipelineConfig:
             heatmap_size=int(args.heatmap_size),
             lmk_num=int(args.lmk_num),
             lr=float(args.lr),
+            roll_quarter_turn_prob=quarter_turn,
+            roll_diagonal_prob=diagonal,
             train_arg=tuple(str(value) for value in (args.train_arg or ())),
             runtime=TrainingRuntimeConfig.from_args(args),
             eval=EvalConfig.from_args(args),
@@ -162,9 +210,12 @@ def config_dict(config: T.Any) -> dict[str, T.Any]:
 
 __all__ = [
     "CheckpointConfig",
+    "DEFAULT_ROLL_DIAGONAL_PROB",
+    "DEFAULT_ROLL_QUARTER_TURN_PROB",
     "DatasetBuildConfig",
     "EvalConfig",
     "PipelineConfig",
     "TrainingRuntimeConfig",
     "config_dict",
+    "validate_roll_augmentation_probs",
 ]

@@ -7,6 +7,8 @@ import typing as T
 
 import numpy as np
 import torch
+
+from lib.training.config import validate_roll_augmentation_probs
 import torch.distributed as dist
 
 
@@ -101,6 +103,10 @@ def seed_worker(worker_id: int) -> None:
 
 
 def normalize_runtime_args(args: T.Any) -> T.Any:
+    validate_roll_augmentation_probs(
+        getattr(args, "roll_quarter_turn_prob", 0.4),
+        getattr(args, "roll_diagonal_prob", 0.1),
+    )
     if getattr(args, "restore_rng", False) and getattr(
         args, "persistent_workers", False
     ):

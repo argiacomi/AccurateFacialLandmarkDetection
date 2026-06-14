@@ -9,6 +9,12 @@ import time
 import numpy as np
 from PIL import Image
 
+from lib.training.config import (
+    DEFAULT_ROLL_DIAGONAL_PROB,
+    DEFAULT_ROLL_QUARTER_TURN_PROB,
+    validate_roll_augmentation_probs,
+)
+
 try:
     import albumentations as A
 except ModuleNotFoundError:
@@ -20,8 +26,60 @@ def _require_albumentations():
         raise ModuleNotFoundError("albumentations is required for image augmentation")
 
 
-def GetAugTransform(prob_factor=1.0):
+def roll_rotation_distribution(
+    quarter_turn_prob=DEFAULT_ROLL_QUARTER_TURN_PROB,
+    diagonal_prob=DEFAULT_ROLL_DIAGONAL_PROB,
+    prob_factor=1.0,
+):
+    factor = float(prob_factor)
+    if not 0.0 <= factor <= 1.0:
+        raise ValueError(f"prob_factor must be between 0 and 1, got {factor}")
+    quarter_turn, diagonal = validate_roll_augmentation_probs(
+        quarter_turn_prob,
+        diagonal_prob,
+    )
+    quarter_turn *= factor
+    diagonal *= factor
+    return {
+        0: 1.0 - quarter_turn - diagonal,
+        -90: quarter_turn / 2.0,
+        90: quarter_turn / 2.0,
+        -45: diagonal / 2.0,
+        45: diagonal / 2.0,
+    }
+
+
+def _roll_rotation_transform(quarter_turn_prob, diagonal_prob, prob_factor):
+    distribution = roll_rotation_distribution(
+        quarter_turn_prob,
+        diagonal_prob,
+        prob_factor,
+    )
+    transforms = []
+    for angle, probability in distribution.items():
+        if probability <= 0.0:
+            continue
+        transform = (
+            A.NoOp(p=probability)
+            if angle == 0
+            else A.Affine(rotate=(angle, angle), p=probability)
+        )
+        transforms.append(transform)
+    return A.OneOf(transforms, p=1.0)
+
+
+def GetAugTransform(
+    prob_factor=1.0,
+    *,
+    roll_quarter_turn_prob=DEFAULT_ROLL_QUARTER_TURN_PROB,
+    roll_diagonal_prob=DEFAULT_ROLL_DIAGONAL_PROB,
+):
     _require_albumentations()
+    roll_rotation = _roll_rotation_transform(
+        roll_quarter_turn_prob,
+        roll_diagonal_prob,
+        prob_factor,
+    )
     affine_worker = A.Affine(
         scale={"x": [0.8, 1.2], "y": [0.8, 1.2]},
         translate_px={"x": [-40, 40], "y": [-40, 40]},
@@ -47,6 +105,7 @@ def GetAugTransform(prob_factor=1.0):
 
     transform = A.Compose(
         [
+            roll_rotation,
             affine_worker,
             color_jitter,
             gauss_noise,
@@ -66,8 +125,18 @@ def GetAugTransform(prob_factor=1.0):
     return transform
 
 
-def GetAugTransform_2(prob_factor=1.0):
+def GetAugTransform_2(
+    prob_factor=1.0,
+    *,
+    roll_quarter_turn_prob=DEFAULT_ROLL_QUARTER_TURN_PROB,
+    roll_diagonal_prob=DEFAULT_ROLL_DIAGONAL_PROB,
+):
     _require_albumentations()
+    roll_rotation = _roll_rotation_transform(
+        roll_quarter_turn_prob,
+        roll_diagonal_prob,
+        prob_factor,
+    )
     affine_worker = A.Affine(
         scale={"x": [0.9, 1.1], "y": [0.9, 1.1]},
         translate_px={"x": [-20, 20], "y": [-20, 20]},
@@ -92,6 +161,7 @@ def GetAugTransform_2(prob_factor=1.0):
 
     transform = A.Compose(
         [
+            roll_rotation,
             affine_worker,
             color_jitter,
             # gauss_noise,
