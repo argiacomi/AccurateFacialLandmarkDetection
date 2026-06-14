@@ -225,13 +225,18 @@ def _restore_training_checkpoint(
     ):
         return 0, best_nme, best_record
 
-    if checkpoint.get("optimizer") is not None:
+    optim_state = checkpoint.get("optimizer")
+    sched_state = checkpoint.get("scheduler")
+    scaler_state = checkpoint.get("scaler")
+    ema_state = checkpoint.get("ema")
+
+    if optim_state:
         optimizer.load_state_dict(checkpoint["optimizer"])
-    if checkpoint.get("scheduler") is not None:
+    if sched_state:
         scheduler.load_state_dict(checkpoint["scheduler"])
-    if checkpoint.get("scaler") is not None:
-        scaler.load_state_dict(checkpoint["scaler"])
-    if ema is not None and checkpoint.get("ema") is not None:
+    if scaler_state:
+        scaler.load_state_dict(scaler_state)
+    if ema is not None and ema_state:
         ema.model.load_state_dict(checkpoint["ema"])
         ema.n_iter = int(checkpoint.get("ema_n_iter", getattr(ema, "n_iter", 0)))
 
