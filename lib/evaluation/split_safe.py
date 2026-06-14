@@ -532,6 +532,7 @@ def visibility_metrics_for_records(
     labels: list[int] = []
     scores: list[float] = []
     prediction_skipped = 0
+    visibility_samples = 0
     for record in records:
         targets = record.get("visibility_targets")
         record_scores = record.get("visibility_scores")
@@ -540,10 +541,15 @@ def visibility_metrics_for_records(
         if not isinstance(record_scores, (list, tuple)):
             prediction_skipped += sum(1 for value in targets if int(value) in (0, 1))
             continue
-        for target, score in zip(targets, record_scores):
+        record_has_prediction = False
+        for index, target in enumerate(targets):
             target_i = int(target)
             if target_i not in (0, 1):
                 continue
+            if index >= len(record_scores):
+                prediction_skipped += 1
+                continue
+            score = record_scores[index]
             try:
                 score_f = float(score)
             except (TypeError, ValueError):
@@ -554,6 +560,9 @@ def visibility_metrics_for_records(
                 continue
             labels.append(target_i)
             scores.append(score_f)
+            record_has_prediction = True
+        if record_has_prediction:
+            visibility_samples += 1
 
     if not labels:
         return {
@@ -568,13 +577,7 @@ def visibility_metrics_for_records(
     label_arr = np.asarray(labels, dtype=np.int64)
     score_arr = _sigmoid_if_logits(np.asarray(scores, dtype=np.float32))
     return {
-        "visibility_sample_count": int(
-            sum(
-                1
-                for record in records
-                if record.get("visible_landmark_count") is not None
-            )
-        ),
+        "visibility_sample_count": int(visibility_samples),
         "visibility_label_count": int(label_arr.size),
         "visibility_prediction_skipped_count": int(prediction_skipped),
         "visibility_AP": _average_precision(label_arr, score_arr),

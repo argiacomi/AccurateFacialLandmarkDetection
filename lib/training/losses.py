@@ -281,7 +281,6 @@ def schema_head_loss(
                 visibility_logits,
                 payload["visibility_target"],
                 sample_weight=sample_weight,
-                landmark_mask=landmark_mask,
                 target_weight=_visibility_target_weight_for_payload(
                     payload, args, device=loss.device
                 ),

@@ -124,7 +124,7 @@ def test_auxiliary_loss_is_normalized_by_valid_task_count_and_skips_missing_labe
     assert "blur_quality" not in details["auxiliary_loss_contributions"]
 
 
-def test_visibility_head_and_loss_use_masked_targets():
+def test_visibility_head_and_loss_use_explicit_targets_independent_of_landmark_mask():
     args = SimpleNamespace(
         locw=0.0,
         hw=0.0,
@@ -152,7 +152,7 @@ def test_visibility_head_and_loss_use_masked_targets():
             "indices": torch.tensor([0]),
             "target": torch.zeros(1, 68, 2),
             "heatmap": torch.zeros(1, 68, 4, 4),
-            "landmark_mask": torch.ones(1, 68),
+            "landmark_mask": torch.tensor([[1.0, 0.0, *([1.0] * 66)]]),
             "sample_weight": torch.ones(1),
             "visibility_target": torch.tensor([[1.0, 0.0, *([-1.0] * 66)]]),
         }

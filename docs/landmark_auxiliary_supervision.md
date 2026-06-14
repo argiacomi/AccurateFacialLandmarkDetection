@@ -27,6 +27,8 @@ Per-point visibility targets use:
 1 = visible
 0 = occluded
 -1 = unknown / skipped
+```
+
 Visibility heads are schema-specific:
 
 landmarks_68  -> visibility_68
@@ -37,6 +39,9 @@ landmarks_29  -> visibility_29
 profile39     -> visibility_profile39
 
 The visibility loss is masked BCE. Missing labels are never trained as visible.
+Explicit visibility labels are independent from the landmark localization mask:
+an occluded point can be excluded from coordinate/heatmap loss while still
+providing a valid negative target to the visibility head.
 
 Warm start schedule
 

@@ -223,7 +223,7 @@ def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
             (
                 torch.zeros(3, 256, 256),
                 points_68,
-                torch.ones(68),
+                torch.tensor([1.0, 0.0, *([1.0] * 66)]),
                 {
                     "sample_id": "sample-68",
                     "source_schema": "2d_68",
@@ -235,7 +235,7 @@ def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
             (
                 torch.zeros(3, 256, 256),
                 points_98,
-                torch.ones(98),
+                torch.tensor([1.0, 1.0, 0.0, *([1.0] * 95)]),
                 {
                     "sample_id": "sample-98",
                     "source_schema": "2d_98",
@@ -251,12 +251,18 @@ def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
         def forward(self, data):
             pred_68 = torch.zeros(data.shape[0], 68, 2)
             pred_98 = torch.zeros(data.shape[0], 98, 2)
+            visibility_68 = torch.zeros(data.shape[0], 68)
+            visibility_98 = torch.zeros(data.shape[0], 98)
             pred_68[0] = points_68
             pred_98[1] = points_98
+            visibility_68[0, :2] = torch.tensor([4.0, -4.0])
+            visibility_98[1, :3] = torch.tensor([4.0, 3.0, -4.0])
             return [
                 {
                     "landmarks_68": (pred_68, torch.zeros(data.shape[0], 68, 8, 8)),
                     "landmarks_98": (pred_98, torch.zeros(data.shape[0], 98, 8, 8)),
+                    "visibility_68": visibility_68,
+                    "visibility_98": visibility_98,
                 }
             ]
 
@@ -268,6 +274,12 @@ def test_eval_collate_routes_mixed_schema_samples_to_native_heads():
     assert report["overall"]["NME_all"] == pytest.approx(0.0)
     assert report["overall"]["visible_landmark_count"] == 3
     assert report["overall"]["occluded_landmark_count"] == 2
+    assert report["overall"]["visibility_sample_count"] == 2
+    assert report["overall"]["visibility_label_count"] == 5
+    assert report["overall"]["visibility_prediction_skipped_count"] == 0
+    assert report["overall"]["visibility_AP"] == pytest.approx(1.0)
+    assert report["overall"]["visibility_F1@0.5"] == pytest.approx(1.0)
+    assert report["overall"]["visibility_ROC_AUC"] == pytest.approx(1.0)
     assert report["by_schema"]["2d_98"]["sample_count"] == 1
     records = {record["sample_id"]: record for record in report["records"]}
     assert records["sample-68"]["evaluation_head"] == "landmarks_68"

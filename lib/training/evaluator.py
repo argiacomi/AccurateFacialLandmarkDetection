@@ -19,6 +19,7 @@ from lib.logging_utils import (
     iterate_with_progress,
     log_event,
 )
+from lib.training.auxiliary import visibility_key_for_head
 
 
 def eval_collate(batch):
@@ -176,6 +177,7 @@ def _visibility_logits_from_stage(stage_pred, head_name="landmarks_68"):
         return None
     point_suffix = head_name.removeprefix("landmarks_").removeprefix("profile")
     for key in (
+        visibility_key_for_head(head_name),
         f"{head_name}_visibility_logits",
         f"visibility_{point_suffix}_logits",
         "visibility_logits",
@@ -218,39 +220,38 @@ def _visibility_aware_records(
         nme = float(np.nanmean(point_errors[mask_i]))
 
         visibility_target = _visibility_target_from_meta(meta, target_i.shape[0])
-        visible_mask = mask_i & (visibility_target == 1)
-        occluded_mask = mask_i & (visibility_target == 0)
-        unknown_mask = mask_i & ~np.isin(visibility_target, (0, 1))
+        visible_label_mask = visibility_target == 1
+        occluded_label_mask = visibility_target == 0
+        unknown_label_mask = ~np.isin(visibility_target, (0, 1))
+        visible_error_mask = mask_i & visible_label_mask
+        occluded_error_mask = mask_i & occluded_label_mask
 
         record = record_for_sample(meta, nme)
         record["evaluation_head"] = str(meta.get("head_name") or "")
         record["visibility_target_source"] = str(
             meta.get("visibility_target_source") or ""
         )
-        record["visible_landmark_count"] = int(np.sum(visible_mask))
-        record["occluded_landmark_count"] = int(np.sum(occluded_mask))
-        record["visibility_label_skipped_count"] = int(np.sum(unknown_mask))
+        record["visible_landmark_count"] = int(np.sum(visible_label_mask))
+        record["occluded_landmark_count"] = int(np.sum(occluded_label_mask))
+        record["visibility_label_skipped_count"] = int(np.sum(unknown_label_mask))
         record["nme_visible"] = (
-            float(np.nanmean(point_errors[visible_mask]))
-            if np.any(visible_mask)
+            float(np.nanmean(point_errors[visible_error_mask]))
+            if np.any(visible_error_mask)
             else None
         )
         record["nme_occluded"] = (
-            float(np.nanmean(point_errors[occluded_mask]))
-            if np.any(occluded_mask)
+            float(np.nanmean(point_errors[occluded_error_mask]))
+            if np.any(occluded_error_mask)
             else None
         )
-        record["visibility_targets"] = [
-            int(value) if mask_i[pos] else -1
-            for pos, value in enumerate(visibility_target.tolist())
-        ]
+        record["visibility_targets"] = visibility_target.tolist()
         if (
             logits is not None
             and index < logits.shape[0]
             and logits.shape[1] == target_i.shape[0]
         ):
             record["visibility_scores"] = [
-                float(value) if mask_i[pos] else float("nan")
+                float(value) if not unknown_label_mask[pos] else float("nan")
                 for pos, value in enumerate(logits[index].tolist())
             ]
         records.append(record)
