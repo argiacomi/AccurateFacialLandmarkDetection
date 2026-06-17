@@ -4,7 +4,8 @@
 Pipeline stages:
 
 1. build per-dataset manifests with local ``build_quality_dataset.py``
-2. optionally build a ``production_validated`` manifest from ``--prod-dir``
+2. optionally build a ``production_validated`` manifest from ``--prod-dir`` or
+   the default Google Drive-backed production source
 3. merge them with local ``build_hard_negative_manifest.py``
 4. validate that the final manifest follows the schema-aware training contract
 5. launch ``TrainHeatmapStageFP16.py --data_name FS68Manifest``
@@ -193,14 +194,18 @@ def _split_csv(value: str | None) -> tuple[str, ...]:
 
 
 def _datasets(args: argparse.Namespace) -> tuple[str, ...]:
+    return tuple(
+        dataset
+        for dataset in _selected_manifest_datasets(args)
+        if dataset != PRODUCTION_DATASET
+    )
+
+
+def _selected_manifest_datasets(args: argparse.Namespace) -> tuple[str, ...]:
     requested = _split_csv(args.dataset) or _split_csv(DEFAULT_DATASETS)
     normalized: list[str] = []
     for item in requested:
         dataset = _normalize_dataset_name(item)
-        if dataset == PRODUCTION_DATASET:
-            raise ValueError(
-                "Use --prod-dir for production_validated data instead of adding it to --dataset"
-            )
         if dataset not in HARD_NEGATIVE_MANIFEST_FLAGS:
             raise ValueError(
                 f"unsupported dataset for CD-ViT hard-negative mix: {item!r}"
@@ -208,6 +213,12 @@ def _datasets(args: argparse.Namespace) -> tuple[str, ...]:
         if dataset not in normalized:
             normalized.append(dataset)
     return tuple(normalized)
+
+
+def _include_production_dataset(args: argparse.Namespace) -> bool:
+    return _has_prod_dir(args) or PRODUCTION_DATASET in _selected_manifest_datasets(
+        args
+    )
 
 
 def _parse_dataset_mapping(
@@ -222,7 +233,8 @@ def _parse_dataset_mapping(
         raw_path = raw_path.strip()
         if dataset == PRODUCTION_DATASET:
             raise ValueError(
-                f"{option} does not accept production_validated; use --prod-dir"
+                f"{option} does not accept production_validated; use --prod-dir "
+                "or omit a source to download the default production archive"
             )
         if dataset not in HARD_NEGATIVE_MANIFEST_FLAGS:
             raise ValueError(f"{option} received unsupported dataset {dataset!r}")
@@ -461,6 +473,7 @@ def _manifest_stage_common_args(args: argparse.Namespace) -> dict[str, T.Any]:
         "source_dir": args.source_dir,
         "source_zip": args.source_zip,
         "prod_dir": args.prod_dir,
+        "include_production_validated": _include_production_dataset(args),
         "include_39pt_profile": bool(args.include_39pt_profile),
         "python_executable": args.python_executable,
     }
@@ -485,7 +498,7 @@ def _build_dataset_manifest_stage_request(
             "build_quality_dataset.py": _tool_fingerprint("build_quality_dataset.py"),
             "build_production_validated_manifest.py": (
                 _tool_fingerprint("build_production_validated_manifest.py")
-                if _has_prod_dir(args)
+                if _include_production_dataset(args)
                 else None
             ),
         },
@@ -1042,23 +1055,21 @@ def _has_prod_dir(args: argparse.Namespace) -> bool:
 def _production_build_command(
     args: argparse.Namespace, paths: PipelinePaths
 ) -> list[str] | None:
-    if not _has_prod_dir(args):
+    if not _include_production_dataset(args):
         return None
-    return _append_extra(
-        [
-            args.python_executable,
-            _script("build_production_validated_manifest.py"),
-            "--prod-dir",
-            str(args.prod_dir),
-            "--output-dir",
-            str(paths.dataset_root / PRODUCTION_DATASET),
-            "--log-format",
-            str(args.log_format),
-            "--log-level",
-            _trainer_log_level_for_pipeline(args.log_level),
-        ],
-        args.production_build_arg or [],
-    )
+    argv = [
+        args.python_executable,
+        _script("build_production_validated_manifest.py"),
+        "--output-dir",
+        str(paths.dataset_root / PRODUCTION_DATASET),
+        "--log-format",
+        str(args.log_format),
+        "--log-level",
+        _trainer_log_level_for_pipeline(args.log_level),
+    ]
+    if _has_prod_dir(args):
+        argv.extend(["--prod-dir", str(args.prod_dir)])
+    return _append_extra(argv, args.production_build_arg or [])
 
 
 def _dataset_build_commands(
@@ -1117,7 +1128,9 @@ def _hard_negative_command(args: argparse.Namespace, paths: PipelinePaths) -> li
             argv.extend([HARD_NEGATIVE_MANIFEST_FLAGS[dataset], str(manifest)])
 
     production_manifest = _production_manifest_path(paths)
-    if _has_prod_dir(args) and (production_manifest.is_file() or args.dry_run):
+    if _include_production_dataset(args) and (
+        production_manifest.is_file() or args.dry_run
+    ):
         argv.extend(
             [HARD_NEGATIVE_MANIFEST_FLAGS[PRODUCTION_DATASET], str(production_manifest)]
         )
@@ -1249,7 +1262,7 @@ def _require_local_tools(args: argparse.Namespace) -> None:
         TOOLS_ROOT / "build_quality_dataset.py",
         TOOLS_ROOT / "build_hard_negative_manifest.py",
     ]
-    if _has_prod_dir(args):
+    if _include_production_dataset(args):
         required.append(TOOLS_ROOT / "build_production_validated_manifest.py")
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -1368,7 +1381,7 @@ def _build_manifest_outputs(
     outputs = [
         str(_dataset_manifest_path(paths, dataset)) for dataset in _datasets(args)
     ]
-    if _has_prod_dir(args):
+    if _include_production_dataset(args):
         outputs.append(str(_production_manifest_path(paths)))
     return outputs
 
@@ -1571,7 +1584,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         default=DEFAULT_DATASETS,
-        help="Comma-separated non-production dataset list.",
+        help=(
+            "Comma-separated dataset list. Include prod/production_validated to "
+            "build production data from --prod-dir or the default Google Drive source."
+        ),
     )
     parser.add_argument(
         "--dataset-source",

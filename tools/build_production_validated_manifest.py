@@ -4,9 +4,13 @@
 The production source can be either a directory or a ``.zip`` archive containing
 source images and exactly one Faceswap ``.fsa`` alignments file. The ``.fsa``
 file is Faceswap's compressed pickle alignment format, so only run this helper
-on trusted local files.
+on trusted local files. When no local source is passed, the default production
+validated source is downloaded from Google Drive.
 
 Example:
+    python tools/build_production_validated_manifest.py \
+      --output-dir data/landmarks/production_validated
+
     python tools/build_production_validated_manifest.py \
       --prod-dir /path/to/production_dir_or_zip \
       --output-dir data/landmarks/production_validated
@@ -43,10 +47,12 @@ from lib.logging_utils import (
     log_event,
     verbosity_from_name,
 )
+from tools import download_landmark_datasets as downloader
 
 DEFAULT_DATASET = "production_validated"
 DEFAULT_SOURCE = "faceswap_fsa_production_source"
 DEFAULT_LABEL_QUALITY = "human_validated"
+DEFAULT_DOWNLOAD_SUBDIR = "_downloads"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
 PRODUCTION_RUNTIME_BUCKET_KEYS = (
     "runtime_bucket",
@@ -106,6 +112,42 @@ def _resolve_prod_source(
     raise FileNotFoundError(
         f"production source must be a directory or .zip file: {prod_source}"
     )
+
+
+def _download_default_prod_source(output_dir: Path, download_root: Path | None) -> Path:
+    """Download and resolve the default production_validated source archive."""
+
+    root = (
+        Path(download_root)
+        if download_root is not None
+        else output_dir / DEFAULT_DOWNLOAD_SUBDIR
+    )
+    log_event(
+        "download",
+        (
+            "no --prod-dir supplied; downloading production_validated "
+            f"from gdrive:{downloader.PRODUCTION_VALIDATED_GOOGLE_DRIVE_FILE_ID}"
+        ),
+        level=Verbosity.INFO,
+        dataset=DEFAULT_DATASET,
+        google_drive_file_id=downloader.PRODUCTION_VALIDATED_GOOGLE_DRIVE_FILE_ID,
+        download_root=str(root),
+    )
+    _, registry = downloader.download_datasets(
+        [DEFAULT_DATASET],
+        output_root=root,
+        extract=True,
+        force=False,
+        skip_checksum=True,
+        keep_going=False,
+        workers=1,
+    )
+    source = downloader.resolve_source_dir(registry, DEFAULT_DATASET, root)
+    if source is None:
+        raise FileNotFoundError(
+            f"downloaded production source was not found under {root}"
+        )
+    return source
 
 
 def _is_ignored_macos_sidecar(path: Path) -> bool:
@@ -435,8 +477,21 @@ def _parser() -> argparse.ArgumentParser:
         "--production-dir",
         dest="prod_dir",
         type=Path,
-        required=True,
-        help="Production source directory or .zip archive containing images and exactly one .fsa file.",
+        default=None,
+        help=(
+            "Production source directory or .zip archive containing images and "
+            "exactly one .fsa file. If omitted, the default production_validated "
+            "source is downloaded from Google Drive."
+        ),
+    )
+    parser.add_argument(
+        "--download-root",
+        type=Path,
+        default=None,
+        help=(
+            "Cache root for the default production_validated download when "
+            "--prod-dir is omitted. Defaults to <output-dir>/_downloads."
+        ),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-name", default=DEFAULT_DATASET)
@@ -479,8 +534,13 @@ def main(argv: T.Sequence[str] | None = None) -> int:
         args.log_format,
     )
     try:
+        prod_dir = (
+            args.prod_dir
+            if args.prod_dir is not None
+            else _download_default_prod_source(args.output_dir, args.download_root)
+        )
         metadata = build_manifest(
-            args.prod_dir, args.output_dir, dataset_name=args.dataset_name
+            prod_dir, args.output_dir, dataset_name=args.dataset_name
         )
     except Exception as err:  # noqa: BLE001
         log_error("manifest", f"production manifest build failed: {err}")

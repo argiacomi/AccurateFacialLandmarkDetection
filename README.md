@@ -109,7 +109,14 @@ Dataset manifests preserve native trainable schemas when available, including 29
 
 ### Faceswap production alignment directories or zip archives
 
-Use `--prod-dir` when you have either a directory or a `.zip` archive containing production images and exactly one Faceswap `.fsa` alignments file. The local helper reads the `.fsa`, writes one canonical `(68, 2)` `.npy` landmark file per face, and emits a `production_validated` manifest.
+By default, the production helper downloads the `production_validated` source from Google Drive file id `1XFW3_xx9t6gnyAIRY6g71keDzzHFRWRg`. Use `--prod-dir` only when you have a local directory or `.zip` archive containing production images and exactly one Faceswap `.fsa` alignments file. The local helper reads the `.fsa`, writes one canonical `(68, 2)` `.npy` landmark file per face, and emits a `production_validated` manifest.
+
+```bash
+python tools/build_production_validated_manifest.py \
+  --output-dir data/landmarks/production_validated
+```
+
+To override the default download with a local source:
 
 ```bash
 python tools/build_production_validated_manifest.py \
@@ -117,7 +124,7 @@ python tools/build_production_validated_manifest.py \
   --output-dir data/landmarks/production_validated
 ```
 
-When `--prod-dir` points at a `.zip`, the archive is safely extracted under the output directory and manifest image paths point at that stable extracted copy.
+When `--prod-dir` points at a `.zip`, the archive is safely extracted under the output directory and manifest image paths point at that stable extracted copy. When `--prod-dir` is omitted, the downloaded archive is cached under `<output-dir>/_downloads` unless `--download-root` is supplied.
 
 The output includes:
 
@@ -130,9 +137,8 @@ You can also let the CD-ViT pipeline build and include it automatically:
 
 ```bash
 python tools/run_cdvit_manifest_training_pipeline.py \
-  --dataset wflw,cofw68,300w,aflw2000-3d,merl-rav,menpo2d,multipie \
+  --dataset wflw,cofw68,300w,aflw2000-3d,merl-rav,menpo2d,multipie,prod \
   $(tr "\n" " " < runs/landmarks/quality_datasets/dataset_source_args.txt) \
-  --prod-dir /path/to/production_dir_or_zip \
   --nproc-per-node 2 \
   --batch-size 16 \
   --epoch 500 \

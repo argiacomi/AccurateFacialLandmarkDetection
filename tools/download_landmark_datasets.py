@@ -36,6 +36,7 @@ from lib.logging_utils import (
 
 CHUNK_SIZE = 1024 * 1024
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
+PRODUCTION_VALIDATED_GOOGLE_DRIVE_FILE_ID = "1XFW3_xx9t6gnyAIRY6g71keDzzHFRWRg"
 ALL_DATASETS = (
     "300vw",
     "300w",
@@ -56,6 +57,8 @@ ALL_DATASETS = (
     "wflw",
     "xm2vts",
 )
+EXPLICIT_DATASETS = ("production_validated",)
+SELECTABLE_DATASETS = (*ALL_DATASETS, *EXPLICIT_DATASETS)
 
 # Some ids are downloaded only as source layers for other datasets and have no
 # manifest builder of their own (e.g. AFLW supplies native images for MERL-RAV).
@@ -274,6 +277,16 @@ SOURCES: tuple[SourceAsset, ...] = (
         note="MenpoBenchmark MultiPIE package.",
     ),
     SourceAsset(
+        dataset="production_validated",
+        name="Faceswap production validated source",
+        filename="production_validated.zip",
+        google_drive_file_id=PRODUCTION_VALIDATED_GOOGLE_DRIVE_FILE_ID,
+        note=(
+            "Faceswap production source archive containing images and exactly "
+            "one .fsa alignments file."
+        ),
+    ),
+    SourceAsset(
         dataset="wflw",
         name="WFLW annotations",
         filename="WFLW_annotations.tar.gz",
@@ -334,6 +347,9 @@ def _dataset_key(value: str) -> str:
         "frgc": "frgc",
         "300vw": "300vw",
         "300-vw": "300vw",
+        "prod": "production_validated",
+        "production": "production_validated",
+        "production-validated": "production_validated",
         "wflw-v": "wflw-v",
         "wflwv": "wflw-v",
         "all": "all",
@@ -366,7 +382,7 @@ def normalize_datasets(values: T.Iterable[str]) -> list[str]:
 
 def _resolve_dataset_keys(datasets: T.Sequence[str] | None) -> list[str]:
     selected = list(datasets) if datasets else list(ALL_DATASETS)
-    unknown = sorted(set(selected) - set(ALL_DATASETS))
+    unknown = sorted(set(selected) - set(SELECTABLE_DATASETS))
     if unknown:
         raise ValueError(f"unknown dataset(s): {', '.join(unknown)}")
     return selected

@@ -298,8 +298,39 @@ def test_pipeline_production_command_forwards_logging_flags():
     assert command[command.index("--log-level") + 1] == "info"
 
 
+def test_pipeline_production_command_can_use_default_download():
+    from argparse import Namespace
+    from pathlib import Path
+
+    from tools.run_cdvit_manifest_training_pipeline import (
+        PipelinePaths,
+        _production_build_command,
+    )
+
+    args = Namespace(
+        dataset="prod",
+        python_executable="python",
+        prod_dir=None,
+        log_format="json",
+        log_level="normal",
+        production_build_arg=[],
+    )
+    paths = PipelinePaths(output_root=Path("runs"), run_name="demo")
+
+    command = _production_build_command(args, paths)
+
+    assert command is not None
+    assert "--prod-dir" not in command
+    assert command[command.index("--output-dir") + 1].endswith(
+        "datasets/production_validated"
+    )
+
+
 def test_production_manifest_parser_accepts_shared_logging_flags():
     from tools.build_production_validated_manifest import _parser
+
+    default_args = _parser().parse_args(["--output-dir", "out"])
+    assert default_args.prod_dir is None
 
     args = _parser().parse_args(
         [

@@ -6,7 +6,8 @@ user can go from "download" to "training-ready manifest" without manually
 plumbing source/cache paths between tools. For each requested dataset it will:
 
 * download (or reuse cached) source archives into a default data root when needed,
-* accept local production data via ``--datasets prod --prod-dir ...``,
+* accept local production data via ``--datasets prod --prod-dir ...`` or
+  download the default production_validated source when no local source is given,
 * resolve the extracted source directory from the downloader registry,
 * stage multi-archive datasets (e.g. JD-landmark) into a single source root,
 * build the CD-ViT manifest (extracting video frames when required),
@@ -21,6 +22,9 @@ Example::
     python tools/prepare_landmark_dataset.py \
       --datasets wflw-v \
       --write-overlays
+
+    python tools/prepare_landmark_dataset.py \
+      --datasets prod
 
     python tools/prepare_landmark_dataset.py \
       --datasets prod \
@@ -331,9 +335,15 @@ def _resolve_inputs(
 ) -> tuple[Path | None, str | None]:
     """Return the (source_dir, image_root) the builder should use for a dataset."""
     if dataset == PRODUCTION_DATASET:
-        if prod_dir is None:
-            raise ValueError("dataset 'prod' requires --prod-dir")
-        return Path(prod_dir).expanduser(), None
+        if prod_dir is not None:
+            return Path(prod_dir).expanduser(), None
+        source = downloader.resolve_source_dir(registry or {}, dataset, data_root)
+        if source is None:
+            raise ValueError(
+                "dataset 'prod' requires --prod-dir or a downloaded "
+                "production_validated source"
+            )
+        return source, None
 
     image_root = image_root_override
     if dataset == "jd-landmark":
@@ -461,7 +471,10 @@ def _build_dataset(
 ) -> Path:
     if dataset == PRODUCTION_DATASET:
         if source is None:
-            raise ValueError("dataset 'prod' requires --prod-dir")
+            raise ValueError(
+                "dataset 'prod' requires --prod-dir or a downloaded "
+                "production_validated source"
+            )
         return _build_production_dataset(source, output_dir, mode=mode, args=args)
 
     # Guard before argparse: an unsupported id would otherwise hit the builder's
@@ -1550,13 +1563,6 @@ def prepare(args: argparse.Namespace) -> int:
     if not datasets:
         log_error("prepare", "no datasets requested. Pass --datasets <id> [<id> ...].")
         return 2
-    if (
-        not skip_build
-        and PRODUCTION_DATASET in datasets
-        and getattr(args, "prod_dir", None) is None
-    ):
-        log_error("prepare", "dataset 'prod' requires --prod-dir.")
-        return 2
     data_root = Path(args.data_root)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1593,7 +1599,9 @@ def prepare(args: argparse.Namespace) -> int:
         )
     elif not args.skip_download:
         download_target_names = [
-            dataset for dataset in datasets if dataset != PRODUCTION_DATASET
+            dataset
+            for dataset in datasets
+            if dataset != PRODUCTION_DATASET or getattr(args, "prod_dir", None) is None
         ]
         if any(d in DATASETS_NEEDING_300W_IMAGES for d in datasets):
             download_target_names.append("300w")
@@ -1619,7 +1627,7 @@ def prepare(args: argparse.Namespace) -> int:
             registry = downloader.load_registry(data_root)
             log_event(
                 "download",
-                "skipping download for local production dataset",
+                "skipping download; using local production source",
                 level=Verbosity.INFO,
             )
     else:

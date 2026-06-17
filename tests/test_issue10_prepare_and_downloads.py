@@ -219,6 +219,25 @@ def test_normalize_prepare_datasets_accepts_prod_aliases():
     ) == ["production_validated"]
 
 
+def test_normalize_datasets_accepts_prod_aliases():
+    assert downloader.normalize_datasets(
+        ["prod,production_validated", "production"]
+    ) == ["production_validated"]
+
+
+def test_production_validated_source_uses_requested_drive_id():
+    source = next(
+        asset for asset in downloader.SOURCES if asset.dataset == "production_validated"
+    )
+
+    assert (
+        source.google_drive_file_id
+        == downloader.PRODUCTION_VALIDATED_GOOGLE_DRIVE_FILE_ID
+        == "1XFW3_xx9t6gnyAIRY6g71keDzzHFRWRg"
+    )
+    assert source.filename == "production_validated.zip"
+
+
 def test_unknown_dataset_raises():
     with pytest.raises(ValueError, match="unknown dataset"):
         downloader._selected_sources(["not-a-dataset"], include_alternates=False)
@@ -550,6 +569,36 @@ def test_prepare_prod_skips_download_and_uses_production_builder(tmp_path, monke
     assert landmark_path.is_file()
 
 
+def test_prepare_prod_downloads_default_when_prod_dir_missing(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+
+    def fake_download(datasets, *, output_root, **kwargs):
+        assert datasets == ["production_validated"]
+        assert kwargs["extract"] is True
+        source = _make_production_source(
+            Path(output_root) / "production_validated" / "extracted"
+        )
+        results = _fake_results("production_validated", source)
+        return results, downloader.build_registry(results, Path(output_root))
+
+    monkeypatch.setattr(downloader, "download_datasets", fake_download)
+
+    args = _prepare_args(
+        datasets=["prod"],
+        data_root=data_root,
+        output_root=output_root,
+        prod_dir=None,
+        skip_download=False,
+    )
+
+    assert prepare.prepare(args) == 0
+
+    payload = json.loads((output_root / "manifest.json").read_text("utf-8"))
+    assert payload["metadata"]["dataset"] == "production_validated"
+    assert payload["metadata"]["sample_count"] == 1
+
+
 @pytest.mark.parametrize(
     ("runtime_bucket", "expected_primary"),
     [("normal", "normal"), (None, "unknown")],
@@ -615,14 +664,24 @@ def test_prepare_prod_merges_with_generic_dataset(
     assert payload["metadata"]["sample_count"] == 3
 
 
-def test_prepare_prod_requires_prod_dir(tmp_path):
-    args = _prepare_args(
-        datasets=["prod"],
-        data_root=tmp_path / "data",
-        output_root=tmp_path / "out",
-    )
+def test_production_manifest_downloads_default_without_prod_dir(tmp_path, monkeypatch):
+    output_dir = tmp_path / "out"
 
-    assert prepare.prepare(args) == 2
+    def fake_download(datasets, *, output_root, **kwargs):
+        assert datasets == ["production_validated"]
+        assert kwargs["extract"] is True
+        source = _make_production_source(
+            Path(output_root) / "production_validated" / "extracted"
+        )
+        results = _fake_results("production_validated", source)
+        return results, downloader.build_registry(results, Path(output_root))
+
+    monkeypatch.setattr(downloader, "download_datasets", fake_download)
+
+    assert production_builder.main(["--output-dir", str(output_dir)]) == 0
+
+    payload = json.loads((output_dir / "manifest.json").read_text("utf-8"))
+    assert payload["metadata"]["sample_count"] == 1
 
 
 def test_resolve_parallel_budget_priority_and_cap(monkeypatch):
