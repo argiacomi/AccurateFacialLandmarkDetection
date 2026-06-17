@@ -37,6 +37,23 @@ class TrainerDataLoaders:
     full_test_dataloader: torch.utils.data.DataLoader
 
 
+class DistributedEvalSampler(torch.utils.data.Sampler[int]):
+    """Shard eval datasets by stable index without padding or duplication."""
+
+    def __init__(self, dataset: T.Sized, *, rank: int, world_size: int) -> None:
+        self.dataset = dataset
+        self.rank = int(rank)
+        self.world_size = max(int(world_size), 1)
+
+    def __iter__(self):
+        return iter(range(self.rank, len(self.dataset), self.world_size))
+
+    def __len__(self) -> int:
+        if self.rank >= len(self.dataset):
+            return 0
+        return ((len(self.dataset) - 1 - self.rank) // self.world_size) + 1
+
+
 def _sampler_targets_summary(targets: T.Mapping[str, T.Any]) -> str:
     bucket = targets.get("bucket", {}) if isinstance(targets, dict) else {}
     dataset = targets.get("dataset", {}) if isinstance(targets, dict) else {}
@@ -104,17 +121,29 @@ def build_training_loaders(
         args.eval_max_samples,
         args.seed,
     )
+    eval_sampler = (
+        DistributedEvalSampler(eval_dataset, rank=rank, world_size=world_size)
+        if world_size > 1
+        else None
+    )
     test_dataloader = torch.utils.data.DataLoader(
         eval_dataset,
         batch_size=args.eval_batch_size,
+        sampler=eval_sampler,
         collate_fn=eval_collate,
         **dataloader_kwargs(args, eval_loader=True),
     )
     full_test_dataloader = test_dataloader
     if int(args.eval_max_samples or 0) > 0 and len(eval_dataset) < len(test_dataset):
+        full_eval_sampler = (
+            DistributedEvalSampler(test_dataset, rank=rank, world_size=world_size)
+            if world_size > 1
+            else None
+        )
         full_test_dataloader = torch.utils.data.DataLoader(
             test_dataset,
             batch_size=args.eval_batch_size,
+            sampler=full_eval_sampler,
             collate_fn=eval_collate,
             **dataloader_kwargs(args, eval_loader=True),
         )
@@ -183,4 +212,4 @@ def build_training_loaders(
     )
 
 
-__all__ = ["TrainerDataLoaders", "build_training_loaders"]
+__all__ = ["DistributedEvalSampler", "TrainerDataLoaders", "build_training_loaders"]

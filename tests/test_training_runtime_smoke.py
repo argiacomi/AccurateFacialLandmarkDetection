@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import TrainHeatmapStageFP16 as train
+import lib.training.evaluator as evaluator
 from lib.training.cli import build_heatmap_stage_arg_parser
 from lib.training.config import (
     DatasetBuildConfig,
@@ -16,6 +17,7 @@ from lib.training.config import (
     TrainingRuntimeConfig,
     config_dict,
 )
+from lib.training.loaders import DistributedEvalSampler
 from tools import run_cdvit_manifest_training_pipeline as pipeline
 
 
@@ -136,6 +138,55 @@ def test_eval_interval_throttling_runs_intervals_and_final_epoch():
     assert train._should_run_interval(5, 8, 9) is False
     assert train._should_run_interval(5, 9, 9) is True
     assert train._should_run_interval(0, 9, 9) is False
+
+
+def test_distributed_eval_sampler_shards_without_padding():
+    dataset = list(range(10))
+
+    assert list(DistributedEvalSampler(dataset, rank=0, world_size=3)) == [0, 3, 6, 9]
+    assert list(DistributedEvalSampler(dataset, rank=1, world_size=3)) == [1, 4, 7]
+    assert list(DistributedEvalSampler(dataset, rank=2, world_size=3)) == [2, 5, 8]
+    assert len(DistributedEvalSampler(dataset, rank=0, world_size=3)) == 4
+    assert len(DistributedEvalSampler(dataset, rank=2, world_size=3)) == 3
+
+
+def test_evaluate_landmark_model_gathers_distributed_overall_nmes(monkeypatch):
+    points = torch.stack(
+        [torch.linspace(0.0, 1.0, 68), torch.linspace(0.1, 0.9, 68)], dim=1
+    )
+
+    class PerfectModel(torch.nn.Module):
+        def forward(self, data):
+            pred = points.unsqueeze(0).repeat(data.shape[0], 1, 1)
+            heatmap = torch.zeros(data.shape[0], 68, 8, 8)
+            return [(pred, heatmap)]
+
+    def fake_all_gather_object(gathered, local_items):
+        gathered[0] = list(local_items)
+        gathered[1] = [0.2]
+
+    monkeypatch.setattr(evaluator.dist, "is_available", lambda: True)
+    monkeypatch.setattr(evaluator.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(evaluator.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(evaluator.dist, "all_gather_object", fake_all_gather_object)
+
+    batch = (
+        torch.zeros(1, 3, 8, 8),
+        points.unsqueeze(0),
+        torch.ones(1, 68),
+        [{"sample_id": "rank0"}],
+    )
+    report = evaluator.evaluate_landmark_model(
+        PerfectModel(),
+        [batch],
+        torch.device("cpu"),
+        build_records=False,
+        show_progress=False,
+        distributed=True,
+    )
+
+    assert report["overall"]["sample_count"] == 2
+    assert report["overall"]["nme"] == pytest.approx(0.1)
 
 
 def test_training_compat_detects_manifest_sha_mismatch(tmp_path):

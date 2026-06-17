@@ -229,6 +229,11 @@ def _save_best_weights(state_dict, ckpt_folder: str | os.PathLike[str]) -> None:
     torch.save(state_dict, ckpt_path / "best.weights.pt")
 
 
+def _distributed_barrier() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
 def _is_schema_extension_key(key: str) -> bool:
     return key.startswith(("schema_output_layers.", "auxiliary_output_layers."))
 
@@ -567,7 +572,7 @@ def main():
             if args.star_loss_weight > 0
             else None
         )
-        ema = EMA(net.module, 0.99, 100, 10) if is_rank_zero() else None
+        ema = EMA(net.module, 0.99, 100, 10)
         scaler = make_grad_scaler(device)
         if isinstance(resume_checkpoint, dict) and "model" in resume_checkpoint:
             start_epoch, best_nme, best_record = _restore_training_checkpoint(
@@ -594,39 +599,13 @@ def main():
                     f"{args.epoch}; training already complete for this target",
                     level=Verbosity.QUIET,
                 )
-            if dist.is_initialized():
-                barrier_start = time.time()
-                dist.barrier()
-                wait_seconds = time.time() - barrier_start
-                local_wait = torch.tensor(
-                    [wait_seconds], device=device, dtype=torch.float64
-                )
-                gathered_waits = [
-                    torch.zeros_like(local_wait)
-                    for _ in range(distributed_world_size())
-                ]
-                dist.all_gather(gathered_waits, local_wait)
-                if is_rank_zero():
-                    waits = [float(value.item()) for value in gathered_waits]
-                    append_runtime_metrics(
-                        args,
-                        {
-                            "event": "distributed_eval_wait",
-                            "epoch": int(start_epoch),
-                            "distributed_eval_wait_seconds": round(max(waits), 6),
-                            "distributed_eval_wait_seconds_by_rank": {
-                                str(rank): round(wait, 6)
-                                for rank, wait in enumerate(waits)
-                            },
-                        },
-                    )
+            _distributed_barrier()
             return
         for epoch in range(start_epoch, args.epoch):
             args.current_epoch = int(epoch)
             n = 0
             net.train()
-            if is_rank_zero():
-                ema.train()
+            ema.train()
             if is_rank_zero():
                 epoch_start_time = time.time()
                 epoch_timing = empty_epoch_timing()
@@ -866,8 +845,7 @@ def main():
                 #                 loss.backward()
                 #                 optimizer.step()
 
-                if is_rank_zero():
-                    ema.update_parameters(net.module)
+                ema.update_parameters(net.module)
                 n += data.shape[0]
                 if is_rank_zero() and train_progress is not None:
                     update_training_progress(
@@ -975,23 +953,26 @@ def main():
             # own RNG state instead of replaying rank 0 RNG everywhere.
             _set_checkpoint_rng_state_by_rank(_collect_rng_state_by_rank())
 
+            final_epoch = int(args.epoch) - 1
+            eval_schedule = build_eval_schedule(
+                args,
+                epoch,
+                final_epoch,
+                limited_eval=eval_dataset is not test_dataset,
+                has_ema=ema is not None,
+            )
+            should_eval_model = eval_schedule.should_eval_model
+            eval_loader = (
+                full_test_dataloader if eval_schedule.run_full_eval else test_dataloader
+            )
+            eval_scope = eval_schedule.eval_scope
+            is_full_eval = eval_schedule.is_full_eval
+            should_build_eval_records = eval_schedule.should_build_records
+            model_report = None
+            ema_report = None
+            best_weights_state_dict = None
+
             if is_rank_zero():
-                if args.save_n_epoch > 0 and (epoch + 1) % args.save_n_epoch == 0:
-                    time_call(
-                        epoch_timing,
-                        "checkpoint_seconds",
-                        _save_training_checkpoint,
-                        Path(args.ckpt_folder) / f"checkpoint_epoch_{epoch:04d}.pt",
-                        net,
-                        optimizer,
-                        scheduler,
-                        scaler,
-                        ema,
-                        epoch,
-                        best_nme,
-                        best_record,
-                        args,
-                    )
                 duration = time.time() - epoch_start_time
                 samples_per_second = float(global_train_samples) / max(duration, 1e-9)
                 peak_memory_mb = cuda_peak_memory_mb(device)
@@ -1018,23 +999,6 @@ def main():
                     },
                 )
 
-                final_epoch = int(args.epoch) - 1
-                eval_schedule = build_eval_schedule(
-                    args,
-                    epoch,
-                    final_epoch,
-                    limited_eval=eval_dataset is not test_dataset,
-                    has_ema=ema is not None,
-                )
-                should_eval_model = eval_schedule.should_eval_model
-                eval_loader = (
-                    full_test_dataloader
-                    if eval_schedule.run_full_eval
-                    else test_dataloader
-                )
-                eval_scope = eval_schedule.eval_scope
-                is_full_eval = eval_schedule.is_full_eval
-                should_build_eval_records = eval_schedule.should_build_records
                 if eval_schedule.forced_final_full_eval:
                     log_event(
                         "eval",
@@ -1043,8 +1007,6 @@ def main():
                         "validation set",
                         level=Verbosity.VERBOSE,
                     )
-                model_report = None
-                ema_report = None
                 if should_eval_model and not should_build_eval_records:
                     log_event(
                         "eval",
@@ -1054,27 +1016,29 @@ def main():
                         level=Verbosity.VERBOSE,
                     )
 
-                if should_eval_model:
-                    eval_start_time = start_timing(
-                        device=device, synchronize=args.synchronize_runtime_timing
+            if should_eval_model:
+                eval_start_time = start_timing(
+                    device=device, synchronize=args.synchronize_runtime_timing
+                )
+                with torch.inference_mode():
+                    model_report = evaluate_landmark_model(
+                        net.module,
+                        eval_loader,
+                        device,
+                        include_records=bool(
+                            args.eval_records_jsonl or args.eval_records_csv
+                        ),
+                        non_blocking=args.pin_memory,
+                        build_records=should_build_eval_records,
+                        show_progress=args.eval_progress and is_rank_zero(),
+                        distributed=distributed_is_active(),
                     )
-                    with torch.inference_mode():
-                        model_report = evaluate_landmark_model(
-                            net.module,
-                            eval_loader,
-                            device,
-                            include_records=bool(
-                                args.eval_records_jsonl or args.eval_records_csv
-                            ),
-                            non_blocking=args.pin_memory,
-                            build_records=should_build_eval_records,
-                            show_progress=args.eval_progress,
-                        )
-                    eval_seconds = elapsed_timing(
-                        eval_start_time,
-                        device=device,
-                        synchronize=args.synchronize_runtime_timing,
-                    )
+                eval_seconds = elapsed_timing(
+                    eval_start_time,
+                    device=device,
+                    synchronize=args.synchronize_runtime_timing,
+                )
+                if is_rank_zero():
                     epoch_timing["eval_seconds"] = (
                         float(epoch_timing.get("eval_seconds", 0.0)) + eval_seconds
                     )
@@ -1082,28 +1046,7 @@ def main():
                     if is_full_eval and nme is not None and best_nme > nme:
                         best_nme = nme
                         best_record.append((epoch, best_nme * 100))
-                        time_call(
-                            epoch_timing,
-                            "checkpoint_seconds",
-                            _save_best_weights,
-                            net.module.state_dict(),
-                            args.ckpt_folder,
-                        )
-                        time_call(
-                            epoch_timing,
-                            "checkpoint_seconds",
-                            _save_training_checkpoint,
-                            Path(args.ckpt_folder) / "best_checkpoint.pt",
-                            net,
-                            optimizer,
-                            scheduler,
-                            scaler,
-                            ema,
-                            epoch,
-                            best_nme,
-                            best_record,
-                            args,
-                        )
+                        best_weights_state_dict = net.module.state_dict()
                     print_eval_summary(f"test {eval_scope}", model_report)
                     log_event(
                         "eval",
@@ -1121,7 +1064,8 @@ def main():
                             ),
                         },
                     )
-                else:
+            else:
+                if is_rank_zero():
                     log_event(
                         "eval",
                         f"skipping model eval at epoch {epoch}; "
@@ -1129,20 +1073,22 @@ def main():
                         level=Verbosity.INFO,
                     )
 
-                should_eval_ema = eval_schedule.should_eval_ema
-                if should_eval_ema:
-                    ema_eval_start_time = start_timing(
-                        device=device, synchronize=args.synchronize_runtime_timing
+            should_eval_ema = eval_schedule.should_eval_ema
+            if should_eval_ema:
+                ema_eval_start_time = start_timing(
+                    device=device, synchronize=args.synchronize_runtime_timing
+                )
+                with torch.inference_mode():
+                    ema_report = evaluate_landmark_model(
+                        ema,
+                        eval_loader,
+                        device,
+                        non_blocking=args.pin_memory,
+                        build_records=should_build_eval_records,
+                        show_progress=args.eval_progress and is_rank_zero(),
+                        distributed=distributed_is_active(),
                     )
-                    with torch.inference_mode():
-                        ema_report = evaluate_landmark_model(
-                            ema,
-                            eval_loader,
-                            device,
-                            non_blocking=args.pin_memory,
-                            build_records=should_build_eval_records,
-                            show_progress=args.eval_progress,
-                        )
+                if is_rank_zero():
                     accumulate_timing(
                         epoch_timing,
                         "ema_eval_seconds",
@@ -1154,28 +1100,7 @@ def main():
                     if is_full_eval and nme is not None and best_nme > nme:
                         best_nme = nme
                         best_record.append((epoch, "ema", best_nme * 100))
-                        time_call(
-                            epoch_timing,
-                            "checkpoint_seconds",
-                            _save_best_weights,
-                            ema.model.state_dict(),
-                            args.ckpt_folder,
-                        )
-                        time_call(
-                            epoch_timing,
-                            "checkpoint_seconds",
-                            _save_training_checkpoint,
-                            Path(args.ckpt_folder) / "best_checkpoint.pt",
-                            net,
-                            optimizer,
-                            scheduler,
-                            scaler,
-                            ema,
-                            epoch,
-                            best_nme,
-                            best_record,
-                            args,
-                        )
+                        best_weights_state_dict = ema.model.state_dict()
                     print_eval_summary(f"test ema {eval_scope}", ema_report)
                     best_history = " | ".join(
                         (
@@ -1190,7 +1115,8 @@ def main():
                         f"best history: {best_history or '-'}",
                         level=Verbosity.VERBOSE,
                     )
-                elif ema is not None and should_eval_model:
+            elif ema is not None and should_eval_model:
+                if is_rank_zero():
                     reason = (
                         eval_schedule.ema_skip_reason
                         or f"--eval-ema-every={args.eval_ema_every}"
@@ -1201,6 +1127,46 @@ def main():
                         level=Verbosity.INFO,
                     )
 
+            if is_rank_zero():
+                if best_weights_state_dict is not None:
+                    time_call(
+                        epoch_timing,
+                        "checkpoint_seconds",
+                        _save_best_weights,
+                        best_weights_state_dict,
+                        args.ckpt_folder,
+                    )
+                    time_call(
+                        epoch_timing,
+                        "checkpoint_seconds",
+                        _save_training_checkpoint,
+                        Path(args.ckpt_folder) / "best_checkpoint.pt",
+                        net,
+                        optimizer,
+                        scheduler,
+                        scaler,
+                        ema,
+                        epoch,
+                        best_nme,
+                        best_record,
+                        args,
+                    )
+                if args.save_n_epoch > 0 and (epoch + 1) % args.save_n_epoch == 0:
+                    time_call(
+                        epoch_timing,
+                        "checkpoint_seconds",
+                        _save_training_checkpoint,
+                        Path(args.ckpt_folder) / f"checkpoint_epoch_{epoch:04d}.pt",
+                        net,
+                        optimizer,
+                        scheduler,
+                        scaler,
+                        ema,
+                        epoch,
+                        best_nme,
+                        best_record,
+                        args,
+                    )
                 if model_report is not None:
                     records = records_from_report(model_report)
                     compact_model_report = {
@@ -1244,6 +1210,8 @@ def main():
                         / "last_checkpoint.weights.pt",
                     )
 
+            _distributed_barrier()
+            if is_rank_zero():
                 final_epoch_timing = finalize_epoch_timing(
                     epoch_timing,
                     epoch_wall_seconds=time.time() - epoch_start_time,
@@ -1268,9 +1236,6 @@ def main():
                         best_record,
                         global_train_samples,
                     )
-
-            if dist.is_initialized():
-                dist.barrier()
 
 
 if __name__ == "__main__":

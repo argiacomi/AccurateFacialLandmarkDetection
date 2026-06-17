@@ -4,6 +4,7 @@ import os
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data._utils.collate import default_collate
 
 from lib.core.schema import head_name_for_schema
@@ -270,6 +271,18 @@ def _append_finite_nmes(target, values):
     target.extend(float(value) for value in arr[np.isfinite(arr)])
 
 
+def _gather_distributed_eval_items(items):
+    if not (dist.is_available() and dist.is_initialized()):
+        return list(items)
+    gathered = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered, list(items))
+    combined = []
+    for rank_items in gathered:
+        if rank_items:
+            combined.extend(rank_items)
+    return combined
+
+
 def evaluate_landmark_model(
     model,
     test_dataloader,
@@ -279,6 +292,7 @@ def evaluate_landmark_model(
     non_blocking=False,
     build_records=True,
     show_progress=True,
+    distributed=False,
 ):
     """Evaluate landmarks with optional per-sample slice-report records.
 
@@ -373,6 +387,12 @@ def evaluate_landmark_model(
                 nme_values,
                 _masked_nme_values(pred_keypoints, keypoints, landmark_mask),
             )
+
+    if distributed:
+        if build_records:
+            records = _gather_distributed_eval_items(records)
+        else:
+            nme_values = _gather_distributed_eval_items(nme_values)
 
     if build_records:
         report = build_slice_report(records)
