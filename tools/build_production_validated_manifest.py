@@ -453,6 +453,12 @@ def build_manifest(
                 projection = projection_audit_for_schema(
                     source_schema, target_schema=target_schema
                 )
+                # The manifest validator only accepts a fixed set of audit
+                # statuses; an audited cross-schema projection is recorded as
+                # "projected" (the raw audit detail stays in projection_to_68).
+                audit_status = (
+                    "native" if source_schema == target_schema else "projected"
+                )
                 sample = {
                     "sample_id": sample_id,
                     "dataset": dataset_name,
@@ -469,7 +475,7 @@ def build_manifest(
                     "source": {"dataset": dataset_name, "source_id": sample_id},
                     "metadata": metadata,
                     "mapping_audit": {
-                        "status": projection["status"],
+                        "status": audit_status,
                         "source_schema": source_schema,
                         "target_schema": target_schema,
                         "projection_to_68": projection,

@@ -383,12 +383,12 @@ def _complete_production_sample_contract(sample: dict[str, T.Any]) -> None:
         or sample.get("image")
         or sample.get("sample_id")
     )
-    # production_validated mixes 68- and 98-point Faceswap faces; a 98-point
-    # source projected to canonical 68 is an audited projection, not a native
-    # match, so derive the status from the projection audit instead of assuming.
-    projection = projection_audit_for_schema(source_schema, target_schema=target_schema)
+    # production_validated mixes 68- and 98-point Faceswap faces. A 98-point
+    # source projected to canonical 68 is recorded as "projected" (a status the
+    # manifest validator accepts); same-schema faces stay "native". The raw
+    # projection audit detail is preserved under projection_to_68.
     mapping_audit = {
-        "status": projection["status"],
+        "status": "native" if source_schema == target_schema else "projected",
         "source_schema": source_schema,
         "target_schema": target_schema,
         "projection_to_68": projection_audit_for_schema(source_schema),
@@ -1813,15 +1813,31 @@ def prepare(args: argparse.Namespace) -> int:
             allow_normalized_non_256=bool(getattr(args, "stage_crops", False)),
         )
 
-    # Crop staging runs after validation (so a malformed manifest is never
-    # staged) and only when the manifest is valid. It augments the manifest in
-    # place; the loader falls back to native decode for any unstaged sample, so
-    # it can only speed training up, never change its data.
-    if (
-        built_any
-        and getattr(args, "stage_crops", False)
-        and (report is None or report.get("ok", False))
-    ):
+    # Crop staging runs after validation (so a structurally empty manifest is
+    # never staged) and whenever there is at least one valid sample. It augments
+    # the manifest in place and the loader falls back to native decode for any
+    # unstaged sample, so it can only speed training up, never change its data.
+    # A non-ok report (e.g. some corrupt/missing images, which is normal on real
+    # datasets) must not silently disable staging on the otherwise-valid samples;
+    # the invalid samples stay invalid whether or not staging runs.
+    has_valid_samples = report is None or int(report.get("valid_samples", 0)) > 0
+    if built_any and getattr(args, "stage_crops", False) and has_valid_samples:
+        if report is not None and not report.get("ok", False):
+            log_event(
+                "prepare",
+                (
+                    "stage-crops proceeding despite manifest validation ok=False | "
+                    f"valid {fmt_count(int(report.get('valid_samples', 0)))}/"
+                    f"{fmt_count(int(report.get('total_samples', 0)))} | "
+                    f"invalid {fmt_count(int(report.get('invalid_samples', 0)))} | "
+                    "staging skips unreadable samples; investigate invalid "
+                    "samples in the validation report"
+                ),
+                level=Verbosity.QUIET,
+                manifest=str(combined_manifest),
+                valid_samples=int(report.get("valid_samples", 0)),
+                invalid_samples=int(report.get("invalid_samples", 0)),
+            )
         combined_payload = _stage_combined_crops(
             combined_manifest, args, combined_payload
         )

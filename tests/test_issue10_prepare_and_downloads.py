@@ -762,7 +762,85 @@ def test_production_manifest_preserves_mixed_68_and_98_source_schema(tmp_path):
         assert np.load(output_dir / sample["landmarks"]).shape == (68, 2)
 
     assert by_schema["2d_68"]["mapping_audit"]["status"] == "native"
-    assert by_schema["2d_98"]["mapping_audit"]["status"] == "audited"
+    # A projected 98->68 face uses the validator-accepted "projected" status,
+    # not the raw "audited" projection-audit status (which the validator rejects).
+    assert by_schema["2d_98"]["mapping_audit"]["status"] == "projected"
+
+    from lib.manifest.validator import _validate_projection_audit
+
+    for sample in samples:
+        assert (
+            _validate_projection_audit(
+                sample,
+                source_schema=sample["source_schema"],
+                target_schema=sample["target_schema"],
+                allow_missing_projection_audit=False,
+            )
+            is None
+        )
+
+
+def test_prepare_prod_validates_98_point_faces(tmp_path):
+    # End-to-end guard: a 98-point production face must survive the full prepare
+    # validation (projected to 68 with a validator-accepted audit status).
+    pts98 = np.stack(
+        [np.linspace(60, 200, 98), np.linspace(70, 205, 98)], axis=1
+    ).tolist()
+    prod_dir = _make_production_source(tmp_path / "prod", points=pts98)
+    args = _prepare_args(
+        datasets=["prod"],
+        data_root=tmp_path / "data",
+        output_root=tmp_path / "out",
+        prod_dir=prod_dir,
+    )
+
+    assert prepare.prepare(args) == 0
+
+    payload = json.loads((tmp_path / "out" / "manifest.json").read_text("utf-8"))
+    sample = payload["samples"][0]
+    assert sample["source_schema"] == "2d_98"
+    assert sample["target_schema"] == "2d_68"
+    assert sample["head_name"] == "landmarks_68"
+    assert sample["mapping_audit"]["status"] == "projected"
+
+
+def test_prepare_stage_crops_runs_when_validation_not_ok(tmp_path, monkeypatch):
+    # Regression: --stage-crops used to be silently skipped whenever the combined
+    # manifest validated ok=False (which is normal when some images are corrupt).
+    # It must now stage the valid samples and emit a visible warning instead.
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+    _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2)
+
+    real_validate = prepare._validate
+
+    def fake_validate(manifest, **kwargs):
+        report = real_validate(manifest, **kwargs)
+        report["ok"] = False
+        report["invalid_samples"] = max(int(report.get("invalid_samples", 0)), 1)
+        report["valid_samples"] = max(int(report.get("valid_samples", 0)), 1)
+        return report
+
+    monkeypatch.setattr(prepare, "_validate", fake_validate)
+
+    staged = {"called": False}
+    real_stage = prepare._stage_combined_crops
+
+    def fake_stage(manifest, args, payload):
+        staged["called"] = True
+        return real_stage(manifest, args, payload)
+
+    monkeypatch.setattr(prepare, "_stage_combined_crops", fake_stage)
+
+    args = _prepare_args(
+        datasets=["wflw-v"],
+        data_root=data_root,
+        output_root=output_root,
+        stage_crops=True,
+    )
+    prepare.prepare(args)
+
+    assert staged["called"] is True
 
 
 def test_resolve_parallel_budget_priority_and_cap(monkeypatch):
