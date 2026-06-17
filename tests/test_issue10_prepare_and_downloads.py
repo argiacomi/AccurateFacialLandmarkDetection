@@ -944,6 +944,10 @@ def test_prepare_prints_validation_breakdown_on_failure(tmp_path, monkeypatch, c
     assert "validation FAILED" in out
     assert "missing_image=1" in out
     assert "wflw-v/s0" in out
+    # A real per-sample validation report is written and referenced in the log.
+    report_path = output_root / "validation_report.json"
+    assert report_path.is_file()
+    assert str(report_path) in out
 
 
 def test_resolve_parallel_budget_priority_and_cap(monkeypatch):

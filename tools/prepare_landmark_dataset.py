@@ -531,6 +531,7 @@ def _validate(
     manifest_payload: T.Mapping[str, T.Any] | None = None,
     allow_suspicious_geometry: bool = False,
     allow_normalized_non_256: bool = False,
+    report_path: Path | None = None,
 ) -> dict[str, T.Any]:
     return validate_training_manifest(
         manifest,
@@ -539,6 +540,7 @@ def _validate(
         raise_on_error=False,
         allow_suspicious_geometry=allow_suspicious_geometry,
         allow_normalized_non_256=allow_normalized_non_256,
+        report_path=report_path,
     )
 
 
@@ -1797,6 +1799,7 @@ def prepare(args: argparse.Namespace) -> int:
                 staged_tight=restored_tight,
                 staged_prepared=restored_prepared,
             )
+    validation_report_path = combined_manifest.parent / "validation_report.json"
     report: dict[str, T.Any] | None = None
     if built_any and not args.skip_validate:
         log_event(
@@ -1811,7 +1814,13 @@ def prepare(args: argparse.Namespace) -> int:
             manifest_payload=combined_payload,
             allow_suspicious_geometry=bool(getattr(args, "stage_crops", False)),
             allow_normalized_non_256=bool(getattr(args, "stage_crops", False)),
+            report_path=validation_report_path,
         )
+        report["report_path"] = str(validation_report_path)
+        if not report.get("ok", False):
+            # Surface why validation failed now -- before any long crop-staging
+            # step -- and point at the written per-sample report.
+            _log_validation_failures(report)
 
     # Crop staging runs after validation (so a structurally empty manifest is
     # never staged) and whenever there is at least one valid sample. It augments
@@ -1830,8 +1839,8 @@ def prepare(args: argparse.Namespace) -> int:
                     f"valid {fmt_count(int(report.get('valid_samples', 0)))}/"
                     f"{fmt_count(int(report.get('total_samples', 0)))} | "
                     f"invalid {fmt_count(int(report.get('invalid_samples', 0)))} | "
-                    "staging skips unreadable samples; investigate invalid "
-                    "samples in the validation report"
+                    "staging skips unreadable samples; see the validation report "
+                    f"{report.get('report_path', '')} for invalid-sample detail"
                 ),
                 level=Verbosity.QUIET,
                 manifest=str(combined_manifest),
@@ -1854,7 +1863,9 @@ def prepare(args: argparse.Namespace) -> int:
                 manifest_payload=combined_payload,
                 allow_suspicious_geometry=bool(getattr(args, "stage_crops", False)),
                 allow_normalized_non_256=bool(getattr(args, "stage_crops", False)),
+                report_path=validation_report_path,
             )
+            report["report_path"] = str(validation_report_path)
 
     _print_summary(
         results, report, output_root, datasets, manifest_payload=combined_payload
@@ -2002,11 +2013,14 @@ def _log_validation_failures(report: dict[str, T.Any] | None) -> None:
                 level=Verbosity.QUIET,
             )
 
+    report_path = report.get("report_path")
+    where = f"full per-sample detail in {report_path}; " if report_path else ""
     log_event(
         "prepare",
         (
-            "  invalid samples are dropped from training; fix the sources above and "
-            "re-run, or pass --skip-validate to bypass validation (not recommended)."
+            f"  {where}invalid samples are dropped from training. Fix the sources "
+            "above and re-run, or pass --skip-validate to bypass validation "
+            "(not recommended)."
         ),
         level=Verbosity.QUIET,
     )
@@ -2083,7 +2097,6 @@ def _print_summary(
             heads=report["heads"],
             leakage=report["leakage"],
         )
-        _log_validation_failures(report)
 
     if combined_manifest.is_file():
         log_event(
