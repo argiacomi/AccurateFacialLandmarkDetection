@@ -150,7 +150,7 @@ def test_distributed_eval_sampler_shards_without_padding():
     assert len(DistributedEvalSampler(dataset, rank=2, world_size=3)) == 3
 
 
-def test_evaluate_landmark_model_gathers_distributed_overall_nmes(monkeypatch):
+def test_evaluate_landmark_model_reduces_distributed_overall_nmes(monkeypatch):
     points = torch.stack(
         [torch.linspace(0.0, 1.0, 68), torch.linspace(0.1, 0.9, 68)], dim=1
     )
@@ -161,14 +161,21 @@ def test_evaluate_landmark_model_gathers_distributed_overall_nmes(monkeypatch):
             heatmap = torch.zeros(data.shape[0], 68, 8, 8)
             return [(pred, heatmap)]
 
-    def fake_all_gather_object(gathered, local_items):
-        gathered[0] = list(local_items)
-        gathered[1] = [0.2]
+    def fake_all_reduce(tensor, op=None):
+        del op
+        tensor[0] += 1.0
+        tensor[1] += 0.2
+        tensor[2] += 0.04
+
+    def fail_all_gather_object(*args, **kwargs):
+        raise AssertionError("overall-only eval should not pickle gather NME lists")
 
     monkeypatch.setattr(evaluator.dist, "is_available", lambda: True)
     monkeypatch.setattr(evaluator.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(evaluator.dist, "get_world_size", lambda: 2)
-    monkeypatch.setattr(evaluator.dist, "all_gather_object", fake_all_gather_object)
+    monkeypatch.setattr(evaluator.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(evaluator.dist, "all_reduce", fake_all_reduce)
+    monkeypatch.setattr(evaluator.dist, "all_gather_object", fail_all_gather_object)
 
     batch = (
         torch.zeros(1, 3, 8, 8),
@@ -187,6 +194,89 @@ def test_evaluate_landmark_model_gathers_distributed_overall_nmes(monkeypatch):
 
     assert report["overall"]["sample_count"] == 2
     assert report["overall"]["nme"] == pytest.approx(0.1)
+
+
+def test_evaluate_landmark_model_gathers_records_to_rank0_only(monkeypatch):
+    points = torch.stack(
+        [torch.linspace(0.0, 1.0, 68), torch.linspace(0.1, 0.9, 68)], dim=1
+    )
+
+    class PerfectModel(torch.nn.Module):
+        def forward(self, data):
+            pred = points.unsqueeze(0).repeat(data.shape[0], 1, 1)
+            heatmap = torch.zeros(data.shape[0], 68, 8, 8)
+            return [(pred, heatmap)]
+
+    def fake_gather_object(local_records, object_gather_list=None, dst=0):
+        assert dst == 0
+        assert object_gather_list is not None
+        object_gather_list[0] = list(local_records)
+        object_gather_list[1] = [{"sample_id": "rank1", "nme": 0.2}]
+
+    monkeypatch.setattr(evaluator.dist, "is_available", lambda: True)
+    monkeypatch.setattr(evaluator.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(evaluator.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(evaluator.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(evaluator.dist, "gather_object", fake_gather_object)
+
+    batch = (
+        torch.zeros(1, 3, 8, 8),
+        points.unsqueeze(0),
+        torch.ones(1, 68),
+        [{"sample_id": "rank0"}],
+    )
+    report = evaluator.evaluate_landmark_model(
+        PerfectModel(),
+        [batch],
+        torch.device("cpu"),
+        include_records=True,
+        show_progress=False,
+        distributed=True,
+    )
+
+    assert report["overall"]["sample_count"] == 2
+    assert {record["sample_id"] for record in report["records"]} == {"rank0", "rank1"}
+
+
+def test_evaluate_landmark_model_nonzero_rank_returns_empty_report(monkeypatch):
+    points = torch.stack(
+        [torch.linspace(0.0, 1.0, 68), torch.linspace(0.1, 0.9, 68)], dim=1
+    )
+
+    class PerfectModel(torch.nn.Module):
+        def forward(self, data):
+            pred = points.unsqueeze(0).repeat(data.shape[0], 1, 1)
+            heatmap = torch.zeros(data.shape[0], 68, 8, 8)
+            return [(pred, heatmap)]
+
+    def fake_gather_object(local_records, object_gather_list=None, dst=0):
+        assert dst == 0
+        assert local_records
+        assert object_gather_list is None
+
+    monkeypatch.setattr(evaluator.dist, "is_available", lambda: True)
+    monkeypatch.setattr(evaluator.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(evaluator.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(evaluator.dist, "get_rank", lambda: 1)
+    monkeypatch.setattr(evaluator.dist, "gather_object", fake_gather_object)
+
+    batch = (
+        torch.zeros(1, 3, 8, 8),
+        points.unsqueeze(0),
+        torch.ones(1, 68),
+        [{"sample_id": "rank1"}],
+    )
+    report = evaluator.evaluate_landmark_model(
+        PerfectModel(),
+        [batch],
+        torch.device("cpu"),
+        include_records=True,
+        show_progress=False,
+        distributed=True,
+    )
+
+    assert report["overall"]["sample_count"] == 0
+    assert report["records"] == []
 
 
 def test_training_compat_detects_manifest_sha_mismatch(tmp_path):

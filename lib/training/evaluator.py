@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -21,6 +22,7 @@ from lib.logging_utils import (
     log_event,
 )
 from lib.training.auxiliary import visibility_key_for_head
+from lib.training.loss_function import simps
 
 
 def eval_collate(batch):
@@ -271,16 +273,126 @@ def _append_finite_nmes(target, values):
     target.extend(float(value) for value in arr[np.isfinite(arr)])
 
 
-def _gather_distributed_eval_items(items):
+def _empty_eval_report(*, build_records: bool, include_records: bool):
+    if build_records:
+        report = build_slice_report([])
+        if include_records:
+            report["records"] = []
+        return report
+    return {
+        "overall": metrics_for_nmes([]),
+        "record_mode": "overall_only",
+    }
+
+
+def _distributed_eval_active() -> bool:
+    return bool(dist.is_available() and dist.is_initialized())
+
+
+def _gather_distributed_eval_records_to_rank0(records):
     if not (dist.is_available() and dist.is_initialized()):
-        return list(items)
-    gathered = [None for _ in range(dist.get_world_size())]
-    dist.all_gather_object(gathered, list(items))
+        return list(records)
+
+    rank = dist.get_rank()
+    gathered = [None for _ in range(dist.get_world_size())] if rank == 0 else None
+    if hasattr(dist, "gather_object"):
+        dist.gather_object(list(records), object_gather_list=gathered, dst=0)
+    else:  # pragma: no cover - compatibility for older PyTorch builds.
+        gathered = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(gathered, list(records))
+
+    if rank != 0:
+        return None
+
     combined = []
     for rank_items in gathered:
         if rank_items:
             combined.extend(rank_items)
     return combined
+
+
+def _distributed_overall_report_from_nmes(
+    nme_values,
+    device,
+    *,
+    threshold: float = 0.10,
+    step: float = 0.0001,
+):
+    if not _distributed_eval_active():
+        return {
+            "overall": metrics_for_nmes(nme_values, threshold=threshold),
+            "record_mode": "overall_only",
+        }
+
+    eval_device = torch.device(device)
+    values = torch.as_tensor(nme_values, dtype=torch.float64, device=eval_device)
+    if values.numel() > 0:
+        values = values[torch.isfinite(values)]
+
+    thresholds_np = np.arange(0, threshold + step, step, dtype=np.float64)
+    thresholds = torch.as_tensor(thresholds_np, dtype=torch.float64, device=eval_device)
+    if values.numel() > 0:
+        sorted_values = torch.sort(values).values
+        threshold_counts = torch.searchsorted(sorted_values, thresholds, right=True).to(
+            torch.float64
+        )
+        local_count = torch.tensor(
+            [values.numel()], dtype=torch.float64, device=eval_device
+        )
+        local_sum = values.sum().reshape(1)
+        local_sumsq = values.square().sum().reshape(1)
+    else:
+        threshold_counts = torch.zeros_like(thresholds)
+        local_count = torch.zeros(1, dtype=torch.float64, device=eval_device)
+        local_sum = torch.zeros(1, dtype=torch.float64, device=eval_device)
+        local_sumsq = torch.zeros(1, dtype=torch.float64, device=eval_device)
+
+    aggregate = torch.cat((local_count, local_sum, local_sumsq, threshold_counts))
+    dist.all_reduce(aggregate, op=dist.ReduceOp.SUM)
+
+    if dist.get_rank() != 0:
+        return None
+
+    sample_count = int(round(float(aggregate[0].item())))
+    if sample_count <= 0:
+        return _empty_eval_report(build_records=False, include_records=False)
+
+    nme_sum = float(aggregate[1].item())
+    nme_sumsq = float(aggregate[2].item())
+    nme = nme_sum / float(sample_count)
+    global_threshold_counts = aggregate[3:].detach().cpu().numpy()
+    ys = global_threshold_counts / float(sample_count)
+    fr = 1.0 - float(ys[-1])
+    auc = float(simps(ys, x=thresholds_np) / threshold)
+
+    if sample_count < 2:
+        ci = {"low": None, "high": None}
+    else:
+        variance = max(
+            0.0,
+            (nme_sumsq - (nme_sum * nme_sum) / float(sample_count))
+            / float(sample_count - 1),
+        )
+        stderr = math.sqrt(variance / float(sample_count))
+        ci = {"low": nme - 1.96 * stderr, "high": nme + 1.96 * stderr}
+
+    return {
+        "overall": {
+            "sample_count": sample_count,
+            "nme": float(nme),
+            "NME_all": float(nme),
+            "nme_percent": float(nme * 100.0),
+            "fr": float(fr),
+            "fr_percent": float(fr * 100.0),
+            "auc": auc,
+            "nme_ci95": ci,
+            "nme_percent_ci95": {
+                "low": None if ci["low"] is None else float(ci["low"] * 100.0),
+                "high": None if ci["high"] is None else float(ci["high"] * 100.0),
+            },
+        },
+        "record_mode": "overall_only",
+    }
 
 
 def evaluate_landmark_model(
@@ -388,11 +500,18 @@ def evaluate_landmark_model(
                 _masked_nme_values(pred_keypoints, keypoints, landmark_mask),
             )
 
-    if distributed:
-        if build_records:
-            records = _gather_distributed_eval_items(records)
-        else:
-            nme_values = _gather_distributed_eval_items(nme_values)
+    if distributed and build_records:
+        records = _gather_distributed_eval_records_to_rank0(records)
+        if records is None:
+            return _empty_eval_report(
+                build_records=True,
+                include_records=include_records,
+            )
+    elif distributed:
+        report = _distributed_overall_report_from_nmes(nme_values, eval_device)
+        if report is None:
+            return _empty_eval_report(build_records=False, include_records=False)
+        return report
 
     if build_records:
         report = build_slice_report(records)
