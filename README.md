@@ -256,10 +256,10 @@ record of a run always lives in those files regardless of console settings:
 The trainer, pipeline, and dataset tools share two console flags:
 
 - `--log-level quiet|info|verbose|debug` (default `info`):
-  - `quiet` — only epoch/eval/stage summaries and errors.
-  - `info` — adds the live training progress bar (or compact periodic `[train]` lines in non-TTY/JSON output).
-  - `verbose` — adds schema-head diagnostics, the domain-balanced sampler mix, and checkpoint writes.
-  - `debug` — adds full structures (e.g. raw sampler diagnostics, per-stage JSON) and stdlib `logger` output.
+    - `quiet` — only epoch/eval/stage summaries and errors.
+    - `info` — adds the live training progress bar (or compact periodic `[train]` lines in non-TTY/JSON output).
+    - `verbose` — adds schema-head diagnostics, the domain-balanced sampler mix, and checkpoint writes.
+    - `debug` — adds full structures (e.g. raw sampler diagnostics, per-stage JSON) and stdlib `logger` output.
 - `--log-format human|json`: `human` prints tagged lines; `json` emits one JSON object per event for CI/log parsing. The structured metrics files above are written either way.
 
 ```text
