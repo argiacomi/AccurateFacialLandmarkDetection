@@ -550,20 +550,66 @@ def _f1_at_threshold(
 
 
 def _roc_auc(labels: np.ndarray, scores: np.ndarray) -> float | None:
-    pos_scores = scores[labels == 1]
-    neg_scores = scores[labels == 0]
-    if pos_scores.size == 0 or neg_scores.size == 0:
+    n_pos = int(np.sum(labels == 1))
+    n_neg = int(labels.size - n_pos)
+    if n_pos == 0 or n_neg == 0:
         return None
-    comparisons = (pos_scores[:, None] > neg_scores[None, :]).astype(np.float32)
-    comparisons += 0.5 * (pos_scores[:, None] == neg_scores[None, :]).astype(np.float32)
-    return float(np.mean(comparisons))
+    # Mann-Whitney U formulation: rank all scores (tied scores share the
+    # average rank), then AUC = (sum of positive ranks - n_pos*(n_pos+1)/2)
+    # / (n_pos * n_neg). This is O(n log n) time and O(n) memory, versus the
+    # O(n_pos * n_neg) pairwise comparison matrix it replaces.
+    order = np.argsort(scores, kind="mergesort")
+    sorted_scores = scores[order]
+    _, inverse, counts = np.unique(
+        sorted_scores, return_inverse=True, return_counts=True
+    )
+    ends = np.cumsum(counts)
+    starts = ends - counts
+    # Average of the 1-based ranks spanned by each tied group.
+    group_avg_rank = (starts + 1 + ends) / 2.0
+    ranks = np.empty(scores.size, dtype=np.float64)
+    ranks[order] = group_avg_rank[inverse]
+    rank_sum_pos = float(np.sum(ranks[labels == 1]))
+    return float((rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def _visibility_chunk_vectorized(
+    targets: T.Sequence[T.Any], record_scores: T.Sequence[T.Any]
+) -> tuple[np.ndarray, np.ndarray, int] | None:
+    """Extract (kept labels, kept scores, skipped count) for one record.
+
+    Returns ``None`` when the inputs are not cleanly numeric so the caller can
+    fall back to the exact per-element path. This replaces a Python loop over
+    every landmark (the dominant cost when called once per slice group).
+    """
+    try:
+        target_arr = np.asarray(targets, dtype=np.int64)
+        score_arr = np.asarray(record_scores, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if target_arr.ndim != 1 or score_arr.ndim != 1:
+        return None
+
+    valid_positions = np.flatnonzero((target_arr == 0) | (target_arr == 1))
+    # Targets whose score index falls outside the score list are skipped.
+    in_range = valid_positions[valid_positions < score_arr.size]
+    out_of_range = valid_positions.size - in_range.size
+    candidate_scores = score_arr[in_range]
+    finite = np.isfinite(candidate_scores)
+    skipped = int(out_of_range) + int((~finite).sum())
+    kept_positions = in_range[finite]
+    return (
+        target_arr[kept_positions],
+        candidate_scores[finite].astype(np.float32),
+        skipped,
+    )
 
 
 def visibility_metrics_for_records(
     records: T.Sequence[T.Mapping[str, T.Any]],
 ) -> dict[str, T.Any]:
-    labels: list[int] = []
-    scores: list[float] = []
+    label_chunks: list[np.ndarray] = []
+    score_chunks: list[np.ndarray] = []
     prediction_skipped = 0
     visibility_samples = 0
     for record in records:
@@ -574,30 +620,43 @@ def visibility_metrics_for_records(
         if not isinstance(record_scores, (list, tuple)):
             prediction_skipped += sum(1 for value in targets if int(value) in (0, 1))
             continue
-        record_has_prediction = False
-        for index, target in enumerate(targets):
-            target_i = int(target)
-            if target_i not in (0, 1):
-                continue
-            if index >= len(record_scores):
-                prediction_skipped += 1
-                continue
-            score = record_scores[index]
-            try:
-                score_f = float(score)
-            except (TypeError, ValueError):
-                prediction_skipped += 1
-                continue
-            if not np.isfinite(score_f):
-                prediction_skipped += 1
-                continue
-            labels.append(target_i)
-            scores.append(score_f)
-            record_has_prediction = True
-        if record_has_prediction:
+
+        chunk = _visibility_chunk_vectorized(targets, record_scores)
+        if chunk is None:
+            # Non-numeric / ragged input: fall back to exact per-element logic.
+            kept_labels: list[int] = []
+            kept_scores: list[float] = []
+            for index, target in enumerate(targets):
+                target_i = int(target)
+                if target_i not in (0, 1):
+                    continue
+                if index >= len(record_scores):
+                    prediction_skipped += 1
+                    continue
+                try:
+                    score_f = float(record_scores[index])
+                except (TypeError, ValueError):
+                    prediction_skipped += 1
+                    continue
+                if not np.isfinite(score_f):
+                    prediction_skipped += 1
+                    continue
+                kept_labels.append(target_i)
+                kept_scores.append(score_f)
+            if kept_labels:
+                label_chunks.append(np.asarray(kept_labels, dtype=np.int64))
+                score_chunks.append(np.asarray(kept_scores, dtype=np.float32))
+                visibility_samples += 1
+            continue
+
+        kept_label_arr, kept_score_arr, skipped = chunk
+        prediction_skipped += skipped
+        if kept_label_arr.size:
+            label_chunks.append(kept_label_arr)
+            score_chunks.append(kept_score_arr)
             visibility_samples += 1
 
-    if not labels:
+    if not label_chunks:
         return {
             "visibility_sample_count": 0,
             "visibility_label_count": 0,
@@ -607,8 +666,8 @@ def visibility_metrics_for_records(
             "visibility_ROC_AUC": None,
         }
 
-    label_arr = np.asarray(labels, dtype=np.int64)
-    score_arr = _sigmoid_if_logits(np.asarray(scores, dtype=np.float32))
+    label_arr = np.concatenate(label_chunks)
+    score_arr = _sigmoid_if_logits(np.concatenate(score_chunks))
     return {
         "visibility_sample_count": int(visibility_samples),
         "visibility_label_count": int(label_arr.size),
@@ -734,19 +793,12 @@ def build_slice_report(
         "by_face_size",
         "by_production_source",
     ):
-        groups: dict[str, list[float]] = {}
+        groups: dict[str, list[T.Mapping[str, T.Any]]] = {}
         for record in valid:
             label = str(record.get(slice_name) or "unknown")
-            groups.setdefault(label, []).append(float(record["nme"]))
+            groups.setdefault(label, []).append(record)
         report[slice_name] = {
-            label: metrics_for_records(
-                [
-                    record
-                    for record in valid
-                    if str(record.get(slice_name) or "unknown") == label
-                ],
-                threshold=threshold,
-            )
+            label: metrics_for_records(groups[label], threshold=threshold)
             for label in sorted(groups)
         }
     return report
