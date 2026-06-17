@@ -754,17 +754,17 @@ def test_production_manifest_preserves_mixed_68_and_98_source_schema(tmp_path):
     by_schema = {s["source_schema"]: s for s in samples}
 
     assert set(by_schema) == {"2d_68", "2d_98"}
+    # Each face is kept in its native schema so 98-point faces train landmarks_98.
     for source_schema, sample in by_schema.items():
-        # Both schemas project to the canonical 68 training target/head.
-        assert sample["target_schema"] == "2d_68"
-        assert sample["head_name"] == "landmarks_68"
-        assert sample["landmark_count"] == 68
-        assert np.load(output_dir / sample["landmarks"]).shape == (68, 2)
-
-    assert by_schema["2d_68"]["mapping_audit"]["status"] == "native"
-    # A projected 98->68 face uses the validator-accepted "projected" status,
-    # not the raw "audited" projection-audit status (which the validator rejects).
-    assert by_schema["2d_98"]["mapping_audit"]["status"] == "projected"
+        assert sample["target_schema"] == source_schema
+        assert sample["head_name"] == (
+            "landmarks_98" if source_schema == "2d_98" else "landmarks_68"
+        )
+        expected_count = 98 if source_schema == "2d_98" else 68
+        assert sample["landmark_count"] == expected_count
+        assert np.load(output_dir / sample["landmarks"]).shape == (expected_count, 2)
+        # Native schema (source == target) records a native, validator-accepted audit.
+        assert sample["mapping_audit"]["status"] == "native"
 
     from lib.manifest.validator import _validate_projection_audit
 
@@ -781,8 +781,8 @@ def test_production_manifest_preserves_mixed_68_and_98_source_schema(tmp_path):
 
 
 def test_prepare_prod_validates_98_point_faces(tmp_path):
-    # End-to-end guard: a 98-point production face must survive the full prepare
-    # validation (projected to 68 with a validator-accepted audit status).
+    # End-to-end guard: a 98-point production face survives full prepare
+    # validation as a NATIVE landmarks_98 sample (not collapsed to 68).
     pts98 = np.stack(
         [np.linspace(60, 200, 98), np.linspace(70, 205, 98)], axis=1
     ).tolist()
@@ -799,9 +799,11 @@ def test_prepare_prod_validates_98_point_faces(tmp_path):
     payload = json.loads((tmp_path / "out" / "manifest.json").read_text("utf-8"))
     sample = payload["samples"][0]
     assert sample["source_schema"] == "2d_98"
-    assert sample["target_schema"] == "2d_68"
-    assert sample["head_name"] == "landmarks_68"
-    assert sample["mapping_audit"]["status"] == "projected"
+    assert sample["target_schema"] == "2d_98"
+    assert sample["head_name"] == "landmarks_98"
+    assert sample["landmark_count"] == 98
+    assert sample["mapping_audit"]["status"] == "native"
+    assert np.load(tmp_path / "out" / sample["landmarks"]).shape == (98, 2)
 
 
 def test_prepare_stage_crops_runs_when_validation_not_ok(tmp_path, monkeypatch):

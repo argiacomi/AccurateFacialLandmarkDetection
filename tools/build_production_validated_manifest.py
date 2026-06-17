@@ -279,12 +279,14 @@ def _first_present(mapping: T.Mapping[str, T.Any], keys: T.Sequence[str]) -> T.A
 
 
 def _landmarks(face: T.Mapping[str, T.Any]) -> tuple[np.ndarray, str]:
-    """Return ``(canonical_68_points, source_schema)`` for a Faceswap face.
+    """Return ``(native_points, source_schema)`` for a Faceswap face.
 
-    Faceswap alignments legitimately mix 68- and 98-point faces. Both are mapped
-    to canonical 68 here (98 via the audited ``MAP_98_TO_68`` projection), but the
-    original source schema is returned so the manifest can record real provenance
-    instead of flattening every face to ``2d_68``.
+    Faceswap alignments legitimately mix 68- and 98-point faces. Each face is
+    kept in its NATIVE schema (68 or 98) so 98-point faces can train the native
+    ``landmarks_98`` head and participate in 2d_98 schema balancing. The
+    production ``landmarks_68`` head is still regularized from 98-point samples
+    through the consistency projection (``--schema-consistency-weight``), so no
+    98->68 collapse happens at build time.
     """
 
     raw = _first_present(face, ("landmarks_xy", "landmarks", "landmarksXY", "landmark"))
@@ -302,15 +304,16 @@ def _landmarks(face: T.Mapping[str, T.Any]) -> tuple[np.ndarray, str]:
         raise ValueError(f"expected Nx2 landmarks, got {raw_points.shape}")
 
     source_schema = "2d_98" if raw_points.shape[0] == 98 else "2d_68"
-    points = normalize_landmarks(raw_points[:, :2], source_schema=source_schema)
+    points = np.ascontiguousarray(raw_points[:, :2], dtype=np.float32)
 
-    if points.shape != (68, 2):
+    expected = point_count_for_schema(source_schema)
+    if points.shape != (expected, 2):
         raise ValueError(
-            f"expected canonical 68x2 landmarks from {source_schema}, got {points.shape}"
+            f"expected {expected}x2 landmarks for {source_schema}, got {points.shape}"
         )
     if not np.all(np.isfinite(points)):
         raise ValueError("landmarks contain NaN or infinite values")
-    return np.ascontiguousarray(points, dtype=np.float32), source_schema
+    return points, source_schema
 
 
 def _points_bbox_xyxy(points: np.ndarray) -> list[float]:
@@ -336,11 +339,12 @@ def _bbox(face: T.Mapping[str, T.Any], points: np.ndarray) -> list[float]:
     return [float(mins[0]), float(mins[1]), float(maxs[0]), float(maxs[1])]
 
 
-def _normalizer(face: T.Mapping[str, T.Any], points: np.ndarray) -> float:
-    # Match the quality dataset/WFLW path: normalize source landmarks to
-    # canonical 68 first, then use canonical eye-corner interocular distance.
-    del face
-    value = float(np.linalg.norm(points[36] - points[45]))
+def _normalizer(points: np.ndarray, source_schema: str) -> float:
+    # Project the native points to canonical 68 (identity for 2d_68, MAP_98_TO_68
+    # for 2d_98) and use the canonical outer-eye-corner interocular distance, so
+    # the normalizer is comparable across schemas regardless of native indexing.
+    canonical = normalize_landmarks(points, source_schema=source_schema)
+    value = float(np.linalg.norm(canonical[36] - canonical[45]))
     if not np.isfinite(value) or value <= 0:
         raise ValueError(
             f"invalid interocular normalizer after canonical 68 conversion: {value}"
@@ -442,23 +446,19 @@ def build_manifest(
                 )
                 # Pose buckets are scale/translation invariant, so classify on the
                 # native-frame points to stay independent of crop rounding.
-                metadata.update(_pose_metadata(dataset_name, points, "2d_68", metadata))
+                metadata.update(
+                    _pose_metadata(dataset_name, points, source_schema, metadata)
+                )
                 metadata.update(crop_metadata)
                 condition = _runtime_bucket(metadata) or "unknown"
                 conditions = list(
                     dict.fromkeys((condition, *_pose_condition_tags(metadata)))
                 )
                 landmark_path = _write_landmarks(output_dir, sample_id, crop_points)
-                target_schema = "2d_68"
-                projection = projection_audit_for_schema(
-                    source_schema, target_schema=target_schema
-                )
-                # The manifest validator only accepts a fixed set of audit
-                # statuses; an audited cross-schema projection is recorded as
-                # "projected" (the raw audit detail stays in projection_to_68).
-                audit_status = (
-                    "native" if source_schema == target_schema else "projected"
-                )
+                # Keep the native schema as the training target so 98-point faces
+                # train landmarks_98 (and join 2d_98 balancing); the 68 head is
+                # regularized via the consistency projection during training.
+                target_schema = source_schema
                 sample = {
                     "sample_id": sample_id,
                     "dataset": dataset_name,
@@ -471,14 +471,14 @@ def build_manifest(
                     "image": str(crop_image.resolve()),
                     "landmarks": landmark_path,
                     "face_bbox": _points_bbox_xyxy(crop_points),
-                    "normalizer": _normalizer(face, crop_points),
+                    "normalizer": _normalizer(crop_points, source_schema),
                     "source": {"dataset": dataset_name, "source_id": sample_id},
                     "metadata": metadata,
                     "mapping_audit": {
-                        "status": audit_status,
+                        "status": "native",
                         "source_schema": source_schema,
                         "target_schema": target_schema,
-                        "projection_to_68": projection,
+                        "projection_to_68": projection_audit_for_schema(source_schema),
                     },
                 }
             except Exception as err:  # noqa: BLE001
