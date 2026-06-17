@@ -1868,6 +1868,150 @@ def prepare(args: argparse.Namespace) -> int:
     return 1 if errored else 0
 
 
+def _format_top_counts(counts: T.Mapping[str, T.Any], *, limit: int = 15) -> str:
+    """Render a count mapping as ``k=v, k=v`` ordered by descending count."""
+
+    items = sorted(counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+    rendered = ", ".join(f"{key}={fmt_count(int(value))}" for key, value in items[:limit])
+    if len(items) > limit:
+        rendered += f", +{len(items) - limit} more"
+    return rendered or "-"
+
+
+def _log_build_errors(results: list[dict[str, T.Any]]) -> None:
+    """Surface per-dataset build failures at an always-visible level."""
+
+    errored = [record for record in results if record.get("status") == "error"]
+    if not errored:
+        return
+    log_event(
+        "prepare",
+        (
+            f"build FAILED for {fmt_count(len(errored))} dataset(s): "
+            + ", ".join(str(record.get("dataset", "?")) for record in errored)
+        ),
+        level=Verbosity.QUIET,
+        failed_datasets=[record.get("dataset") for record in errored],
+    )
+    for record in errored:
+        log_event(
+            "prepare",
+            f"  {record.get('dataset', '?')}: {record.get('error', 'unknown error')}",
+            level=Verbosity.QUIET,
+        )
+
+
+def _log_validation_failures(report: dict[str, T.Any] | None) -> None:
+    """Explain why a manifest validated ``ok=False`` so the run is actionable."""
+
+    if report is None or report.get("ok", False):
+        return
+
+    log_event(
+        "prepare",
+        (
+            "validation FAILED | "
+            f"manifest {report.get('manifest')} | "
+            f"invalid {fmt_count(int(report.get('invalid_samples', 0)))}/"
+            f"{fmt_count(int(report.get('total_samples', 0)))} | "
+            f"valid {fmt_count(int(report.get('valid_samples', 0)))}"
+        ),
+        level=Verbosity.QUIET,
+        manifest=report.get("manifest"),
+        invalid_samples=int(report.get("invalid_samples", 0)),
+        valid_samples=int(report.get("valid_samples", 0)),
+        invalid_by_dataset=report.get("invalid_by_dataset"),
+        invalid_reasons=report.get("invalid_reasons"),
+    )
+
+    reasons = report.get("invalid_reasons") or {}
+    if reasons:
+        log_event(
+            "prepare",
+            f"  reasons | {_format_top_counts(reasons)}",
+            level=Verbosity.QUIET,
+        )
+    by_dataset = report.get("invalid_by_dataset") or {}
+    if by_dataset:
+        log_event(
+            "prepare",
+            f"  by dataset | {_format_top_counts(by_dataset)}",
+            level=Verbosity.QUIET,
+        )
+    missing_fields = report.get("missing_required_fields") or {}
+    if missing_fields:
+        log_event(
+            "prepare",
+            f"  missing required fields | {_format_top_counts(missing_fields)}",
+            level=Verbosity.QUIET,
+        )
+
+    geometry = report.get("geometry") or {}
+    geometry_hits = {
+        key: int(geometry.get(key, 0))
+        for key in (
+            "landmarks_outside_image",
+            "unreasonable_loader_padding",
+            "suspicious_loader_padding",
+            "invalid_geometry",
+        )
+        if int(geometry.get(key, 0)) > 0
+    }
+    if geometry_hits:
+        log_event(
+            "prepare",
+            "  geometry | "
+            + ", ".join(f"{key}={fmt_count(value)}" for key, value in geometry_hits.items()),
+            level=Verbosity.QUIET,
+        )
+
+    violations = (report.get("leakage") or {}).get("violations") or []
+    if violations:
+        log_event(
+            "prepare",
+            f"  leakage | {fmt_count(len(violations))} split-safe violation(s)",
+            level=Verbosity.QUIET,
+        )
+        for violation in violations[:5]:
+            log_event(
+                "prepare",
+                (
+                    f"    {violation.get('field')}={violation.get('value')} "
+                    f"spans splits {violation.get('splits')}"
+                ),
+                level=Verbosity.QUIET,
+            )
+
+    examples = (report.get("examples") or {}).get("invalid") or []
+    if examples:
+        shown = examples[:10]
+        log_event(
+            "prepare",
+            f"  example invalid samples ({len(shown)} of <= {fmt_count(len(examples))} collected):",
+            level=Verbosity.QUIET,
+        )
+        for example in shown:
+            errs = example.get("errors") or []
+            err_text = "; ".join(str(err) for err in errs[:3]) or "unknown"
+            log_event(
+                "prepare",
+                (
+                    f"    {example.get('dataset', '?')}/{example.get('sample_id', '?')} "
+                    f"[{example.get('split', '')}]: {err_text}"
+                ),
+                level=Verbosity.QUIET,
+            )
+
+    log_event(
+        "prepare",
+        (
+            "  invalid samples are dropped from training; fix the sources above and "
+            "re-run, or pass --skip-validate to bypass validation (not recommended)."
+        ),
+        level=Verbosity.QUIET,
+    )
+
+
 def _print_summary(
     results: list[dict[str, T.Any]],
     report: dict[str, T.Any] | None,
@@ -1918,6 +2062,8 @@ def _print_summary(
             level=Verbosity.VERBOSE,
         )
 
+    _log_build_errors(results)
+
     if report is not None:
         log_event(
             "prepare",
@@ -1937,6 +2083,7 @@ def _print_summary(
             heads=report["heads"],
             leakage=report["leakage"],
         )
+        _log_validation_failures(report)
 
     if combined_manifest.is_file():
         log_event(

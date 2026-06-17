@@ -207,6 +207,8 @@ def validate_training_manifest(
         "schema_shape_mismatches": 0,
         "head_mismatches": 0,
         "projection_audit_errors": 0,
+        "invalid_by_dataset": Counter(),
+        "invalid_reasons": Counter(),
         "datasets": Counter(),
         "splits": Counter(),
         "schemas": Counter(),
@@ -582,6 +584,9 @@ def validate_training_manifest(
 
         if errors:
             report["invalid_samples"] += 1
+            report["invalid_by_dataset"][dataset or "unknown"] += 1
+            for err in errors:
+                report["invalid_reasons"][str(err).split(":", 1)[0]] += 1
             _example(
                 report,
                 "invalid",
@@ -624,6 +629,8 @@ def validate_training_manifest(
         "target_schemas",
         "heads",
         "hard_negative_buckets",
+        "invalid_by_dataset",
+        "invalid_reasons",
     ):
         report[key] = dict(sorted(report[key].items()))
 

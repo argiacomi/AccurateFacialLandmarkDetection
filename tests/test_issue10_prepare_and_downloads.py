@@ -843,6 +843,107 @@ def test_prepare_stage_crops_runs_when_validation_not_ok(tmp_path, monkeypatch):
     assert staged["called"] is True
 
 
+def _configure_info_logging():
+    from lib.logging_utils import configure_console_logging, verbosity_from_name
+
+    configure_console_logging(verbosity_from_name("info"), "human")
+
+
+def test_log_build_errors_lists_failed_datasets(capsys):
+    _configure_info_logging()
+    prepare._log_build_errors(
+        [
+            {"dataset": "wflw", "status": "ok"},
+            {"dataset": "cofw68", "status": "error", "error": "boom while parsing"},
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "build FAILED for 1 dataset(s): cofw68" in out
+    assert "cofw68: boom while parsing" in out
+
+
+def test_log_validation_failures_reports_actionable_breakdown(capsys):
+    _configure_info_logging()
+    report = {
+        "manifest": "data/prepared/manifest.json",
+        "ok": False,
+        "total_samples": 94384,
+        "valid_samples": 70911,
+        "invalid_samples": 23473,
+        "missing_required_fields": {"split_safe_id": 12},
+        "invalid_reasons": {
+            "missing_image": 12000,
+            "invalid_mapping_or_projection_audit_status": 9000,
+        },
+        "invalid_by_dataset": {"multipie": 9000, "fll3": 6473},
+        "geometry": {"suspicious_loader_padding": 2473},
+        "leakage": {
+            "violations": [
+                {"field": "image", "value": "/x/f.jpg", "splits": ["test", "train"]}
+            ]
+        },
+        "examples": {
+            "invalid": [
+                {
+                    "dataset": "multipie",
+                    "sample_id": "s_12",
+                    "split": "train",
+                    "errors": ["invalid_mapping_or_projection_audit_status:audited"],
+                }
+            ]
+        },
+    }
+    prepare._log_validation_failures(report)
+    out = capsys.readouterr().out
+    assert "validation FAILED" in out
+    assert "invalid 23,473/94,384" in out
+    assert "missing_image=12,000" in out
+    assert "by dataset | multipie=9,000" in out
+    assert "leakage | 1 split-safe violation(s)" in out
+    assert "multipie/s_12 [train]: invalid_mapping_or_projection_audit_status:audited" in out
+
+
+def test_log_validation_failures_silent_when_ok(capsys):
+    _configure_info_logging()
+    prepare._log_validation_failures({"ok": True})
+    assert "validation FAILED" not in capsys.readouterr().out
+
+
+def test_prepare_prints_validation_breakdown_on_failure(tmp_path, monkeypatch, capsys):
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "out"
+    _make_json_source(data_root / "wflw-v" / "extracted", dataset="wflw-v", count=2)
+
+    real_validate = prepare._validate
+
+    def fake_validate(manifest, **kwargs):
+        report = real_validate(manifest, **kwargs)
+        report["ok"] = False
+        report["invalid_samples"] = 1
+        report["invalid_reasons"] = {"missing_image": 1}
+        report["invalid_by_dataset"] = {"wflw-v": 1}
+        report.setdefault("examples", {})["invalid"] = [
+            {
+                "dataset": "wflw-v",
+                "sample_id": "s0",
+                "split": "train",
+                "errors": ["missing_image:/x.jpg"],
+            }
+        ]
+        return report
+
+    monkeypatch.setattr(prepare, "_validate", fake_validate)
+    args = _prepare_args(
+        datasets=["wflw-v"], data_root=data_root, output_root=output_root
+    )
+    prepare.prepare(args)
+
+    out = capsys.readouterr().out
+    assert "validation FAILED" in out
+    assert "missing_image=1" in out
+    assert "wflw-v/s0" in out
+
+
 def test_resolve_parallel_budget_priority_and_cap(monkeypatch):
     monkeypatch.setattr(prepare.os, "cpu_count", lambda: 8)
 
