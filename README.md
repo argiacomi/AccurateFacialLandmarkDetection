@@ -109,7 +109,7 @@ Dataset manifests preserve native trainable schemas when available, including 29
 
 ### Faceswap production alignment directories or zip archives
 
-By default, the production helper downloads the `production_validated` source from Google Drive file id `1XFW3_xx9t6gnyAIRY6g71keDzzHFRWRg`. Use `--prod-dir` only when you have a local directory or `.zip` archive containing production images and exactly one Faceswap `.fsa` alignments file. The local helper reads the `.fsa`, writes one canonical `(68, 2)` `.npy` landmark file per face, and emits a `production_validated` manifest.
+By default, the production helper downloads the `production_validated` source from Google Drive file id `1XFW3_xx9t6gnyAIRY6g71keDzzHFRWRg`. Use `--prod-dir` only when you have a local directory or `.zip` archive containing production images and exactly one Faceswap `.fsa` alignments file. Faceswap alignments legitimately mix 68- and 98-point faces; the helper projects each to canonical 68 (98 via the audited `MAP_98_TO_68` map) while recording the real `source_schema` (`2d_68` or `2d_98`) and `target_schema` (`2d_68`). Like the quality-dataset builders, it crops each face to a square `256x256` image (matching the loader's crop policy) and writes the landmarks remapped into that crop's coordinate frame, so the training loader sees a tight face instead of resizing the whole production frame.
 
 ```bash
 python tools/build_production_validated_manifest.py \
@@ -130,6 +130,7 @@ The output includes:
 
 ```text
 data/landmarks/production_validated/manifest.json
+data/landmarks/production_validated/images/production_validated/*.jpg
 data/landmarks/production_validated/landmarks/*.npy
 ```
 

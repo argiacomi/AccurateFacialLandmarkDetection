@@ -684,6 +684,87 @@ def test_production_manifest_downloads_default_without_prod_dir(tmp_path, monkey
     assert payload["metadata"]["sample_count"] == 1
 
 
+def _write_fsa_source_with_faces(
+    root: Path, *, frame_hw: tuple[int, int], faces: list[dict]
+) -> Path:
+    """Write a production source with a custom frame size and explicit faces."""
+    root.mkdir(parents=True, exist_ok=True)
+    image_name = "frame.jpg"
+    image = np.full((frame_hw[0], frame_hw[1], 3), 110, dtype=np.uint8)
+    assert cv2.imwrite(str(root / image_name), image)
+    payload = {"__data__": {image_name: {"faces": faces}}}
+    (root / "alignments.fsa").write_bytes(zlib.compress(pickle.dumps(payload)))
+    return root
+
+
+def test_production_manifest_crops_small_face_to_256(tmp_path):
+    # A small face inside a large native frame: the builder must crop+remap, not
+    # leave whole-frame landmarks for the loader to squash. Regression for the
+    # uncropped production_validated path that drove a ~28% eval NME.
+    xs = np.linspace(840, 1040, 68)
+    ys = np.linspace(430, 660, 68)
+    native_pts = np.stack([xs, ys], axis=1)
+    face = {
+        "landmarks_xy": native_pts.tolist(),
+        "x": 820,
+        "y": 410,
+        "w": 240,
+        "h": 270,
+    }
+    prod_dir = _write_fsa_source_with_faces(
+        tmp_path / "prod", frame_hw=(1080, 1920), faces=[face]
+    )
+    output_dir = tmp_path / "out"
+
+    production_builder.build_manifest(prod_dir, output_dir)
+    sample = json.loads((output_dir / "manifest.json").read_text("utf-8"))["samples"][0]
+
+    crop = cv2.imread(sample["image"])
+    assert crop is not None and crop.shape[:2] == (256, 256)
+
+    lmk = np.load(output_dir / sample["landmarks"])
+    assert lmk.shape == (68, 2)
+    # Landmarks were remapped into the 256 crop frame, not left at native scale.
+    assert lmk.max() <= 256.0 and lmk.min() >= -8.0
+    assert lmk.max() > 64.0  # face fills the crop instead of a few native pixels
+    # Crop provenance points back at the native frame for split-safe grouping.
+    assert sample["metadata"]["original_image"].endswith("frame.jpg")
+    assert sample["normalizer"] > 1.0
+
+
+def test_production_manifest_preserves_mixed_68_and_98_source_schema(tmp_path):
+    pts68 = np.stack(
+        [np.linspace(820, 1010, 68), np.linspace(410, 640, 68)], axis=1
+    )
+    pts98 = np.stack(
+        [np.linspace(800, 1000, 98), np.linspace(400, 650, 98)], axis=1
+    )
+    faces = [
+        {"landmarks_xy": pts68.tolist(), "x": 800, "y": 390, "w": 230, "h": 270},
+        {"landmarks_xy": pts98.tolist(), "x": 790, "y": 380, "w": 230, "h": 280},
+    ]
+    prod_dir = _write_fsa_source_with_faces(
+        tmp_path / "prod", frame_hw=(1080, 1920), faces=faces
+    )
+    output_dir = tmp_path / "out"
+
+    metadata = production_builder.build_manifest(prod_dir, output_dir)
+    assert metadata["sample_count"] == 2
+    samples = json.loads((output_dir / "manifest.json").read_text("utf-8"))["samples"]
+    by_schema = {s["source_schema"]: s for s in samples}
+
+    assert set(by_schema) == {"2d_68", "2d_98"}
+    for source_schema, sample in by_schema.items():
+        # Both schemas project to the canonical 68 training target/head.
+        assert sample["target_schema"] == "2d_68"
+        assert sample["head_name"] == "landmarks_68"
+        assert sample["landmark_count"] == 68
+        assert np.load(output_dir / sample["landmarks"]).shape == (68, 2)
+
+    assert by_schema["2d_68"]["mapping_audit"]["status"] == "native"
+    assert by_schema["2d_98"]["mapping_audit"]["status"] == "audited"
+
+
 def test_resolve_parallel_budget_priority_and_cap(monkeypatch):
     monkeypatch.setattr(prepare.os, "cpu_count", lambda: 8)
 

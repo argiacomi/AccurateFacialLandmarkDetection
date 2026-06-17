@@ -36,8 +36,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.core.schema import normalize_landmarks
-from lib.datasets.build.core import _pose_condition_tags, _pose_metadata
+from lib.core.schema import (
+    head_name_for_schema,
+    normalize_landmarks,
+    point_count_for_schema,
+    projection_audit_for_schema,
+)
+from lib.datasets.build.core import (
+    _crop_sample_image,
+    _pose_condition_tags,
+    _pose_metadata,
+)
 from lib.io_utils import jsonable, write_json
 from lib.logging_utils import (
     Verbosity,
@@ -269,7 +278,15 @@ def _first_present(mapping: T.Mapping[str, T.Any], keys: T.Sequence[str]) -> T.A
     return None
 
 
-def _landmarks(face: T.Mapping[str, T.Any]) -> np.ndarray:
+def _landmarks(face: T.Mapping[str, T.Any]) -> tuple[np.ndarray, str]:
+    """Return ``(canonical_68_points, source_schema)`` for a Faceswap face.
+
+    Faceswap alignments legitimately mix 68- and 98-point faces. Both are mapped
+    to canonical 68 here (98 via the audited ``MAP_98_TO_68`` projection), but the
+    original source schema is returned so the manifest can record real provenance
+    instead of flattening every face to ``2d_68``.
+    """
+
     raw = _first_present(face, ("landmarks_xy", "landmarks", "landmarksXY", "landmark"))
     if raw is None:
         raise ValueError("face has no landmarks_xy")
@@ -293,7 +310,15 @@ def _landmarks(face: T.Mapping[str, T.Any]) -> np.ndarray:
         )
     if not np.all(np.isfinite(points)):
         raise ValueError("landmarks contain NaN or infinite values")
-    return np.ascontiguousarray(points, dtype=np.float32)
+    return np.ascontiguousarray(points, dtype=np.float32), source_schema
+
+
+def _points_bbox_xyxy(points: np.ndarray) -> list[float]:
+    """Tight landmark bounding box in the points' own coordinate frame."""
+
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+    return [float(mins[0]), float(mins[1]), float(maxs[0]), float(maxs[1])]
 
 
 def _bbox(face: T.Mapping[str, T.Any], points: np.ndarray) -> list[float]:
@@ -395,31 +420,60 @@ def build_manifest(
             if used_ids[sample_id] > 1:
                 sample_id = f"{sample_id}_{used_ids[sample_id]}"
             try:
-                points = _landmarks(face)
+                points, source_schema = _landmarks(face)
+                # Faceswap stores whole-frame landmarks against the native frame.
+                # Crop to a square 256 face (matching the quality-dataset crop
+                # policy) and remap the points into that crop, so the training
+                # loader sees a tight face instead of resizing the full frame.
+                crop_image, crop_points, crop_metadata = _crop_sample_image(
+                    output_dir=output_dir,
+                    dataset=dataset_name,
+                    sample_id=sample_id,
+                    image_path=image_path,
+                    points68=points,
+                    bbox_xyxy=_bbox(face, points),
+                    bbox_source="faceswap_fsa",
+                )
                 metadata = _metadata(
                     face,
                     frame_name=str(frame_name),
                     fsa_path=fsa_path,
                     face_index=face_index,
                 )
+                # Pose buckets are scale/translation invariant, so classify on the
+                # native-frame points to stay independent of crop rounding.
                 metadata.update(_pose_metadata(dataset_name, points, "2d_68", metadata))
+                metadata.update(crop_metadata)
                 condition = _runtime_bucket(metadata) or "unknown"
                 conditions = list(
                     dict.fromkeys((condition, *_pose_condition_tags(metadata)))
                 )
-                landmark_path = _write_landmarks(output_dir, sample_id, points)
+                landmark_path = _write_landmarks(output_dir, sample_id, crop_points)
+                target_schema = "2d_68"
+                projection = projection_audit_for_schema(
+                    source_schema, target_schema=target_schema
+                )
                 sample = {
                     "sample_id": sample_id,
                     "dataset": dataset_name,
                     "condition": condition,
                     "conditions": conditions,
-                    "source_schema": "2d_68",
-                    "image": str(image_path),
+                    "source_schema": source_schema,
+                    "target_schema": target_schema,
+                    "landmark_count": point_count_for_schema(target_schema),
+                    "head_name": head_name_for_schema(target_schema),
+                    "image": str(crop_image.resolve()),
                     "landmarks": landmark_path,
-                    "face_bbox": _bbox(face, points),
-                    "normalizer": _normalizer(face, points),
+                    "face_bbox": _points_bbox_xyxy(crop_points),
+                    "normalizer": _normalizer(face, crop_points),
                     "source": {"dataset": dataset_name, "source_id": sample_id},
                     "metadata": metadata,
+                    "mapping_audit": {
+                        "status": projection["status"],
+                        "source_schema": source_schema,
+                        "target_schema": target_schema,
+                        "projection_to_68": projection,
+                    },
                 }
             except Exception as err:  # noqa: BLE001
                 skipped_invalid_face += 1

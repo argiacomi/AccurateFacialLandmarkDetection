@@ -383,8 +383,12 @@ def _complete_production_sample_contract(sample: dict[str, T.Any]) -> None:
         or sample.get("image")
         or sample.get("sample_id")
     )
+    # production_validated mixes 68- and 98-point Faceswap faces; a 98-point
+    # source projected to canonical 68 is an audited projection, not a native
+    # match, so derive the status from the projection audit instead of assuming.
+    projection = projection_audit_for_schema(source_schema, target_schema=target_schema)
     mapping_audit = {
-        "status": "native",
+        "status": projection["status"],
         "source_schema": source_schema,
         "target_schema": target_schema,
         "projection_to_68": projection_audit_for_schema(source_schema),
