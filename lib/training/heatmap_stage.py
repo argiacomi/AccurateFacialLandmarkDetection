@@ -42,6 +42,7 @@ from lib.evaluation.split_safe import (
     write_eval_records_jsonl,
 )
 from lib.logging_utils import (
+    LOSS_LOG_PRECISION,
     Verbosity,
     configure_console_logging,
     fmt_count,
@@ -212,7 +213,7 @@ def _log_schema_head_details(loss_details) -> None:
         "train",
         "  heads | "
         f"counts {fmt_mapping(head_counts)} | "
-        f"contrib {fmt_mapping(head_losses)} | "
+        f"contrib {fmt_mapping(head_losses, precision=LOSS_LOG_PRECISION)} | "
         f"aux_valid {fmt_mapping(loss_details.get('auxiliary_valid_counts', {}))} | "
         f"aux_acc {fmt_mapping(loss_details.get('auxiliary_accuracy', {}))} | "
         f"vis_valid {fmt_mapping(loss_details.get('visibility_valid_counts', {}))} | "
@@ -883,8 +884,8 @@ def main():
                             f"e{int(epoch):03d} "
                             f"{int(batch_idx):06d}/{int(total_train_steps):06d} | "
                             f"{fmt_progress(batch_idx + 1, total_train_steps)} | "
-                            f"loss {fmt_num(loss.item(), 3)} | "
-                            f"{fmt_mapping(loss_components, precision=3, keys=_LOSS_COMPONENT_ORDER, omit_zero=True)}"
+                            f"loss {fmt_num(loss.item(), LOSS_LOG_PRECISION)} | "
+                            f"{fmt_mapping(loss_components, precision=LOSS_LOG_PRECISION, keys=_LOSS_COMPONENT_ORDER, omit_zero=True)}"
                         )
                         log_event(
                             "train",

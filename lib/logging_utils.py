@@ -74,6 +74,12 @@ _TAG_STYLES = {
     "error": "bold red",
 }
 
+#: Decimal precision for loss scalars/components on the console (the live
+#: progress bar and the per-batch ``[train]`` line). Loss values are small, so
+#: a coarser precision hides per-step movement. Structured logs
+#: (``runtime_metrics.jsonl``) always keep full float precision regardless.
+LOSS_LOG_PRECISION = 6
+
 
 def rich_available() -> bool:
     return Console is not None and Progress is not None
@@ -273,14 +279,14 @@ def start_training_progress(
 def _progress_scalar(value: T.Any) -> str:
     if value is None or _is_zero(value):
         return "-"
-    text = fmt_num(value, 3)
+    text = fmt_num(value, LOSS_LOG_PRECISION)
     return text[1:] if text.startswith("0.") else text
 
 
 def _progress_component_scalar(value: T.Any) -> str:
     if value is None or not _is_positive(value):
         return "-"
-    text = fmt_num(value, 3)
+    text = fmt_num(value, LOSS_LOG_PRECISION)
     return text[1:] if text.startswith("0.") else text
 
 
@@ -320,7 +326,7 @@ def update_training_progress(
         update["components"] = (
             fmt_mapping(
                 positive_components,
-                precision=3,
+                precision=LOSS_LOG_PRECISION,
                 keys=ordered_keys,
             )
             or "-"
@@ -610,6 +616,7 @@ def summarize_mapping(
 
 __all__ = [
     "LOG_LEVEL_NAMES",
+    "LOSS_LOG_PRECISION",
     "Verbosity",
     "configure_console_logging",
     "fmt_count",
