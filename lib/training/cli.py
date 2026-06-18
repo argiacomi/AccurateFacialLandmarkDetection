@@ -287,8 +287,12 @@ def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--bucket-targets",
-        default="anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
-        help="Comma-separated hard bucket target weights for domain-balanced sampling.",
+        default="",
+        help=(
+            "Comma-separated hard bucket target weights for domain-balanced "
+            "sampling. Leave blank to use the uniform defaults "
+            "(anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25)."
+        ),
     )
     parser.add_argument(
         "--dataset-targets", default="", help="Comma-separated dataset target weights."

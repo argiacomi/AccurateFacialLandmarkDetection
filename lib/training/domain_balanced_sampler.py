@@ -17,6 +17,13 @@ DEFAULT_BUCKET_TARGETS = {
     "profile_occlusion": 0.25,
 }
 
+# Canonical spec string for the default targets. Used when a blank
+# ``--bucket-targets`` is resolved for the resume contract so a blank invocation
+# hashes identically to one that named these same weights explicitly.
+DEFAULT_BUCKET_TARGETS_SPEC = ",".join(
+    f"{key}={value:g}" for key, value in DEFAULT_BUCKET_TARGETS.items()
+)
+
 
 BUCKET_ALIASES = {
     "normal": "anchor",

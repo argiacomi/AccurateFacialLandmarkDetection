@@ -80,6 +80,22 @@ def training_manifest_path_for_compat(args: T.Any) -> T.Any:
     )
 
 
+def resolve_bucket_targets_for_compat(value: T.Any) -> str:
+    """Resolve a bucket-target spec for the resume contract.
+
+    A blank spec means "use the uniform defaults", so it must hash identically to
+    an invocation that named those same weights. Recording the canonical default
+    spec for a blank value keeps a blank run resume-compatible with an explicit
+    one (and vice versa).
+    """
+    text = str(value or "").strip()
+    if text:
+        return text
+    from lib.training.domain_balanced_sampler import DEFAULT_BUCKET_TARGETS_SPEC
+
+    return DEFAULT_BUCKET_TARGETS_SPEC
+
+
 def build_training_compat_config_from_args(args: T.Any) -> dict[str, T.Any]:
     config: dict[str, T.Any] = {
         "manifest_sha256": file_sha256_or_none(training_manifest_path_for_compat(args)),
@@ -106,6 +122,10 @@ def build_training_compat_config_from_args(args: T.Any) -> dict[str, T.Any]:
 
     for key in sorted(STRING_COMPAT_KEYS):
         config[key] = str(getattr(args, key, ""))
+
+    config["bucket_targets"] = resolve_bucket_targets_for_compat(
+        config["bucket_targets"]
+    )
 
     config["heldout_dataset"] = [
         str(item) for item in list(getattr(args, "heldout_dataset", []) or [])
@@ -232,9 +252,8 @@ def build_pipeline_training_compat_config(
         "data_name": data_name,
         "eval_mode": str_opt("random_hash", "--eval-mode"),
         "split_policy": split_policy,
-        "bucket_targets": str_opt(
-            "anchor=0.25,occlusion=0.25,profile=0.25,profile_occlusion=0.25",
-            "--bucket-targets",
+        "bucket_targets": resolve_bucket_targets_for_compat(
+            str_opt("", "--bucket-targets")
         ),
         "dataset_targets": str_opt("", "--dataset-targets"),
         "schema_targets": str_opt("", "--schema-targets"),
