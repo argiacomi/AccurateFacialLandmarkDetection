@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from lib.evaluation.split_safe import EVAL_MODES, SPLIT_POLICIES
 from lib.training.config import (
@@ -10,9 +11,42 @@ from lib.training.config import (
     DEFAULT_ROLL_QUARTER_TURN_PROB,
 )
 
+EXPLICIT_ARG_DESTS_ATTR = "_explicit_arg_dests"
+
+
+def _explicit_optional_arg_dests(
+    parser: argparse.ArgumentParser, args: list[str]
+) -> frozenset[str]:
+    option_to_dest = {
+        option: action.dest
+        for action in parser._actions
+        for option in action.option_strings
+    }
+    explicit: set[str] = set()
+    for token in args:
+        if token == "--":
+            break
+        option = token.split("=", 1)[0]
+        dest = option_to_dest.get(option)
+        if dest:
+            explicit.add(dest)
+    return frozenset(explicit)
+
+
+class ExplicitArgParser(argparse.ArgumentParser):
+    def parse_known_args(self, args=None, namespace=None):
+        explicit_args = list(sys.argv[1:] if args is None else args)
+        namespace, extras = super().parse_known_args(args, namespace)
+        setattr(
+            namespace,
+            EXPLICIT_ARG_DESTS_ATTR,
+            _explicit_optional_arg_dests(self, explicit_args),
+        )
+        return namespace, extras
+
 
 def build_heatmap_stage_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = ExplicitArgParser()
     parser.add_argument("--root_folder", type=str, default="")
     parser.add_argument("--ckpt_folder", type=str, default="checkpoint")
     parser.add_argument("--batch_size", type=int, default="16")

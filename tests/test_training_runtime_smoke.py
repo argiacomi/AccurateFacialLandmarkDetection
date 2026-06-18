@@ -404,6 +404,27 @@ def test_heatmap_stage_cli_builder_exposes_schema_loss_and_resume_flags():
     assert args.roll_diagonal_prob == 0.2
 
 
+def test_heatmap_stage_cli_builder_tracks_explicit_arg_dests():
+    parser = build_heatmap_stage_arg_parser()
+
+    defaults = parser.parse_args([])
+    args = parser.parse_args(
+        [
+            "--allow-incompatible-resume",
+            "--lr=0.0003",
+            "--sched_step",
+            "25",
+            "--local-rank",
+            "0",
+        ]
+    )
+
+    assert defaults._explicit_arg_dests == frozenset()
+    assert {"allow_incompatible_resume", "lr", "sched_step", "local_rank"} <= set(
+        args._explicit_arg_dests
+    )
+
+
 def test_allow_missing_schema_heads_only_accepts_schema_extension_keys():
     net = torch.nn.Module()
     net.output_layers = torch.nn.ModuleList([torch.nn.Linear(1, 1)])
@@ -464,25 +485,30 @@ def test_save_training_checkpoint_writes_paired_weights_file(tmp_path):
     )
 
 
-def test_allow_incompatible_resume_reapplies_current_optimizer_scheduler_args():
-    old_lr = 0.0001
-    old_sched_step = 50
-    current_lr = 0.0003
-    current_sched_step = 25
+def _resume_checkpoint_with_optimizer_scheduler(*, lr: float, sched_step: int):
     checkpoint_model = torch.nn.Linear(2, 1)
     checkpoint_optimizer = torch.optim.AdamW(
-        checkpoint_model.parameters(), lr=old_lr, weight_decay=1e-3
+        checkpoint_model.parameters(), lr=lr, weight_decay=1e-3
     )
     checkpoint_scheduler = torch.optim.lr_scheduler.StepLR(
-        checkpoint_optimizer, old_sched_step, gamma=0.5
+        checkpoint_optimizer, sched_step, gamma=0.5
     )
-    checkpoint = {
+    return {
         "format": "cdvit-training-checkpoint-v1",
         "next_epoch": 3,
         "optimizer": checkpoint_optimizer.state_dict(),
         "scheduler": checkpoint_scheduler.state_dict(),
     }
 
+
+def test_allow_incompatible_resume_reapplies_explicit_optimizer_scheduler_args():
+    old_lr = 0.0001
+    old_sched_step = 50
+    current_lr = 0.0003
+    current_sched_step = 25
+    checkpoint = _resume_checkpoint_with_optimizer_scheduler(
+        lr=old_lr, sched_step=old_sched_step
+    )
     model = torch.nn.Linear(2, 1)
     optimizer = torch.optim.AdamW(model.parameters(), lr=current_lr, weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.StepLR(
@@ -493,6 +519,7 @@ def test_allow_incompatible_resume_reapplies_current_optimizer_scheduler_args():
         restore_rng=False,
         lr=current_lr,
         sched_step=current_sched_step,
+        _explicit_arg_dests=frozenset({"lr", "sched_step"}),
     )
 
     start_epoch, _, _ = train._restore_training_checkpoint(
@@ -512,6 +539,46 @@ def test_allow_incompatible_resume_reapplies_current_optimizer_scheduler_args():
     assert scheduler.step_size == current_sched_step
     assert scheduler.base_lrs == pytest.approx([current_lr])
     assert scheduler.get_last_lr() == pytest.approx([current_lr])
+
+
+def test_allow_incompatible_resume_keeps_checkpoint_values_for_default_args():
+    old_lr = 0.0001
+    old_sched_step = 50
+    default_lr = 0.0003
+    default_sched_step = 25
+    checkpoint = _resume_checkpoint_with_optimizer_scheduler(
+        lr=old_lr, sched_step=old_sched_step
+    )
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=default_lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, default_sched_step, gamma=0.5
+    )
+    args = argparse.Namespace(
+        allow_incompatible_resume=True,
+        restore_rng=False,
+        lr=default_lr,
+        sched_step=default_sched_step,
+        _explicit_arg_dests=frozenset(),
+    )
+
+    start_epoch, _, _ = train._restore_training_checkpoint(
+        checkpoint,
+        optimizer,
+        scheduler,
+        None,
+        None,
+        99999,
+        [],
+        args,
+    )
+
+    assert start_epoch == 3
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(old_lr)
+    assert optimizer.param_groups[0]["initial_lr"] == pytest.approx(old_lr)
+    assert scheduler.step_size == old_sched_step
+    assert scheduler.base_lrs == pytest.approx([old_lr])
+    assert scheduler.get_last_lr() == pytest.approx([old_lr])
 
 
 def test_pipeline_auto_resume_accepts_matching_full_checkpoint_metadata(tmp_path):

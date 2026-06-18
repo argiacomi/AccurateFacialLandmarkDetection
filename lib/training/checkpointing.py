@@ -26,6 +26,7 @@ from lib.training.checkpoint_compat import (
 )
 
 _CHECKPOINT_RNG_STATE_BY_RANK: dict[str, T.Any] | None = None
+_EXPLICIT_ARG_DESTS_ATTR = "_explicit_arg_dests"
 
 
 def _current_rank_string() -> str:
@@ -169,6 +170,35 @@ def _model_state(net: T.Any) -> dict[str, T.Any]:
     return model.state_dict()
 
 
+def _checkpoint_args_payload(args: T.Any) -> dict[str, T.Any]:
+    if not hasattr(args, "__dict__"):
+        return {}
+    return {
+        key: value
+        for key, value in vars(args).items()
+        if key != _EXPLICIT_ARG_DESTS_ATTR
+    }
+
+
+def _resume_arg_was_explicit(args: T.Any, name: str) -> bool:
+    explicit = getattr(args, _EXPLICIT_ARG_DESTS_ATTR, ()) or ()
+    return str(name) in {str(item) for item in explicit}
+
+
+def _sync_scheduler_lrs_from_optimizer(scheduler: T.Any) -> None:
+    if scheduler is None or not hasattr(scheduler, "optimizer"):
+        return
+    base_lrs = [
+        float(group.get("initial_lr", group.get("lr", 0.0)))
+        for group in scheduler.optimizer.param_groups
+    ]
+    scheduler.base_lrs = base_lrs
+    scheduler._last_lr = [
+        float(group.get("lr", base_lrs[index]))
+        for index, group in enumerate(scheduler.optimizer.param_groups)
+    ]
+
+
 def _reapply_incompatible_resume_training_args(
     optimizer: T.Any,
     scheduler: T.Any,
@@ -177,26 +207,20 @@ def _reapply_incompatible_resume_training_args(
     if not getattr(args, "allow_incompatible_resume", False):
         return
 
-    if optimizer is not None and hasattr(args, "lr"):
+    lr_overridden = False
+    if optimizer is not None and _resume_arg_was_explicit(args, "lr"):
         lr = float(args.lr)
         for group in optimizer.param_groups:
             group["lr"] = lr
             if "initial_lr" in group:
                 group["initial_lr"] = lr
+        lr_overridden = True
 
-    if scheduler is not None and hasattr(args, "sched_step"):
+    if scheduler is not None and _resume_arg_was_explicit(args, "sched_step"):
         if hasattr(scheduler, "step_size"):
             scheduler.step_size = int(args.sched_step)
-        if hasattr(scheduler, "optimizer"):
-            base_lrs = [
-                float(group.get("initial_lr", group.get("lr", 0.0)))
-                for group in scheduler.optimizer.param_groups
-            ]
-            scheduler.base_lrs = base_lrs
-            scheduler._last_lr = [
-                float(group.get("lr", base_lrs[index]))
-                for index, group in enumerate(scheduler.optimizer.param_groups)
-            ]
+    if lr_overridden:
+        _sync_scheduler_lrs_from_optimizer(scheduler)
 
 
 def _save_training_checkpoint(
@@ -227,7 +251,7 @@ def _save_training_checkpoint(
         "scaler": scaler.state_dict() if scaler is not None else None,
         "best_nme": best_nme,
         "best_record": list(best_record),
-        "args": vars(args),
+        "args": _checkpoint_args_payload(args),
         "manifest": normalize_path_for_compat(manifest_path),
         "manifest_sha256": file_sha256_or_none(manifest_path),
         "compat_config": build_training_compat_config_from_args(args),
