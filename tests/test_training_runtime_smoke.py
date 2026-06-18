@@ -464,6 +464,56 @@ def test_save_training_checkpoint_writes_paired_weights_file(tmp_path):
     )
 
 
+def test_allow_incompatible_resume_reapplies_current_optimizer_scheduler_args():
+    old_lr = 0.0001
+    old_sched_step = 50
+    current_lr = 0.0003
+    current_sched_step = 25
+    checkpoint_model = torch.nn.Linear(2, 1)
+    checkpoint_optimizer = torch.optim.AdamW(
+        checkpoint_model.parameters(), lr=old_lr, weight_decay=1e-3
+    )
+    checkpoint_scheduler = torch.optim.lr_scheduler.StepLR(
+        checkpoint_optimizer, old_sched_step, gamma=0.5
+    )
+    checkpoint = {
+        "format": "cdvit-training-checkpoint-v1",
+        "next_epoch": 3,
+        "optimizer": checkpoint_optimizer.state_dict(),
+        "scheduler": checkpoint_scheduler.state_dict(),
+    }
+
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=current_lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, current_sched_step, gamma=0.5
+    )
+    args = argparse.Namespace(
+        allow_incompatible_resume=True,
+        restore_rng=False,
+        lr=current_lr,
+        sched_step=current_sched_step,
+    )
+
+    start_epoch, _, _ = train._restore_training_checkpoint(
+        checkpoint,
+        optimizer,
+        scheduler,
+        None,
+        None,
+        99999,
+        [],
+        args,
+    )
+
+    assert start_epoch == 3
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(current_lr)
+    assert optimizer.param_groups[0]["initial_lr"] == pytest.approx(current_lr)
+    assert scheduler.step_size == current_sched_step
+    assert scheduler.base_lrs == pytest.approx([current_lr])
+    assert scheduler.get_last_lr() == pytest.approx([current_lr])
+
+
 def test_pipeline_auto_resume_accepts_matching_full_checkpoint_metadata(tmp_path):
     args, paths = _pipeline_args(tmp_path, "--epoch", "3")
     ckpt = pipeline._checkpoint_dir(args, paths) / "last_checkpoint.pt"

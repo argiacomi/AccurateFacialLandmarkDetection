@@ -169,6 +169,36 @@ def _model_state(net: T.Any) -> dict[str, T.Any]:
     return model.state_dict()
 
 
+def _reapply_incompatible_resume_training_args(
+    optimizer: T.Any,
+    scheduler: T.Any,
+    args: T.Any,
+) -> None:
+    if not getattr(args, "allow_incompatible_resume", False):
+        return
+
+    if optimizer is not None and hasattr(args, "lr"):
+        lr = float(args.lr)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
+            if "initial_lr" in group:
+                group["initial_lr"] = lr
+
+    if scheduler is not None and hasattr(args, "sched_step"):
+        if hasattr(scheduler, "step_size"):
+            scheduler.step_size = int(args.sched_step)
+        if hasattr(scheduler, "optimizer"):
+            base_lrs = [
+                float(group.get("initial_lr", group.get("lr", 0.0)))
+                for group in scheduler.optimizer.param_groups
+            ]
+            scheduler.base_lrs = base_lrs
+            scheduler._last_lr = [
+                float(group.get("lr", base_lrs[index]))
+                for index, group in enumerate(scheduler.optimizer.param_groups)
+            ]
+
+
 def _save_training_checkpoint(
     path: str | Path,
     net: T.Any,
@@ -241,6 +271,7 @@ def _restore_training_checkpoint(
         optimizer.load_state_dict(checkpoint["optimizer"])
     if sched_state:
         scheduler.load_state_dict(checkpoint["scheduler"])
+    _reapply_incompatible_resume_training_args(optimizer, scheduler, args)
     if scaler_state:
         scaler.load_state_dict(scaler_state)
     if ema is not None and ema_state:
