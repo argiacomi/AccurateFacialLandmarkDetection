@@ -17,13 +17,6 @@ DEFAULT_BUCKET_TARGETS = {
     "profile_occlusion": 0.25,
 }
 
-# Canonical spec string for the default targets. Used when a blank
-# ``--bucket-targets`` is resolved for the resume contract so a blank invocation
-# hashes identically to one that named these same weights explicitly.
-DEFAULT_BUCKET_TARGETS_SPEC = ",".join(
-    f"{key}={value:g}" for key, value in DEFAULT_BUCKET_TARGETS.items()
-)
-
 
 BUCKET_ALIASES = {
     "normal": "anchor",
@@ -188,7 +181,13 @@ def integer_targets(targets: dict[str, float], batch_size: int) -> list[str]:
 
 
 class DomainBalancedBatchSampler(Sampler[list[int]]):
-    """Yield batches balanced by hard bucket, dataset, and schema."""
+    """Yield batches balanced by hard bucket, dataset, and schema.
+
+    Each axis is independent: empty ``bucket_targets`` leaves the bucket axis
+    unconstrained (batches follow the natural bucket distribution) while dataset
+    and schema balancing still apply. When every axis is empty the sampler draws
+    from any group, so the caller should prefer a plain sampler in that case.
+    """
 
     def __init__(
         self,
@@ -208,9 +207,9 @@ class DomainBalancedBatchSampler(Sampler[list[int]]):
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         self.samples = samples
-        self.bucket_targets = _normalize_targets(
-            bucket_targets or DEFAULT_BUCKET_TARGETS, kind="bucket"
-        )
+        # Empty bucket_targets means "do not balance buckets"; integer_targets
+        # turns this into an all-"*" plan so the bucket axis is unconstrained.
+        self.bucket_targets = _normalize_targets(bucket_targets or {}, kind="bucket")
         self.batch_size = int(batch_size)
         self.seed = int(seed)
         self.rank = int(rank)

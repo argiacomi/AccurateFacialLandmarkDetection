@@ -161,6 +161,30 @@ def test_domain_balanced_sampler_infers_dataset_and_schema_targets():
     assert sampler.resolved_targets()["schema"] == {"2d_68": 1.0, "2d_98": 1.0}
 
 
+def test_blank_bucket_targets_disable_bucket_axis_only():
+    samples = [
+        _sample("300W", "2d_68", "anchor"),
+        _sample("300W", "2d_68", "anchor"),
+        _sample("300W", "2d_68", "anchor"),
+        _sample("WFLW", "2d_98", "profile"),
+    ]
+    sampler = DomainBalancedBatchSampler(
+        samples,
+        bucket_targets={},
+        batch_size=4,
+        seed=5,
+    )
+
+    resolved = sampler.resolved_targets()
+    # Bucket axis is unconstrained while dataset/schema balancing still applies.
+    assert resolved["bucket"] == {}
+    assert resolved["dataset"] == {"w300": 1.0, "wflw": 1.0}
+    assert resolved["schema"] == {"2d_68": 1.0, "2d_98": 1.0}
+    # A disabled axis reports no missing targets and still fills the batch.
+    assert sampler.last_epoch_diagnostics["missing_targets"]["bucket"] == []
+    assert len(next(iter(sampler))) == 4
+
+
 def test_domain_balanced_sampler_falls_back_for_sparse_targets():
     samples = [
         _sample("wflw", "2d_98", "profile"),

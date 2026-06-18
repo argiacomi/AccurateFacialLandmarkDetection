@@ -16,7 +16,6 @@ from lib.training.data import (
     schema_aware_collate,
 )
 from lib.training.domain_balanced_sampler import (
-    DEFAULT_BUCKET_TARGETS,
     DomainBalancedBatchSampler,
     parse_target_spec,
     parse_target_spec_for_kind,
@@ -148,26 +147,37 @@ def build_training_loaders(
             **dataloader_kwargs(args, eval_loader=True),
         )
 
-    if args.domain_balanced_sampling and schema_manifest:
+    bucket_targets = parse_target_spec(args.bucket_targets)
+    dataset_targets = parse_target_spec_for_kind(args.dataset_targets, kind="dataset")
+    schema_targets = parse_target_spec_for_kind(args.schema_targets, kind="schema")
+    auto_balance_datasets = bool(getattr(args, "auto_dataset_balancing", True))
+    auto_balance_schemas = bool(
+        getattr(args, "auto_schema_balancing", True) and schema_aware_training
+    )
+    # Domain-balanced sampling needs at least one active axis. With blank bucket
+    # targets and dataset/schema balancing disabled, every axis is unconstrained
+    # and the sampler would just be a costlier, group-uniform restatement of
+    # DistributedSampler, so fall back to the plain sampler in that case.
+    balancing_active = bool(
+        bucket_targets
+        or dataset_targets
+        or schema_targets
+        or auto_balance_datasets
+        or auto_balance_schemas
+    )
+
+    if args.domain_balanced_sampling and schema_manifest and balancing_active:
         train_sampler = DomainBalancedBatchSampler(
             train_dataset.samples,
-            bucket_targets=parse_target_spec(
-                args.bucket_targets, DEFAULT_BUCKET_TARGETS
-            ),
-            dataset_targets=parse_target_spec_for_kind(
-                args.dataset_targets, kind="dataset"
-            ),
-            schema_targets=parse_target_spec_for_kind(
-                args.schema_targets, kind="schema"
-            ),
+            bucket_targets=bucket_targets,
+            dataset_targets=dataset_targets,
+            schema_targets=schema_targets,
             batch_size=args.batch_size,
             seed=args.seed,
             rank=rank,
             world_size=world_size,
-            auto_balance_datasets=bool(getattr(args, "auto_dataset_balancing", True)),
-            auto_balance_schemas=bool(
-                getattr(args, "auto_schema_balancing", True) and schema_aware_training
-            ),
+            auto_balance_datasets=auto_balance_datasets,
+            auto_balance_schemas=auto_balance_schemas,
         )
         if rank == 0:
             resolved_targets = train_sampler.resolved_targets()
